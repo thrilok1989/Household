@@ -44,6 +44,17 @@ Forward from the oldest row, in bounded windows, oldest first:
 Every run appends to `retention_log` — table, policy, cutoff, rows before,
 rows removed, and whether it was a preview. A deletion with no record of what
 it deleted is indistinguishable from data loss.
+
+## This module is the preview; `pg_cron` is the job
+
+`sql/034_retention_cron.sql` carries the same policies into the database, where
+a scheduled purge runs without the app being open and deletes next to the rows
+rather than over HTTP. **The seed there is generated from `POLICIES` below**,
+and a test asserts the two match exactly — so change a window here and
+regenerate; hand-editing the SQL fails the build.
+
+Once cron is scheduled, `ENABLED` stays `False` and this module's job is the
+preview panel. See `docs/AUDIT_SUPABASE_STORAGE.md`.
 """
 
 from __future__ import annotations
@@ -57,6 +68,13 @@ from typing import Any, Dict, List, Optional, Tuple
 #:
 #: Before flipping it: run a preview, read the `rows_over` column, and satisfy
 #: yourself that every number is one you are willing to lose. There is no undo.
+#:
+#: **Leave it False if you have scheduled the `pg_cron` job** in
+#: `sql/034_retention_cron.sql`. That is the better home for this work — it runs
+#: whether or not anyone has the dashboard open, and it deletes next to the rows
+#: instead of over HTTP. Two schedulers purging the same tables is not twice as
+#: safe; it is two processes racing on the same rows. The preview below keeps
+#: working either way.
 ENABLED = False
 
 #: Rows are removed in windows this wide, oldest first.

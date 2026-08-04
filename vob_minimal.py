@@ -13842,6 +13842,13 @@ def _render_main_analyzer():
     # ── data retention: what would go, before anything goes ─────────────
     _render_retention_panel(st, db)
 
+    # ── storage: which table the bytes are actually in ──────────────────
+    try:
+        from db.storage_audit import render as _render_storage
+        _render_storage(st, db)
+    except Exception:
+        pass
+
     access_token = st.session_state.get('_dhan_token_override') or DHAN_ACCESS_TOKEN
     api = DhanAPI(access_token, DHAN_CLIENT_ID)
 
