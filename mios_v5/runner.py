@@ -379,6 +379,18 @@ def _price_metrics(session_state, spot, mp, mf) -> Dict[str, Any]:
                 ratio = atr / base
                 out["atr_state"] = ("EXPANDING" if ratio >= 1.25 else
                                     "COMPRESSING" if ratio <= 0.8 else "STEADY")
+            # Published so consumers outside the pipeline can read the ONE ATR
+            # rather than computing a second one. Stage 74's cluster tolerance
+            # is volatility-adaptive and needs this; `day_metrics` lives on the
+            # runner's internal `raw` and is not reachable from the app.
+            try:
+                session_state["_atr"] = {
+                    "atr": out["atr"], "atr_pct": out.get("atr_pct"),
+                    "atr_state": out.get("atr_state"), "period": 14,
+                    "source": "Stage 00 — runner._price_metrics",
+                }
+            except Exception:
+                pass
             day_hi, day_lo = float(hi.max()), float(lo.min())
             if spot and day_hi > day_lo:
                 out["day_range_pct"] = round(100.0 * (day_hi - day_lo) / spot, 3)
