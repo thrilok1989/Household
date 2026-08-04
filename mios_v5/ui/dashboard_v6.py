@@ -26,7 +26,7 @@ cycle trains the eye to skip it.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..final_read import build_final_read, section
 from ..sr_intel import build_level_intel, rank_levels
@@ -208,6 +208,13 @@ def _trading_screen(st, fr: Dict[str, Any], state) -> None:
     # on a laptop, and this screen exists to execute on.
     _opportunity(st, fr)
 
+    # ── Stage 71.8 — is the strike the trader picked worth trading? ──
+    # Directly under 71.7, because the two are one question asked twice: 71.7
+    # names a side, 71.8 grades the strike on it. Reading the side without the
+    # strike grade is how a correct direction gets traded through an illiquid
+    # option.
+    _strike_validation(st, fr)
+
     _terminal_chart(st, fr, call_tag, put_tag, dom)
 
     # ── market facts + the V5 ‖ V6 divergence ──
@@ -286,8 +293,46 @@ def _opportunity(st, fr: Dict[str, Any]) -> None:
         matrix = build_matrix(fr, native)
         matrix = enrich(matrix, fr, _producer_reads(fr, native),
                         previous=st.session_state.get("_opportunity_prev"))
-        render_opportunity_panel(st, matrix)
+
+        # ⚡ Stage 71.7 — Premium Energy & Spike, folded into Stage 71 rather
+        # than sitting in its own section. 71 ranks the horizons and names a
+        # side; 71.7 says whether that premium is actually being traded. Split
+        # apart, the ranking gets read without the confirmation.
+        #
+        # `leg_rows` and `leg_totals` are passed in: `premium_energy` may not
+        # touch session_state, the same rule this module already follows for
+        # `native_reads`. The glyph rows carry DIRECTION; `_atm_leg_ltf_delta`
+        # carries the CBV/CSV/CVD volumes the spec makes mandatory, and the two
+        # are different questions about the same legs. Stability is read off
+        # `matrix` so it is not computed twice.
+        premium = None
+        try:
+            from ..premium_energy import build as _pe_build
+            _legs = (st.session_state.get("_leg_bias_cache") or (None, None))[0]
+            # `sid_…` duplicates of every leg live in the same store so the
+            # render loop can find an entry by either key; summing both would
+            # count each leg's volume twice.
+            _totals = [(tag, tot) for tag, tot
+                       in (st.session_state.get("_atm_leg_ltf_delta") or {}).items()
+                       if not str(tag).startswith("sid_")]
+            premium = _pe_build(fr, leg_rows=_legs, matrix=matrix,
+                                leg_totals=_totals,
+                                previous=st.session_state.get("_premium_energy_prev"))
+        except Exception as _pe_err:
+            st.caption(f"Premium Energy unavailable: {_pe_err}")
+
+        render_opportunity_panel(st, matrix, premium)
+        # this cycle's matrix, for Stage 71.95. `_prev` is next cycle's
+        # rotation baseline — the same object in two roles, named apart.
+        st.session_state["_opportunity_matrix"] = matrix
         st.session_state["_opportunity_prev"] = matrix
+        if premium is not None:
+            # `_premium_energy` is THIS cycle's, which Stage 71.8 reads.
+            # `_premium_energy_prev` is the rotation/shift baseline for the
+            # NEXT cycle. One object, two roles, and naming them the same made
+            # 71.8 look like it was validating against a stale read.
+            st.session_state["_premium_energy"] = premium
+            st.session_state["_premium_energy_prev"] = premium
     except Exception as err:
         # advisory panel — it may never take the execution screen down with it
         st.caption(f"Trade Opportunity Matrix unavailable: {err}")
@@ -324,6 +369,242 @@ def _leg_reads(st, fr: Dict[str, Any]):
             money_flow=_leg_money_flow(st, tag, _row(tag)))
 
     return _one("CE", call_tag), _one("PE", put_tag), call_tag, put_tag
+
+
+def _strike_ladder(st, fr: Dict[str, Any]) -> Tuple[List[float], Optional[float]]:
+    """The ATM±3 strikes the picker offers, and the ATM itself.
+
+    Taken from `_cockpit_ctx`, which `_publish_atm_legs` fills with security ids
+    for exactly this range. Using the ids rather than the raw chain means the
+    picker can only offer strikes the app can actually fetch candles for — a
+    dropdown entry with no leg behind it would validate against nothing.
+    """
+    ctx = st.session_state.get("_cockpit_ctx") or {}
+    atm, gap = _num(ctx.get("atm"), None), _num(ctx.get("gap"), None)
+    if atm is None:
+        return [], None
+    step = gap or 50.0
+    return [atm + k * step for k in (-3, -2, -1, 0, 1, 2, 3)], atm
+
+
+def _strike_selection(st, fr: Dict[str, Any]) -> Dict[str, Any]:
+    """The trader's chosen CALL and PUT strike, defaulting to ATM.
+
+    Held in `session_state` so it survives every rerun — a picker that reset to
+    ATM on each 20-second refresh would be unusable. The ATM itself drifts
+    through the day, so a stored strike that has fallen outside the ±3 window is
+    dropped back to ATM rather than kept: validating a strike the app no longer
+    fetches would report on stale candles.
+
+    ⚪ Not persisted to Supabase. `sql/022_vob_app_state.sql` exists and its
+    writer was removed in the V6 reduction, so a selection survives reruns but
+    not a restart. Declared rather than half-built.
+    """
+    ladder, atm = _strike_ladder(st, fr)
+    if not ladder:
+        return {}
+    store = st.session_state.setdefault("_selected_strikes", {})
+    picked: Dict[str, Any] = {}
+    cols = st.columns([1, 1, 3])
+    for col, side in ((cols[0], "CALL"), (cols[1], "PUT")):
+        cur = _num(store.get(side), None)
+        if cur is None or not any(abs(cur - s) < 0.5 for s in ladder):
+            cur = atm
+        idx = min(range(len(ladder)), key=lambda i: abs(ladder[i] - cur))
+        with col:
+            choice = st.selectbox(
+                f"{side} strike", ladder, index=idx,
+                format_func=lambda v: (f"{v:.0f}" if abs(v - atm) < 0.5
+                                       else f"{v:.0f}  ({v - atm:+.0f})"),
+                key=f"_strike_pick_{side}")
+        store[side] = float(choice)
+        picked[side] = float(choice)
+    return picked
+
+
+def _leg_frame(st, tag):
+    """The selected leg's own candles, or `None`.
+
+    RVOL and Volume Climax are the only two Premium Structure reads that need a
+    raw series — the audit found `avg_vol_1m` computed and discarded in two
+    places, and nothing published it.
+    """
+    dfs = st.session_state.get("_atm_leg_dfs") or {}
+    for key in _leg_key_variants(st, tag):
+        frame = dfs.get(key)
+        if frame is not None and not getattr(frame, "empty", True):
+            return frame
+    return None
+
+
+def _leg_reads_for(st, selected: Dict[str, Any]) -> Dict[Any, Dict[str, Any]]:
+    """Each selected strike's Premium Structure, keyed `(side, strike)`.
+
+    This function is the *extraction* half of the contract: it pulls finished
+    engine output out of session_state and hands it to
+    `premium_structure.analyse`, which may touch neither. Stage 71.8 then reads
+    the structure rather than deriving one — one owner for the premium's
+    structure, which is why Premium Structure exists.
+
+    A wing strike outside the ATM±1 fetch has no leg entry, so its structure
+    reports `UNKNOWN` rather than borrowing the ATM's. Substituting a
+    neighbour's levels would grade the wrong option with nothing on screen to
+    say so.
+    """
+    from ..premium_structure import analyse as _ps_analyse
+
+    out: Dict[Any, Dict[str, Any]] = {}
+    for side, strike in (selected or {}).items():
+        s = _num(strike, None)
+        if s is None:
+            continue
+        code = "CE" if side == "CALL" else "PE"
+        tag = f"{code} {s:.0f}"
+        frame = _leg_frame(st, tag)
+        ltp = None
+        candles = None
+        vpfr = mfp = ignition = None
+        if frame is not None:
+            try:
+                ltp = float(frame["close"].iloc[-1])
+                candles = frame.tail(60).to_dict("records")
+            except Exception:
+                candles = None
+            # VPFR is published for ATM±1 only, so a wing strike needs it built
+            # here — from the app's own `compute_vpfr`, the one POC owner the
+            # audit chose. `premium_structure` receives the result and computes
+            # no profile of its own.
+            builders = st.session_state.get("_premium_builders") or {}
+            for key, target in (("vpfr", "vpfr"), ("mfp", "mfp"),
+                                ("ignition", "ignition")):
+                fn = builders.get(key)
+                if not fn:
+                    continue
+                try:
+                    val = fn(frame)
+                except Exception:
+                    val = None
+                if target == "vpfr":
+                    vpfr = val
+                elif target == "mfp":
+                    mfp = val
+                else:
+                    ignition = val
+
+        row = next((r for r in ((st.session_state.get("_leg_bias_cache")
+                                 or ([], None))[0] or [])
+                    if str(r.get("Leg", "")).endswith(f"{code} {s:.0f}")), {})
+        absorb = {"🟢": "bull", "🔴": "bear"}.get(
+            str(row.get("Absorb") or "").strip()[:1])
+
+        out[(side, s)] = {
+            "structure": _ps_analyse(
+                sr=_leg_store(st, "_atm_leg_sr_behavior", tag) or {},
+                vob=_leg_store(st, "_atm_leg_vob_volume", tag) or [],
+                vidya=_leg_store(st, "_atm_leg_vidya", tag) or {},
+                flow=_leg_store(st, "_atm_leg_ltf_delta", tag) or {},
+                vpfr=vpfr, mfp=mfp, ignition=ignition,
+                candles=candles, absorb=absorb, ltp=ltp),
+        }
+    return out
+
+
+def _strike_validation(st, fr: Dict[str, Any]) -> None:
+    """Stage 71.8 — the strike picker and its validation.
+
+    Every input arrives as a parameter, the rule `opportunity.py` and
+    `premium_energy.py` already follow: the panel extracts from session_state,
+    the stage interprets. Stage 71.7's finished output is passed straight in so
+    71.8 re-derives none of it.
+    """
+    try:
+        from ..strike_validation import build as _sv_build
+        from .strike_validation_panel import render_strike_validation
+
+        selected = _strike_selection(st, fr)
+        if not selected:
+            st.caption("Strike picker unavailable — the ATM ladder has not "
+                       "been published yet.")
+            return
+
+        summary = ((st.session_state.get("_cached_option_data") or {})
+                   .get("df_summary"))
+        rows = (summary.to_dict("records")
+                if summary is not None and not getattr(summary, "empty", True)
+                else [])
+
+        # built once and consumed twice — by the validation below and by the
+        # chart overlay. Analysing the same leg in two places would be the
+        # duplication Premium Structure exists to end.
+        leg_reads = _leg_reads_for(st, selected)
+
+        data = _sv_build(
+            fr,
+            premium=st.session_state.get("_premium_energy"),
+            chain_rows=rows,
+            selected=selected,
+            leg_reads=leg_reads,
+            spot=_spot_now(st, fr))
+        render_strike_validation(st, data)
+        st.session_state["_strike_validation"] = data
+
+        # Built once and consumed three times — by Stage 71.85 below, by the
+        # context, and by the chart overlay.
+        _structures = {s: v["structure"]
+                       for (s, _k), v in (leg_reads or {}).items()
+                       if isinstance(v, dict) and v.get("structure")}
+
+        # ── Stage 71.85 — Premium LTP Behaviour ────────────────────────
+        # Runs between 71.8 and the context, which is the only place it can:
+        # it consumes the structures built immediately above and its output is
+        # a context root. Each side is analysed alone — the call takes one
+        # premium and never sees the other.
+        try:
+            from ..premium_behaviour import build as _pb_build
+            _behaviour = _pb_build(
+                structure=_structures,
+                energy=st.session_state.get("_premium_energy"),
+                fr=fr, validation=data)
+        except Exception as _pb_err:
+            _behaviour = None
+            st.caption(f"Premium Behaviour unavailable: {_pb_err}")
+        st.session_state["_premium_behaviour"] = _behaviour
+
+        # ── Stage 71.95 — the Unified Trading Context ──────────────────
+        # Assembled here because this is the last point in the cycle where all
+        # six roots exist: `final_read` from the pass, the matrix and 71.7 from
+        # `_opportunity`, 71.8 plus the structures from just above, and 71.85
+        # from immediately here. Building it earlier would freeze a context
+        # missing half its fields.
+        #
+        # Nothing renders it. It exists so Stage 72 reads one object instead of
+        # thirty, and every value in it names the stage that produced it.
+        try:
+            from ..trading_context import build as _ctx_build
+            st.session_state["_trading_context"] = _ctx_build(
+                fr=fr, matrix=st.session_state.get("_opportunity_matrix"),
+                premium=st.session_state.get("_premium_energy"),
+                validation=data,
+                structure=_structures,
+                behaviour=_behaviour,
+                cycle=st.session_state.get("_render_seq"))
+        except Exception as _ctx_err:
+            st.session_state["_trading_context"] = None
+            st.caption(f"Trading Context unavailable: {_ctx_err}")
+        # the chart overlay reads these; published here so the structure is
+        # built once per cycle and consumed by the validation, Stage 71.85 and
+        # the chart, rather than analysed three times
+        st.session_state["_premium_structures"] = {
+            k: v["structure"] for k, v in (leg_reads or {}).items()
+            if isinstance(v, dict) and v.get("structure")}
+        # Principle 12: `premium.behaviour` is an eleventh weight in Stage 72's
+        # entry score, so it moves decisions — and a value that moves decisions
+        # must be inspectable somewhere.
+        from .premium_behaviour_panel import render_premium_behaviour
+        render_premium_behaviour(st, _behaviour)
+    except Exception as err:
+        # advisory panel — it may never take the execution screen down with it
+        st.caption(f"Strike Validation unavailable: {err}")
 
 
 def _command_center(st, fr: Dict[str, Any]) -> None:
@@ -519,6 +800,35 @@ def _leg_levels(st, tag) -> Dict[str, Any]:
         v = _num(src, None)
         if v is not None and v > 0:
             out[key] = v
+
+    # ── Premium Structure overlays, on the chart that already exists ──
+    # POC / HVN / LVN and the structure's own support and resistance, drawn on
+    # the leg panel by the renderer that already draws the leg's levels. No
+    # second chart, and nothing computed here — the values come from
+    # `premium_structure.analyse`, which the strike validation pass already ran.
+    #
+    # Structure levels do not overwrite the S/R behaviour level above: where
+    # both exist the behaviour level is the one price is reacting to *now*, and
+    # the structure's is where the zone sits.
+    for (_side, _strike), read in (st.session_state.get("_premium_structures")
+                                   or {}).items():
+        if not str(tag).endswith(f"{'CE' if _side == 'CALL' else 'PE'} "
+                                 f"{_strike:.0f}"):
+            continue
+        for key, val in (("poc", (read.get("profile") or {}).get("vp_poc")),
+                         ("support", read.get("support")),
+                         ("resistance", read.get("resistance"))):
+            v = _num(val, None)
+            if v is not None and v > 0:
+                out.setdefault(key, v)
+        # one node each — the strongest HVN and the emptiest LVN. Drawing four
+        # of each turns the panel into a ladder and hides the price.
+        for key in ("hvn", "lvn"):
+            nodes = read.get(key) or []
+            v = _num((nodes[0] or {}).get("price"), None) if nodes else None
+            if v is not None and v > 0:
+                out[key] = v
+        break
     return out
 
 
@@ -964,6 +1274,11 @@ def _intelligence(st, fr: Dict[str, Any], state) -> None:
                     unsafe_allow_html=True)
         st.markdown(energy_panel_html(fr.get("energy_read")),
                     unsafe_allow_html=True)
+        # Stage 71.7 (Premium Energy) used to render here, below Market Energy.
+        # It now lives inside the Stage 71 panel on the Trading tab, because the
+        # horizon ranking and the premium confirmation have to be read together.
+        # Rendering it in both places would give the workstation two copies of
+        # the same numbers — the drift the Stage 71 stack exists to prevent.
         ev = state.get("stage53_evidence")
         if ev is not None and ev.ok:
             render_family_panel(ev.data)

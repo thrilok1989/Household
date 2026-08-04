@@ -149,12 +149,19 @@ def _up(v) -> str:
 #  1 · Opportunity type
 # ══════════════════════════════════════════════════════════════════════
 
-def opportunity_type(fr: Dict[str, Any], h: Horizon) -> Dict[str, Any]:
+def opportunity_type(fr: Dict[str, Any]) -> Dict[str, Any]:
     """What KIND of trade this is — executed evidence first.
 
     Stage 42 wins where it has fired, because a confirmed breakdown is a thing
     that happened; Stage 48's state is a description of the tape. Same tier
     rule the whole system is built on.
+
+    **Market-level by construction.** Every branch reads `fr` alone: a Reversal
+    is a property of the tape, not of a holding period, so all five horizons
+    share one type. This used to take a `Horizon` it never referenced, which
+    implied a per-horizon read that was not happening — the parameter is gone
+    rather than left to mislead. The Type column repeating down the table is
+    therefore correct, not a bug; `MARKET_LEVEL_FIELDS` records it.
     """
     dc = _up((fr.get("day_classification") or {}).get("type"))
     # Two day types are facts rather than votes (Stage 68's own rule), and both
@@ -179,6 +186,13 @@ def opportunity_type(fr: Dict[str, Any], h: Horizon) -> Dict[str, Any]:
         return _typed("DEALER_MOVE", "Stage 11 dealer positioning")
 
     return _typed(UNKNOWN, "no reaction, market state or dealer read available")
+
+
+#: Fields that are one market read shown on every horizon row. Repetition down
+#: the table is correct for these — a Reversal is a property of the tape, not of
+#: a holding period. Recorded so "all five rows say the same thing" can be
+#: checked against intent instead of assumed to be a bug.
+MARKET_LEVEL_FIELDS = ("type",)
 
 
 def _typed(t: str, source: str) -> Dict[str, Any]:
@@ -443,7 +457,11 @@ def rotation(row: Dict[str, Any],
     was = prev_row.get("side")
 
     if was and now and was == now:
-        return {"rotation": "CONTINUATION", "label": f"{now} → {now}",
+        # The label carries the SIDES; the panel prefixes an arrow for the KIND
+        # (`_ROTATION_ARROW["CONTINUATION"] = "→"`). Returning "CALL → CALL" made
+        # the row read "→ CALL → CALL" — the arrow printed twice, and nothing
+        # having rotated dressed up as a movement. One side, once.
+        return {"rotation": "CONTINUATION", "label": f"{now}",
                 "source": "same side as the previous cycle"}
     if was and now and was != now:
         return {"rotation": "ROTATION", "label": f"{was} → {now}",
@@ -624,7 +642,7 @@ def enrich(matrix: Dict[str, Any], final_read: Optional[Dict[str, Any]] = None,
         mat = maturity(fr)
         q = quality(fr, row)
         rk = risk(fr, h)
-        typ = _mark_counter_trend(opportunity_type(fr, h), row)
+        typ = _mark_counter_trend(opportunity_type(fr), row)
         row["intel"] = {
             "type": typ,
             "quality": q,

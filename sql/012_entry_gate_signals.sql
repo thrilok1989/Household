@@ -52,4 +52,6 @@ CREATE INDEX IF NOT EXISTS idx_entry_gate_day
     ON entry_gate_signals (trading_day DESC, ts DESC);
 
 -- optional purge (keep ~1 year)
+-- ⚙️ NOW EXECUTED: db/retention.py reads this policy and applies it (see POLICIES).
+--    The line below stays as the declaration of record; do not run it by hand.
 -- DELETE FROM entry_gate_signals WHERE trading_day < CURRENT_DATE - INTERVAL '365 days';

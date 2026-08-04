@@ -23,4 +23,6 @@ CREATE INDEX IF NOT EXISTS idx_engine_errors_engine
     ON engine_errors (engine, ts DESC);
 
 -- optional purge (keep ~30 days)
+-- ⚙️ NOW EXECUTED: db/retention.py reads this policy and applies it (see POLICIES).
+--    The line below stays as the declaration of record; do not run it by hand.
 -- DELETE FROM engine_errors WHERE trading_day < CURRENT_DATE - INTERVAL '30 days';

@@ -115,6 +115,18 @@ class _DateVec(list):
 
     __hash__ = None
 
+    @property
+    def iloc(self):
+        """`.iloc` positional access, the way a pandas accessor has it.
+
+        Its absence is why this fake reported a PASS for the old whole-frame
+        fallback after the fallback had been changed: `today_slice` reached for
+        `day.iloc[-1]`, the fake raised AttributeError, the `except` returned the
+        frame whole, and the assertion matched for entirely the wrong reason. A
+        fake that is missing the attribute under test cannot fail.
+        """
+        return list(self)
+
 
 class _FakeDT:
     def __init__(self, dates):
@@ -166,11 +178,18 @@ def test_today_slice_drops_previous_sessions():
     assert len(out) == 3
 
 
-def test_today_slice_keeps_the_whole_frame_when_today_has_no_rows():
-    """Pre-open, or a stale cache — a frame with nothing for today is more
-    useful shown whole than shown blank."""
-    df = _frame([2, 1])
-    assert len(clock.today_slice(df)) == 2
+def test_today_slice_falls_back_to_the_last_session_not_the_whole_window():
+    """Pre-open, on a holiday, or against a stale cache, wall-clock today matches
+    nothing. Returning the frame WHOLE is what made the terminal draw three days
+    of candles — and it also let a three-day high/low be reported as today's
+    range, the exact error this function exists to prevent.
+
+    One real session satisfies the same "never blank" intent without lying.
+    """
+    df = _frame([2, 1])                      # nothing for today
+    out = clock.today_slice(df)
+    assert len(out) == 1, "must narrow to the most recent session present"
+    assert out[df._col].dt.date[0] == (clock.now() - timedelta(days=1)).date()
 
 
 def test_today_slice_is_safe_on_junk():
@@ -251,3 +270,73 @@ if __name__ == "__main__":
     for fn in fns:
         fn()
     print(f"clock tests passed ({len(fns)})")
+
+
+# ── today_slice against REAL pandas ─────────────────────────────────────
+# The `_FakeDF` above is convenient but it is a fake: it once reported a pass
+# for a fallback that had already been changed, because it lacked the attribute
+# the new code path reached for. These drive the real thing.
+
+def _real(days, bars=5):
+    import pandas as pd
+    frames = []
+    for d in days:
+        idx = pd.date_range(f"{d} 09:15", periods=bars, freq="5min",
+                            tz="Asia/Kolkata")
+        frames.append(pd.DataFrame({"datetime": idx, "close": 100.0}))
+    return pd.concat(frames, ignore_index=True)
+
+
+def test_real_frame_with_no_rows_for_today_yields_exactly_one_session():
+    """The reported bug: the terminal drew three days. `days_back` fetches a
+    window, wall-clock today matched nothing, and the whole window came back."""
+    df = _real(["2026-07-27", "2026-07-28", "2026-07-29"])
+    out = clock.today_slice(df)
+    assert out["datetime"].dt.date.nunique() == 1
+    assert len(out) == 5
+
+
+def test_real_frame_keeps_the_most_recent_session_not_the_oldest():
+    df = _real(["2026-07-27", "2026-07-29"])
+    out = clock.today_slice(df)
+    assert str(out["datetime"].iloc[0].date()) == "2026-07-29"
+
+
+def test_a_real_frame_that_does_contain_today_is_narrowed_to_today():
+    import pandas as pd
+    today = clock.now().date()
+    yday = today - timedelta(days=1)
+    df = _real([str(yday), str(today)])
+    out = clock.today_slice(df)
+    assert out["datetime"].dt.date.nunique() == 1
+    assert out["datetime"].iloc[0].date() == today
+
+
+def test_a_real_single_session_frame_is_unchanged():
+    df = _real(["2026-07-29"])
+    assert len(clock.today_slice(df)) == len(df)
+
+
+def test_the_terminal_chart_draws_one_session_from_a_three_day_frame():
+    """End to end — `terminal_chart` applies `today_slice` to all three panels,
+    so the x-axis span is the real regression surface."""
+    import pandas as pd
+    from mios_v5.ui.terminal_chart import terminal_chart
+    days = ["2026-07-27", "2026-07-28", "2026-07-29"]
+    frames = []
+    for d in days:
+        idx = pd.date_range(f"{d} 09:15", periods=40, freq="5min",
+                            tz="Asia/Kolkata")
+        frames.append(pd.DataFrame({
+            "datetime": idx, "open": 100.0, "high": 105.0,
+            "low": 95.0, "close": 100.0, "volume": 1000}))
+    multi = pd.concat(frames, ignore_index=True)
+    fig, _notes = terminal_chart(multi, multi, multi)
+    xs = []
+    for tr in fig.data:
+        x = getattr(tr, "x", None)
+        if x is not None and len(x):
+            xs.extend(pd.Timestamp(v) for v in x if v is not None)
+    assert xs, "the figure drew no x values"
+    assert len({v.date() for v in xs}) == 1, \
+        f"chart spans {len({v.date() for v in xs})} sessions"

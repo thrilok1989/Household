@@ -61,4 +61,6 @@ CREATE INDEX IF NOT EXISTS idx_signal_outcomes_state
     ON signal_outcomes (state);
 
 -- optional purge (keep ~1 year)
+-- ⚙️ NOW EXECUTED: db/retention.py reads this policy and applies it (see POLICIES).
+--    The line below stays as the declaration of record; do not run it by hand.
 -- DELETE FROM signal_outcomes WHERE trading_day < CURRENT_DATE - INTERVAL '365 days';

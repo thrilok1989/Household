@@ -89,21 +89,21 @@ def test_executed_reaction_outranks_the_market_state():
     """Stage 42 fired is a thing that HAPPENED; Stage 48 describes the tape."""
     fr = _fr(reaction={"state": "CONFIRMED_BREAKDOWN", "confidence": 80},
              market_state={"state": "RANGE", "confidence": 70})
-    t = OI.opportunity_type(fr, Horizon.SCALP)
+    t = OI.opportunity_type(fr)
     assert t["type"] == "BREAKDOWN" and "Stage 42" in t["source"]
 
 
 def test_market_state_names_the_type_when_no_reaction_fired():
     fr = _fr(reaction={"state": "IDLE"},
              market_state={"state": "ACCUMULATION", "confidence": 70})
-    assert OI.opportunity_type(fr, Horizon.SCALP)["type"] == "ACCUMULATION_LONG"
+    assert OI.opportunity_type(fr)["type"] == "ACCUMULATION_LONG"
 
 
 def test_expiry_pin_day_overrides_everything():
     """Stage 68's own rule: EXPIRY_PIN is a fact, not a vote."""
     fr = _fr(day_classification={"type": "EXPIRY_PIN", "confidence": 80},
              reaction={"state": "CONFIRMED_BREAKOUT", "confidence": 90})
-    assert OI.opportunity_type(fr, Horizon.SCALP)["type"] == "EXPIRY_PIN"
+    assert OI.opportunity_type(fr)["type"] == "EXPIRY_PIN"
 
 
 def test_a_side_opposing_the_type_is_marked_counter_trend():
@@ -146,7 +146,7 @@ def test_swing_bias_is_checked_for_counter_trend_too():
 
 def test_type_is_unknown_when_nothing_reported():
     fr = _fr(reaction={}, market_state={}, day_classification={}, sections={})
-    t = OI.opportunity_type(fr, Horizon.SCALP)
+    t = OI.opportunity_type(fr)
     assert t["type"] == OI.UNKNOWN and t["known"] is False and t["source"]
 
 
@@ -291,7 +291,12 @@ def test_same_side_twice_is_continuation():
     prev = _matrix(fr, _fill(Horizon.SCALP, "BULL"))
     now = _matrix(fr, _fill(Horizon.SCALP, "BULL"), previous=prev)
     rot = _row(now, "scalp")["intel"]["rotation"]
-    assert rot["rotation"] == "CONTINUATION" and rot["label"] == "CALL → CALL"
+    assert rot["rotation"] == "CONTINUATION"
+    # The label carries the SIDES, the panel prefixes an arrow for the KIND.
+    # "CALL → CALL" rendered as "→ CALL → CALL": the arrow twice, and nothing
+    # having rotated dressed up as a movement.
+    assert rot["label"] == "CALL"
+    assert "→" not in rot["label"], "the panel owns the arrow, not the label"
 
 
 def test_a_flip_is_rotation():
@@ -506,3 +511,60 @@ if __name__ == "__main__":
     for fn in fns:
         fn()
     print(f"opportunity intel tests passed ({len(fns)})")
+
+
+# ── the display defects the matrix column showed live ───────────────────
+
+def test_no_rotation_kind_prints_its_arrow_twice():
+    """The row read `→ CALL → CALL`. The panel owns the arrow (for the KIND);
+    the label owns the sides. A label that also carries an arrow for the
+    continuation case doubles it and makes "nothing changed" look like a move."""
+    from mios_v5.ui.opportunity_panel import _ROTATION_ARROW
+    fr = _fr()
+    prev = _matrix(fr, _fill(Horizon.SCALP, "BULL"))
+    now = _matrix(fr, _fill(Horizon.SCALP, "BULL"), previous=prev)
+    rot = _row(now, "scalp")["intel"]["rotation"]
+    rendered = f"{_ROTATION_ARROW.get(rot['rotation'], '·')} {rot['label']}"
+    assert rendered.count("→") <= 1, f"doubled arrow: {rendered!r}"
+
+
+def test_a_real_rotation_still_shows_both_sides():
+    """Trimming the continuation label must not trim the case that matters."""
+    fr = _fr()
+    prev = _matrix(fr, _fill(Horizon.SCALP, "BULL"))
+    now = _matrix(fr, _fill(Horizon.SCALP, "BEAR"), previous=prev)
+    rot = _row(now, "scalp")["intel"]["rotation"]
+    assert rot["rotation"] == "ROTATION"
+    assert "CALL" in rot["label"] and "PUT" in rot["label"]
+
+
+def test_opportunity_type_does_not_pretend_to_be_per_horizon():
+    """It took a `Horizon` and never referenced it, which implies a per-horizon
+    read that is not happening. Type IS market-level — every branch reads `fr`
+    alone — so the parameter is gone rather than left to mislead."""
+    import ast
+    import inspect
+    fn = ast.parse(inspect.getsource(OI.opportunity_type)).body[0]
+    params = [a.arg for a in fn.args.args]
+    assert params == ["fr"], f"unexpected signature {params}"
+    used = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+    assert not [p for p in params if p not in used], "a parameter is ignored"
+
+
+def test_the_market_level_fields_are_recorded():
+    """"All five rows say the same thing" must be checkable against intent."""
+    assert "type" in OI.MARKET_LEVEL_FIELDS
+
+
+def test_the_horizon_aware_fields_really_do_use_the_horizon():
+    """Risk, lifetime and timing were suspected of the same defect. They are
+    not: each references its horizon. Pinned so a refactor cannot quietly turn
+    one of them into another market read stamped five times."""
+    import ast
+    import inspect
+    for name in ("risk", "lifetime", "timing"):
+        fn = ast.parse(inspect.getsource(getattr(OI, name))).body[0]
+        params = [a.arg for a in fn.args.args]
+        used = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+        dead = [p for p in params if p not in used]
+        assert not dead, f"{name} ignores {dead}"

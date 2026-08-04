@@ -252,14 +252,48 @@ def _no_trade_html(nt: Optional[Dict[str, Any]], word: str, col: str) -> str:
 #  3-7 · the compact five-row matrix
 # ══════════════════════════════════════════════════════════════════════
 
-def matrix_html(matrix: Optional[Dict[str, Any]]) -> str:
+#: Stage 71.7 agreement → (glyph, colour). CONTRADICTED must catch the eye: a
+#: horizon ranking high while its premium is untraded is the expensive case.
+_PREMIUM_AGREE = {"CONFIRMED_HOT": ("🚀", "#ff2d55"), "CONFIRMED": ("✅", BULL),
+                  "CONTRADICTED": ("⚠️", "#ff9500"), "NO_SIDE": ("·", FAINT),
+                  "N/A": ("—", FAINT), "UNKNOWN": ("⚪", FAINT)}
+
+
+def _premium_cell(pr: Optional[Dict[str, Any]]) -> str:
+    """Stage 71.7's read of the premium THIS horizon names.
+
+    Stage 71 says which horizon and which side; 71.7 says whether that premium
+    is actually being traded. Joining them in the row is the point — a ⚠️ here
+    means the evidence is directional but the option is dead, which no other
+    column on this table can express.
+    """
+    if not pr:
+        return f"<td style='padding:4px 6px;color:{FAINT}'>—</td>"
+    glyph, col = _PREMIUM_AGREE.get(str(pr.get("agreement") or "UNKNOWN"),
+                                    _PREMIUM_AGREE["UNKNOWN"])
+    en, sp = _num(pr.get("energy"), -1), _num(pr.get("spike"), -1)
+    nums = ("" if en < 0 else
+            f"<div style='font-size:9.5px;color:{MICRO};font-weight:600'>"
+            f"{en:.0f}%" + ("" if sp < 0 else f" / {sp:.0f}%") + "</div>")
+    return (f"<td style='padding:4px 6px;color:{col};font-weight:800'>"
+            f"{glyph}{nums}</td>")
+
+
+def matrix_html(matrix: Optional[Dict[str, Any]] = None,
+                premium: Optional[Dict[str, Any]] = None) -> str:
     """One row per horizon. This is the whole always-visible budget — the
-    charts have to survive underneath it."""
+    charts have to survive underneath it.
+
+    `premium` is Stage 71.7's output. Optional: the table renders identically
+    without it, so 71.7 failing can never blank the matrix.
+    """
     m = matrix or {}
     rows = {r["horizon"]: r for r in (m.get("rows") or [])}
     order = m.get("display_order") or list(rows)
     if not rows:
         return ""
+    prem = {str(p.get("horizon")): p
+            for p in ((premium or {}).get("horizons") or [])}
 
     medal = {1: "🥇", 2: "🥈", 3: "🥉"}
     head = (f"<tr style='font-size:9px;letter-spacing:.09em;color:{MICRO};"
@@ -269,6 +303,7 @@ def matrix_html(matrix: Optional[Dict[str, Any]]) -> str:
             "<th style='padding:3px 6px'>Q</th><th style='padding:3px 6px'>Timing</th>"
             "<th style='padding:3px 6px'>Risk</th>"
             "<th style='padding:3px 6px'>Rotation</th>"
+            "<th style='padding:3px 6px'>Premium</th>"
             "<th style='padding:3px 6px'>Balance</th>"
             "<th style='padding:3px 6px'>Evidence</th>"
             "<th style='padding:3px 6px;text-align:right'>Score</th></tr>")
@@ -306,6 +341,7 @@ def matrix_html(matrix: Optional[Dict[str, Any]]) -> str:
             f"<td style='padding:4px 6px;color:{VIOLET};font-size:11.5px'>"
             f"{_ROTATION_ARROW.get(rot.get('rotation'), '·')} "
             f"{rot.get('label', '—')}</td>"
+            + _premium_cell(prem.get(str(h))) +
             f"<td style='padding:4px 6px'>{_energy_bar(r)}</td>"
             f"<td style='padding:4px 6px;color:{MUTED};font-size:11.5px'>"
             f"{r.get('evidence', '—')}</td>"
@@ -450,16 +486,32 @@ def reference_html(matrix: Optional[Dict[str, Any]]) -> str:
 #  The panel
 # ══════════════════════════════════════════════════════════════════════
 
-def render_opportunity_panel(st, matrix: Optional[Dict[str, Any]]) -> None:
+def render_opportunity_panel(st, matrix: Optional[Dict[str, Any]],
+                             premium: Optional[Dict[str, Any]] = None) -> None:
     """Header + second + compact matrix always visible; everything else in
-    expanders so the terminal chart keeps its space."""
+    expanders so the terminal chart keeps its space.
+
+    `premium` is Stage 71.7 (Premium Energy & Spike). It belongs HERE rather
+    than in its own section: Stage 71 says which horizon and which side, and
+    71.7 says whether that premium is actually being traded. Split across two
+    places, a trader reads the ranking without the confirmation. Optional
+    throughout — 71.7 failing must never blank the matrix.
+    """
     if not matrix or not matrix.get("rows"):
         st.caption("Trade Opportunity Matrix warming up — it renders once the "
                    "MIOS pass has published a final read.")
         return
 
     st.markdown(header_html(matrix), unsafe_allow_html=True)
-    st.markdown(matrix_html(matrix), unsafe_allow_html=True)
+    st.markdown(matrix_html(matrix, premium), unsafe_allow_html=True)
+    if premium:
+        try:
+            from .premium_energy_panel import premium_energy_html
+            _pe_html = premium_energy_html(premium)
+            if _pe_html:
+                st.markdown(_pe_html, unsafe_allow_html=True)
+        except Exception as err:
+            st.caption(f"Premium Energy unavailable: {err}")
 
     rows = {r["horizon"]: r for r in matrix["rows"]}
     with st.expander("🔍 Horizon detail — type · quality · risk · why · weakness",

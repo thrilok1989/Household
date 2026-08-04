@@ -78,11 +78,61 @@ class SupabaseDB:
             return self.cache.get(table_name, filters)
 
     # ── Candles ──
-    def upsert_candles(self, symbol, exchange, timeframe, df):
-        if df.empty:
+    #: Where the per-series write watermark lives. `SupabaseDB` is rebuilt on
+    #: every Streamlit rerun, so instance state would be lost each cycle — this
+    #: has to outlive the object, and session_state is what does.
+    _CANDLE_MARKS = '_candle_write_marks'
+
+    def _candle_mark(self, key):
+        try:
+            return st.session_state.setdefault(self._CANDLE_MARKS, {}).get(key)
+        except Exception:
+            return None
+
+    def _set_candle_mark(self, key, value):
+        try:
+            st.session_state.setdefault(self._CANDLE_MARKS, {})[key] = value
+        except Exception:
+            pass
+
+    def upsert_candles(self, symbol, exchange, timeframe, df, full=False):
+        """Write only the candles that are new or still forming.
+
+        The app calls this every rerun — every 20 seconds — with the whole
+        `days_back × 24h` frame. Rewriting all of it meant ~500 rows upserted
+        180 times an hour when one or two were ever new: 90,000 row-writes an
+        hour to record roughly 180 bars.
+
+        So a **watermark** per `(symbol, exchange, timeframe)` records how far
+        the last write got, and only rows at or after it are sent.
+
+        The watermark is the **second-to-last** bar's timestamp, not the last.
+        The most recent candle is still forming — its high, low, close and
+        volume all change until the bar closes — so it must be rewritten every
+        cycle. Watermarking on the last bar would freeze a partial candle in the
+        table and never correct it, which is the one error this table cannot
+        afford: every profile, VWAP and value area downstream reads it.
+
+        `full=True` forces a complete rewrite. No watermark (a fresh session, or
+        an app reset) also writes everything, once — which is what makes this
+        safe: the fallback is the old behaviour, not a gap.
+        """
+        if df is None or getattr(df, 'empty', True):
             return
+        key = f"{symbol}|{exchange}|{timeframe}"
+        mark = None if full else self._candle_mark(key)
+
+        out = df
+        if mark is not None:
+            try:
+                out = df[df['timestamp'] >= mark]
+            except Exception:
+                out = df
+        if getattr(out, 'empty', True):
+            return                      # nothing has moved since the last write
+
         records = []
-        for _, row in df.iterrows():
+        for _, row in out.iterrows():
             dt = row['datetime']
             records.append({
                 'symbol': symbol, 'exchange': exchange, 'timeframe': timeframe,
@@ -96,6 +146,18 @@ class SupabaseDB:
                 'update_time': datetime.now(IST).isoformat()
             })
         self._safe_upsert('candles_data', records, 'symbol,exchange,timeframe,timestamp')
+
+        try:
+            stamps = sorted(int(t) for t in df['timestamp'])
+            # second-to-last, so the forming bar is rewritten next cycle
+            self._set_candle_mark(key, stamps[-2] if len(stamps) >= 2 else stamps[-1])
+            counters = st.session_state.setdefault(
+                '_candle_write_stats', {'calls': 0, 'rows': 0, 'full_rows': 0})
+            counters['calls'] += 1
+            counters['rows'] += len(records)
+            counters['full_rows'] += len(df)
+        except Exception:
+            pass
 
     def get_candles(self, symbol, exchange, timeframe, hours_back=24):
         cutoff = (datetime.now(IST) - timedelta(hours=hours_back)).isoformat()
@@ -1605,6 +1667,59 @@ class SupabaseDB:
         except Exception:
             pass
         return out
+
+    # ── retention primitives (db/retention.py orchestrates these) ──
+    def cutoff_day(self, days):
+        """The date `days` ago, ISO. One place computes it so a preview and the
+        delete that follows can never disagree about where the line is."""
+        return (datetime.now(IST).date() - timedelta(days=int(days))).isoformat()
+
+    def count_rows_older_than(self, table, days, day_col='trading_day'):
+        """How many rows a purge would remove. `None` means the question could
+        not be answered — which is not the same as zero, and a caller must not
+        render it as "nothing to do"."""
+        try:
+            res = (self.client.table(table).select('*', count='exact')
+                   .lt(day_col, self.cutoff_day(days)).limit(1).execute())
+            return res.count
+        except Exception:
+            return None
+
+    def oldest_day(self, table, day_col='trading_day'):
+        """The earliest value of `day_col`, or `None`. Purging walks forward
+        from here in bounded windows rather than issuing one delete across
+        years of rows."""
+        try:
+            res = (self.client.table(table).select(day_col)
+                   .order(day_col, desc=False).limit(1).execute())
+            rows = res.data or []
+            return rows[0].get(day_col) if rows else None
+        except Exception:
+            return None
+
+    def purge_window(self, table, day_col, lo, hi):
+        """Delete `lo <= day_col < hi`. Returns True on success, False on error.
+
+        `returning='minimal'` matters: a delete that returns the deleted rows
+        sends every one of them back over the wire, so purging to *save* on
+        storage would spend egress doing it. Older client versions do not
+        accept the argument, hence the fallback.
+        """
+        def run(minimal):
+            q = (self.client.table(table).delete(returning='minimal')
+                 if minimal else self.client.table(table).delete())
+            return q.gte(day_col, lo).lt(day_col, hi).execute()
+        try:
+            run(True)
+            return True
+        except TypeError:
+            try:
+                run(False)
+                return True
+            except Exception:
+                return False
+        except Exception:
+            return False
 
     def delete_rows(self, table, older_than_days=None, day_col='trading_day'):
         """Delete rows from `table`. older_than_days=None → ALL rows (uses a

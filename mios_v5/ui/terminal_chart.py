@@ -55,6 +55,11 @@ LEVELS = {
     "poc":         ("#ffe066", "dash",    1.3),
     "vah":         ("#7dffb0", "dot",     1.1),
     "val":         ("#ff8c8c", "dot",     1.1),
+    # Premium Structure's volume nodes. Dimmer than the POC on purpose: they
+    # are where price has spent time, not the single level it spent most of it
+    # at, and drawing them at equal weight buries the POC among its own bins.
+    "hvn":         ("#d9c15a", "dot",     1.0),
+    "lvn":         ("#6b7a8f", "dot",     1.0),
 }
 
 LEVEL_LABEL = {
@@ -63,6 +68,7 @@ LEVEL_LABEL = {
     "liquidity": "Liquidity", "vwap": "VWAP", "poc": "POC", "vah": "VAH",
     "val": "VAL", "gamma_flip": "Gamma Flip", "dealer_wall": "Dealer Wall",
     "charm_pin": "Charm Pin", "reaction": "Reaction",
+    "hvn": "HVN", "lvn": "LVN",
 }
 
 #: higher-timeframe POCs get their own dimmer treatment so they never compete

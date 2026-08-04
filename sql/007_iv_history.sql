@@ -15,4 +15,6 @@ CREATE INDEX IF NOT EXISTS idx_iv_history_day
     ON iv_history (trading_day DESC);
 
 -- optional purge (keep ~2 years)
+-- ⚙️ NOW EXECUTED: db/retention.py reads this policy and applies it (see POLICIES).
+--    The line below stays as the declaration of record; do not run it by hand.
 -- DELETE FROM iv_history WHERE trading_day < CURRENT_DATE - INTERVAL '730 days';

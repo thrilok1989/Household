@@ -17,6 +17,7 @@ from pytz import timezone
 import io
 import os
 from db.supabase_client import SupabaseDB
+from db.read_cache import wrap as _cache_reads
 from indicators.money_flow_profile import calculate_money_flow_profile
 from mios_v5.story_integration import get_story_task, process_market_event
 from mios_v5.market_events import build_event, EventType, EventSeverity
@@ -7485,6 +7486,18 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
     """Compact card: regime + probability bars + levels + playbook."""
     mp = compute_market_picture(spot_price, df, option_data, cat_scores)
     if not mp:
+        # A bare `return` here is why the Trade Card could only say "Market
+        # Picture has not produced a read yet" — true, but not a reason. This is
+        # the ONE precondition `compute_market_picture` refuses to proceed
+        # without, so name whichever half is missing. Everything downstream
+        # (`_market_picture`, and therefore the Trade Card, the Strike Cockpit
+        # and five of V6's inputs) hangs off this line succeeding.
+        _missing = ("no NIFTY candles — the intraday fetch and the Supabase "
+                    "cache both came back empty"
+                    if df is None or getattr(df, 'empty', True)
+                    else "no spot price" if not spot_price
+                    else "the regime vote produced nothing")
+        st.caption(f"🗺️ Market Picture unavailable — {_missing}.")
         return
     st.session_state['_market_picture'] = mp
     _c = {'UP': '#00ff88', 'DOWN': '#ff4444', 'SIDEWAYS': '#ffd000'}[mp['regime']]
@@ -12617,6 +12630,76 @@ def compute_dual_profile(df, num_rows=25):
     return session_mfp, composite_mfp, migration
 
 
+def _render_retention_panel(st, db):
+    """🗑 Data retention — the preview, and the switch that is not on.
+
+    Every `sql/*.sql` migration that creates a growing table declares a purge
+    and comments it out. Ten of them do, and none has ever run, so every table
+    has been growing since it was created. `db/retention.py` executes those
+    policies; this shows what it would remove **before** it removes anything.
+
+    The preview is always live. The purge is gated twice — a module constant a
+    human edits, and a confirmation here — because deleting two years of trading
+    history has no undo, and a number a trader has actually read is the only
+    thing that makes the first run safe.
+    """
+    if db is None:
+        return
+    try:
+        from db import retention as _ret
+    except Exception:
+        return
+
+    with st.sidebar.expander("🗑 Data retention", expanded=False):
+        state = "🟢 enabled" if _ret.ENABLED else "⚪ preview only"
+        st.caption(f"{len(_ret.POLICIES)} policies · {state}")
+
+        if st.button("Preview what would be removed", key="_ret_preview"):
+            st.session_state['_retention_preview'] = _ret.preview(db)
+
+        rows = st.session_state.get('_retention_preview')
+        if rows:
+            total = _ret.total_over_retention(rows)
+            st.caption(
+                f"**{total['rows_over']:,} rows** over retention across "
+                f"{total['tables_over']} of {total['tables_counted']} tables"
+                + (f" · {total['tables_unknown']} could not be counted"
+                   if total['tables_unknown'] else ""))
+            over = [r for r in rows if (r['rows_over'] or 0) > 0]
+            for r in sorted(over, key=lambda r: -(r['rows_over'] or 0))[:12]:
+                src = "declared" if r['declared'] else "chosen here"
+                st.caption(
+                    f"`{r['table']}` — {r['rows_over']:,} rows before "
+                    f"{r['cutoff']} (keep {r['keep_days']}d, {src})")
+            unknown = [r['table'] for r in rows if not r['known']]
+            if unknown:
+                # Not the same as zero, and it must not render as zero.
+                st.caption(f"⚪ not counted: {', '.join(unknown[:8])}")
+
+        if not _ret.ENABLED:
+            st.caption(
+                "To enable: read the preview above, then set `ENABLED = True` "
+                "in `db/retention.py`. There is no undo.")
+            return
+
+        st.warning("Deleting is permanent.", icon="⚠️")
+        if st.checkbox("I have read the preview", key="_ret_ack"):
+            if st.button("Purge now", key="_ret_run"):
+                rep = _ret.run(db, confirm=True)
+                st.session_state['_retention_preview'] = None
+                if rep.get("blocked"):
+                    st.error(rep["blocked"])
+                else:
+                    st.success(f"Removed {rep['rows_removed']:,} rows across "
+                               f"{len(rep['tables'])} tables.")
+
+    # The scheduled pass: once a day, and only when a human has enabled it.
+    try:
+        _ret.run_daily(db)
+    except Exception:
+        pass
+
+
 def capture_day_open_and_gap(db, current_price):
     """🕘 Capture today's OPENING spot (the ~09:06 pre-open print) and classify
     the gap BEFORE the first 09:15 candle exists — so gap up/down is known from
@@ -13394,21 +13477,16 @@ def render_clean_card(spot_price, option_data=None):
 def _today_session(df):
     """Just the latest session's bars, for the chart.
 
-    "Today" is the date of the LAST bar, not the wall clock. Before the open, and
-    on a holiday, the newest bars are the previous session's — anchoring on
-    `datetime.now()` would return an empty frame and blank the chart, which looks
-    identical to a data outage. Anchoring on the last bar always draws the most
-    recent real session.
-
-    Returns the frame unchanged if it cannot tell, because a chart with too much
-    history is a smaller problem than no chart.
+    Delegates to `mios_v5.clock.today_slice`, which is the single owner of "one
+    session only" and is what `terminal_chart` already applies to all three
+    panels. A second implementation here is how the two would eventually
+    disagree about where a session starts — and the real bug was in that owner,
+    not in having one: it fell back to the WHOLE window whenever wall-clock
+    today had no rows, so pre-open and on holidays every caller got three days.
     """
     try:
-        if df is None or getattr(df, 'empty', True) or 'datetime' not in df.columns:
-            return df
-        last_day = df['datetime'].iloc[-1].date()
-        today = df[df['datetime'].dt.date == last_day]
-        return today if not today.empty else df
+        from mios_v5.clock import today_slice
+        return today_slice(df)
     except Exception:
         return df
 
@@ -13544,10 +13622,14 @@ def _publish_atm_legs(api, spot, option_data, render_id):
                         pe = v
         return (int(ce) if ce else None), (int(pe) if pe else None)
 
-    # ATM+/-2 ids for the Strike-Mode Cockpit's on-demand wing fetches.
+    # ATM+/-3 ids for the Strike-Mode Cockpit's on-demand wing fetches and for
+    # Stage 71.8's strike picker. Ids only — no fetch happens here, so widening
+    # the range from +/-2 costs two dictionary entries and no request budget.
+    # The picker needs them because a trader choosing ATM+3 must get that leg's
+    # own candles, not a silent fall back to ATM.
     try:
         wings = {}
-        for off in (-2, -1, 0, 1, 2):
+        for off in (-3, -2, -1, 0, 1, 2, 3):
             sv = atm + off * gap
             ce, pe = sids_for(sv)
             if ce:
@@ -13560,8 +13642,28 @@ def _publish_atm_legs(api, spot, option_data, render_id):
         pass
 
     for store in ('_atm_leg_dfs', '_atm_leg_sids', '_atm_leg_vob_volume',
-                  '_atm_leg_vidya', '_atm_leg_sr_behavior'):
+                  '_atm_leg_vidya', '_atm_leg_sr_behavior',
+                  '_atm_leg_ltf_delta'):
         st.session_state[store] = {}
+
+    # The three builders Premium Structure needs for a strike outside ATM±1.
+    #
+    # `mios_v5` cannot import this file (it boots Streamlit and reads secrets),
+    # and Premium Structure may not compute a profile of its own — the audit
+    # found FOUR POC implementations and chose `compute_vpfr` as the one owner.
+    # Publishing the callables lets the dashboard build a wing strike's profile
+    # with the same function the ATM±1 legs use, rather than a fifth copy.
+    #
+    # `detect_ignition` is here for the reason the audit called its headline:
+    # the leg table collapses its NAMED sub-signals — Wyckoff Spring and
+    # Upthrust among them — into one glyph, so a consumer that wants the
+    # fakeout evidence has to call the engine itself.
+    st.session_state['_premium_builders'] = {
+        'vpfr': lambda f: compute_vpfr(f, 60),
+        'mfp': lambda f: calculate_money_flow_profile(f, num_rows=25,
+                                                      source='Money Flow'),
+        'ignition': detect_ignition,
+    }
     st.session_state['_atm_leg_api'] = api
 
     legs = []
@@ -13590,6 +13692,25 @@ def _publish_atm_legs(api, spot, option_data, render_id):
                 if vidya:
                     st.session_state['_atm_leg_vidya'][name] = vidya
                     st.session_state['_atm_leg_vidya'][f"sid_{sid}"] = vidya
+            except Exception:
+                pass
+            # Per-leg buyer/seller split — Premium CBV / CSV / CVD.
+            #
+            # The reduction removed this store's WRITER and kept its readers:
+            # `dashboard_v6._leg_flow_readings` and Stage 71.7 both ask for
+            # `_atm_leg_ltf_delta` and have been getting `{}` ever since. The
+            # closure was built from what V6 *reads*, and a store the app fills
+            # for a later cycle produces no read edge — the same blind spot that
+            # severed the learning writers.
+            #
+            # Restored through `indicators/order_flow.totals`, which owns the
+            # CLV split, rather than by bringing back the inline copy the
+            # original used. Same numbers, one implementation.
+            try:
+                _tot = _of.totals(frame)
+                if _tot and not _of.is_missing(_tot):
+                    st.session_state['_atm_leg_ltf_delta'][name] = _tot
+                    st.session_state['_atm_leg_ltf_delta'][f"sid_{sid}"] = _tot
             except Exception:
                 pass
             mfp = None
@@ -13637,7 +13758,15 @@ def _render_main_analyzer():
                  "```\n[supabase]\nurl = \"…\"\nanon_key = \"…\"\n```")
         return
     try:
-        db = SupabaseDB(supabase_url, supabase_key)
+        # Wrapped once, here, so every consumer — both dashboards, every panel,
+        # every engine that takes `db` — reads through the Streamlit cache
+        # without a single call site changing. Supabase is touched only when a
+        # value is not already cached, or after the app resets.
+        #
+        # Without this, `st_autorefresh` at 20s plus Streamlit running EVERY
+        # tab and expander body on EVERY rerun meant ~30,800 rows fetched per
+        # cycle, whether or not anyone was looking at the tab that asked.
+        db = _cache_reads(SupabaseDB(supabase_url, supabase_key))
         db.sync_pending()
         st.session_state['_db_obj'] = db
         st.session_state['_story_task'] = get_story_task()
@@ -13685,6 +13814,40 @@ def _render_main_analyzer():
             st.session_state['_dhan_token_override'] = _tok.strip()
             st.session_state['_dhan_token_expired'] = False
             st.rerun()
+
+    # ── database cache: what it saved, and the manual reset ─────────────
+    # The cache holds until the app restarts, so a trader who wants the
+    # analytics re-read needs a way to say so without restarting. This is that
+    # way — and the counters are here so the saving is visible rather than
+    # asserted.
+    try:
+        from db.read_cache import invalidate as _db_cache_clear
+        from db.read_cache import stats as _db_cache_stats
+        _cs = _db_cache_stats()
+        with st.sidebar.expander("🗄 Database cache", expanded=False):
+            _served = max(0, _cs['calls'] - _cs['fetches'])
+            st.caption(
+                f"{_cs['calls']:,} reads asked · **{_cs['fetches']:,}** reached "
+                f"Supabase · {_served:,} served from cache "
+                f"({_cs['rows']:,} rows fetched this session)")
+            st.caption(
+                "Analytics and history are held until the app resets; live "
+                "reads (open position, spot, config) refresh every cycle.")
+            if st.button("Refresh from Supabase"):
+                _db_cache_clear()
+                st.rerun()
+    except Exception:
+        pass
+
+    # ── data retention: what would go, before anything goes ─────────────
+    _render_retention_panel(st, db)
+
+    # ── storage: which table the bytes are actually in ──────────────────
+    try:
+        from db.storage_audit import render as _render_storage
+        _render_storage(st, db)
+    except Exception:
+        pass
 
     access_token = st.session_state.get('_dhan_token_override') or DHAN_ACCESS_TOKEN
     api = DhanAPI(access_token, DHAN_CLIENT_ID)

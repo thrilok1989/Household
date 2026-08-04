@@ -181,3 +181,63 @@ if __name__ == "__main__":
     for fn in fns:
         fn()
     print(f"v6 dependency audit guards passed ({len(fns)})")
+
+
+# ── the blind spot the reduction had ────────────────────────────────────
+#
+# The audit's method is the closure of everything V6 *reads*. That is correct
+# for its question and structurally blind to writers: a store the app fills for
+# a LATER cycle, or for a panel, produces no read edge and falls outside the
+# closure. The reduction removed `_atm_leg_ltf_delta`'s writer and kept both its
+# readers, and nothing failed — `dashboard_v6._leg_flow_readings` and Stage 71.7
+# simply got `{}` forever, which is indistinguishable from a quiet market.
+#
+# A closure cannot catch this. An assertion can.
+
+_LEG_STORE = re.compile(r"['\"](_atm_leg_[a-z_]+)['\"]")
+
+
+def _stores_read_by_v6():
+    """Every `_atm_leg_*` session key any module under `mios_v5/` reads."""
+    found = set()
+    for path in (_ROOT / "mios_v5").rglob("*.py"):
+        if "tests" in path.parts:
+            continue
+        found |= set(_LEG_STORE.findall(path.read_text(encoding="utf-8")))
+    return found
+
+
+def test_every_leg_store_v6_reads_still_has_a_writer():
+    """A reader without a writer degrades silently, which is the worst way.
+
+    This is the assertion that would have caught the severed `_atm_leg_ltf_delta`
+    the day it happened, instead of Stage 71.7 being built on top of an input
+    that had already stopped arriving.
+    """
+    # Direct writes, plus every literal inside the publisher itself: the loop
+    # `for store, fn in (('_atm_leg_vob_volume', …), …)` writes through a
+    # variable, so pattern-matching the assignment alone would call two live
+    # stores orphaned. The publisher's body is the honest boundary — a store
+    # named there is one the app still fills.
+    writers = set(re.findall(
+        r"st\.session_state\[['\"](_atm_leg_[a-z_]+)['\"]\]\s*(?:\[|=)", _SRC))
+    writers |= set(re.findall(
+        r"st\.session_state\.setdefault\(['\"](_atm_leg_[a-z_]+)['\"]", _SRC))
+    pub = _tops().get("_publish_atm_legs")
+    assert pub is not None, "the ATM leg publisher is gone"
+    writers |= set(_LEG_STORE.findall(ast.get_source_segment(_SRC, pub) or ""))
+    orphans = sorted(_stores_read_by_v6() - writers)
+    assert not orphans, (
+        f"{orphans} are read by mios_v5/ and written by nobody in the app — "
+        f"they will return empty forever and the stage reading them will "
+        f"report a quiet market rather than a missing input")
+
+
+def test_the_mandatory_premium_flow_input_is_published():
+    """Stage 71.7's spec makes CBV/CSV/CVD mandatory, and they come from one
+    store. Named explicitly so a future reduction has to argue with a test."""
+    assert "_atm_leg_ltf_delta" in _SRC, (
+        "Stage 71.7's CBV/CSV/CVD input lost its writer again")
+    assert "_of.totals(" in _SRC, (
+        "the buyer/seller split must come from indicators/order_flow, which "
+        "owns it — not from a reinstated inline copy")
