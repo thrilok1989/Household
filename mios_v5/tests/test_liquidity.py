@@ -746,7 +746,13 @@ def test_the_panel_computes_nothing():
 
 def test_the_panel_is_wired_into_the_dashboard():
     src = (ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
-    assert "from .liquidity_panel import render_liquidity" in src
+    # The imported NAME, not the exact line — the import grows as the panel
+    # gains sections, and a test that pins the line breaks on formatting.
+    imported = {alias.name for node in ast.walk(ast.parse(src))
+                if isinstance(node, ast.ImportFrom)
+                and (node.module or "").endswith("liquidity_panel")
+                for alias in node.names}
+    assert "render_liquidity" in imported, imported
     assert "_liquidity_context" in src
 
 

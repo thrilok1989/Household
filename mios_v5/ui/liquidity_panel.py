@@ -353,6 +353,75 @@ def liquidity_html(ctx: Any = None, profile: Any = None) -> str:
         "</div>")
 
 
+def calibration_html(summary: Optional[Dict[str, Any]] = None) -> str:
+    """The telemetry verdict — is the confidence curve discriminating?
+
+    Drawn separately from the live panel because it answers a different
+    question. The live panel says what liquidity is doing right now; this says
+    whether the numbers above can be trusted yet.
+
+    It renders the distribution as bars because that is the whole point: a
+    verdict word is an opinion, and the shape underneath it is the evidence.
+    """
+    s = _d(summary)
+    if not s or not s.get("samples"):
+        return ""
+
+    verdict = str(s.get("verdict") or "INSUFFICIENT")
+    colour = {"HEALTHY": BULL, "TOO_FLAT": WARN, "TOO_GENEROUS": ALERT,
+              "TOO_HARSH": ALERT}.get(verdict, FAINT)
+
+    conf = _d(s.get("confidence"))
+    shares = _d(conf.get("shares"))
+    counts = _d(conf.get("counts"))
+
+    bars = []
+    for label in ("0-20", "20-40", "40-60", "60-80", "80-100"):
+        share = _num(shares.get(label)) or 0.0
+        bars.append(
+            f"<div style='display:flex;align-items:center;gap:6px;"
+            f"font-size:9.5px;padding:0.5px 0'>"
+            f"<span style='width:44px;color:{MICRO};text-align:right'>"
+            f"{label}</span>"
+            f"<span style='flex:0 0 {max(0.5, share * 100):.1f}%;height:9px;"
+            f"background:{ramp(share * 2.5)};border-radius:2px'></span>"
+            f"<span style='color:{MUTED};font-size:9px'>{share:.0%} "
+            f"<span style='color:{MICRO}'>({int(_num(counts.get(label)) or 0):,})"
+            f"</span></span></div>")
+
+    eng = _d(s.get("engines"))
+    return (
+        f"<div style='background:#0d1117;border:1px solid #1e2836;"
+        f"border-radius:10px;padding:10px 12px;margin-bottom:8px'>"
+        f"<div style='font-size:11px;letter-spacing:.10em;color:{INK};"
+        f"text-transform:uppercase'>🎚 Stage 74 calibration "
+        f"<span style='color:{MICRO};letter-spacing:0'>· telemetry · "
+        f"advisory</span></div>"
+        f"<div style='font-size:10px;color:{MICRO};margin-top:3px'>"
+        f"{int(_num(s.get('clusters')) or 0):,} clusters over "
+        f"{int(_num(s.get('days')) or 0)} sessions · mean "
+        f"{_txt(eng.get('mean'))} engines per cluster</div>"
+        f"<div style='margin-top:7px;font-weight:800;font-size:12.5px;"
+        f"color:{colour}'>{verdict.replace('_', ' ')}</div>"
+        f"<div style='font-size:10px;color:{MUTED};margin-top:2px'>"
+        f"{_txt(s.get('advice'))}</div>"
+        f"<div style='margin-top:7px;padding-top:5px;"
+        f"border-top:1px solid #1a2330'>{''.join(bars)}</div>"
+        f"<div style='font-size:9px;color:{MICRO};margin-top:4px'>"
+        f"{_txt(s.get('why'))}</div>"
+        "</div>")
+
+
+def render_calibration(st, summary: Optional[Dict[str, Any]] = None) -> None:
+    """Draw the calibration verdict, or say nothing."""
+    try:
+        html = calibration_html(summary)
+        if html:
+            st.markdown(html, unsafe_allow_html=True)
+    except Exception as err:
+        st.caption(f"Calibration telemetry unavailable: {err}")
+
+
 def render_liquidity(st, ctx: Any = None, profile: Any = None) -> None:
     """Draw it, or say nothing. Advisory — it may never take the tab down."""
     try:

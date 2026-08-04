@@ -185,6 +185,13 @@ _CHOSEN: Tuple[Policy, ...] = (
     _p("story_validations", 365, "created_at", "this module"),
     _p("event_impact_log", 365, "trading_day", "this module"),
     _p("opening_auction_log", 365, "trading_day", "this module"),
+
+    # Stage 74 calibration evidence, sampled once a minute. Long enough to
+    # compare this quarter's calibration against last quarter's, short enough
+    # that a per-minute sample never becomes the storage problem every other
+    # table in this schema became.
+    _p("liquidity_telemetry", 180, "trading_day", "this module",
+       "calibration evidence — kept across quarters, not forever"),
 )
 
 POLICIES: Dict[str, Policy] = {

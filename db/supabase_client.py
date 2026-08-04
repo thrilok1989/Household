@@ -1668,6 +1668,32 @@ class SupabaseDB:
             pass
         return out
 
+    # ── Stage 74 telemetry (sql/036_liquidity_telemetry.sql) ──
+    def insert_liquidity_telemetry(self, row):
+        """One calibration sample. Upserts on `ts` so a retried write corrects
+        its row rather than appending a second and skewing the distribution."""
+        if not row:
+            return
+        self._safe_upsert('liquidity_telemetry', [dict(row)], 'ts')
+
+    def get_liquidity_telemetry(self, days=7, limit=5000):
+        """The calibration window, newest first.
+
+        Seven days by default because that is the question — a single volatile
+        session says how the curve behaves on a volatile session; a week says
+        whether it survives a quiet Tuesday and an expiry Thursday.
+        """
+        cutoff = (datetime.now(IST).date() - timedelta(days=int(days))).isoformat()
+        def query():
+            return (self.client.table('liquidity_telemetry').select('*')
+                    .gte('trading_day', cutoff)
+                    .order('ts', desc=True).limit(limit).execute())
+        res = self._safe_query('liquidity_telemetry', query)
+        try:
+            return res.to_dict('records') if hasattr(res, 'to_dict') else list(res or [])
+        except Exception:
+            return []
+
     # ── retention primitives (db/retention.py orchestrates these) ──
     def cutoff_day(self, days):
         """The date `days` ago, ISO. One place computes it so a preview and the

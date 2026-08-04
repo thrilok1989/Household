@@ -614,9 +614,25 @@ def _strike_validation(st, fr: Dict[str, Any]) -> None:
         # passed alongside because the heatmap needs per-bin rows, which the
         # context deliberately does not carry (thirty bins are a chart, not a
         # field).
-        from .liquidity_panel import render_liquidity
+        from .liquidity_panel import render_calibration, render_liquidity
         render_liquidity(st, st.session_state.get("_liquidity_context"),
                          st.session_state.get("_money_flow_data"))
+
+        # ── Stage 74 calibration verdict ───────────────────────────────
+        # A different question from the panel above: that one says what
+        # liquidity is doing, this says whether those numbers can be trusted
+        # yet. Read from a week of telemetry, and it must stay on screen until
+        # the verdict is HEALTHY — injecting Stage 42 on an untested curve is
+        # the expensive mistake this whole exercise exists to avoid.
+        try:
+            from ..liquidity_telemetry import summarise as _liq_summary
+            _telemetry = (db.get_liquidity_telemetry(days=7)
+                          if db is not None
+                          and hasattr(db, "get_liquidity_telemetry") else None)
+            if _telemetry:
+                render_calibration(st, _liq_summary(_telemetry))
+        except Exception:
+            pass
     except Exception as err:
         # advisory panel — it may never take the execution screen down with it
         st.caption(f"Strike Validation unavailable: {err}")

@@ -14037,6 +14037,34 @@ def _render_main_analyzer():
                     premium=_prem or None,
                     premium_lag=1 if _prem else 0,
                     cycle=st.session_state.get('_render_seq'))
+                # ── Stage 74 telemetry ──────────────────────────────
+                # Sampled once a MINUTE, not once per 20-second rerun: a
+                # distribution needs coverage across sessions, not three
+                # samples of the same cluster set. ~375 rows a day.
+                #
+                # Advisory throughout — nothing reads this to make a decision.
+                # A human reads the distribution and decides whether the
+                # calibration is ready to freeze.
+                try:
+                    _now = time.time()
+                    if _now - st.session_state.get('_liq_telemetry_ts', 0) > 60:
+                        from mios_v5.liquidity_telemetry import sample as _liq_sample
+                        _row = _liq_sample(
+                            liq=(st.session_state['_liquidity_context']
+                                 .meta.get('engine_output')),
+                            # Stage 42's own read, consumed not recomputed.
+                            reaction=(st.session_state.get('_full_market_read')
+                                      or {}).get('reaction'),
+                            atr=_atr,
+                            trading_day=datetime.now(
+                                pytz.timezone('Asia/Kolkata')).date().isoformat(),
+                            ts=datetime.now(
+                                pytz.timezone('Asia/Kolkata')).isoformat(),
+                            cycle=st.session_state.get('_render_seq'))
+                        db.insert_liquidity_telemetry(_row)
+                        st.session_state['_liq_telemetry_ts'] = _now
+                except Exception:
+                    pass
             except Exception as _liq_err:
                 st.session_state['_liquidity_context'] = None
                 st.caption(f"Liquidity Intelligence unavailable: {_liq_err}")

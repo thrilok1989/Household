@@ -283,6 +283,18 @@ def build(profile: Any = None, vpfr: Any = None,
         "engine": _freeze({"ready": liq.get("ready"),
                            "computed_here": liq.get("computed_here"),
                            "consumed": dict(_LIQ_CONSUMED)}),
+        # The engine's whole output, carried as **provenance, not contract**.
+        #
+        # Consumers read fields — `ctx.value("index.poc")` — because those are
+        # what `SPEC` guarantees. This is here for the two callers that
+        # legitimately need more than the contract exposes: the telemetry, which
+        # histograms every cluster rather than the handful the fields carry, and
+        # the panel, which draws per-bin rows.
+        #
+        # Carrying it costs nothing — the engine already ran, and running it a
+        # second time to get the same answer is exactly what this object exists
+        # to prevent.
+        "engine_output": _freeze(liq),
     })
 
     return LiquidityContext(index=groups["index"], levels=groups["levels"],

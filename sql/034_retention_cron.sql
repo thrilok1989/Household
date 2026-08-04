@@ -77,6 +77,7 @@ VALUES
     ('signal_outcomes', 365, 'trading_day', 'sql/008_signal_outcomes.sql', ''),
     ('story_validations', 365, 'created_at', 'this module', ''),
     ('trade_signals', 365, 'trading_day', 'this module', ''),
+    ('liquidity_telemetry', 180, 'trading_day', 'this module', 'calibration evidence — kept across quarters, not forever'),
     ('alerts_history', 90, 'trading_day', 'this module', ''),
     ('atm_strike_data', 90, 'trading_day', 'this module', ''),
     ('gex_history', 90, 'trading_day', 'this module', ''),

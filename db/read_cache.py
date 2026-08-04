@@ -113,6 +113,11 @@ _READS: Tuple[str, ...] = _LIVE_READS + _INTRADAY_READS + (
     "get_available_candle_series", "get_candle_trading_days",
     "get_candles_for_day", "get_backfill_progress",
     # ── the rest ──
+    # Stage 74 calibration evidence — a week of samples, read to render a
+    # distribution. It grows by one row a minute, so INTRADAY would refetch
+    # thousands of rows to gain sixty; STATIC plus the write-invalidation below
+    # is the right trade.
+    "get_liquidity_telemetry",
     "get_option_chain_history", "get_atm_iv_history", "get_market_analytics",
     "get_user_preferences", "get_leg_flow_days", "get_trade_history",
     "count_rows", "fetch_all_rows",
@@ -155,6 +160,7 @@ _INVALIDATES: Dict[str, Tuple[str, ...]] = {
     "insert_mios_decision": ("get_mios_decisions",),
     "upsert_backfill_progress": ("get_backfill_progress",),
     "save_trade_config": ("get_trade_config",),
+    "insert_liquidity_telemetry": ("get_liquidity_telemetry",),
     "save_user_preferences": ("get_user_preferences",),
 }
 
