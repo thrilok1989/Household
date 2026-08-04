@@ -357,6 +357,27 @@ def test_the_dashboard_builds_no_second_profile_implementation():
     assert not (names & {"compute_vpfr", "compute_dynamic_poc"})
 
 
+def test_the_leg_profile_uses_the_app_s_registered_builder():
+    """`_premium_builders["mfp"]` already exists for exactly this. Calling the
+    indicator directly builds a SECOND premium profile with different
+    parameters — `source="Volume"` against the builder's "Money Flow" — so one
+    leg would carry two profiles that disagree."""
+    tree = ast.parse((ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_panel_profile")
+    # AST, not text. A grep for `source="Volume"` matches the COMMENT that
+    # explains why "Volume" is wrong — the same way every source-text guard in
+    # this repo has tripped on the prose describing its own rule.
+    literals = {n.value for n in ast.walk(fn)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "_premium_builders" in literals, "must use the registered builder"
+    assert "mfp" in literals
+    sources = {kw.value.value for c in ast.walk(fn)
+               if isinstance(c, ast.Call) for kw in c.keywords
+               if kw.arg == "source" and isinstance(kw.value, ast.Constant)}
+    assert "Volume" not in sources, "the registered builder uses Money Flow"
+
+
 def test_the_profile_is_drawn_under_the_candles():
     """Bands over the price series would hide it. The overlay loop must come
     before `_add_series` in the source, and a test is the only thing that keeps

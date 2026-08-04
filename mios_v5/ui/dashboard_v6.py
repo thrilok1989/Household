@@ -1048,11 +1048,22 @@ def _panel_profile(st, tag, df=None, ready: Optional[Dict[str, Any]] = None):
         hit = cache.get(tag)
         if hit and hit.get("_bars") == len(df):
             return hit
+        # The app registers `_premium_builders["mfp"]` for exactly this — the
+        # money-flow profile of a leg frame. Calling the indicator directly
+        # instead would build a SECOND premium profile with different
+        # parameters (`source="Volume"` against the builder's "Money Flow"),
+        # so the same leg would carry two profiles that disagree. One fact,
+        # one owner: use the registered builder and only fall back when the
+        # app has not published one.
+        builder = (st.session_state.get("_premium_builders") or {}).get("mfp")
         try:
-            from indicators.money_flow_profile import \
-                calculate_money_flow_profile
-            profile = calculate_money_flow_profile(df, num_rows=25,
-                                                   source="Volume") or {}
+            if builder is not None:
+                profile = builder(df) or {}
+            else:
+                from indicators.money_flow_profile import \
+                    calculate_money_flow_profile
+                profile = calculate_money_flow_profile(
+                    df, num_rows=25, source="Money Flow") or {}
         except Exception:
             return None
         if not profile:
