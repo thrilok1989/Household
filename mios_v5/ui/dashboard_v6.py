@@ -903,6 +903,62 @@ def _zoom_controls(st) -> Optional[int]:
     return cur
 
 
+def _panel_profile(st, tag, df=None, ready: Optional[Dict[str, Any]] = None):
+    """One panel's liquidity & sentiment profile, plus Stage 71.86's shape.
+
+    Each panel gets its **own** profile. The index profile is never projected
+    onto a premium panel — audit 71.8 settled that a premium profile is
+    computed natively per leg, and an index POC drawn on a premium series marks
+    a price that series can never trade.
+
+    `ready` is the profile the app already built (NIFTY's lives in
+    `_money_flow_data`). When there is none, one is built here **through the
+    existing owner** — `calculate_money_flow_profile`, never a second
+    implementation — because the app is what owns the candle series, exactly as
+    Stage 45 already works.
+
+    ⚠️ Cached on the bar count. The terminal reruns every ~20 seconds and a
+    profile only changes when a bar closes; recomputing 25 bins per leg per
+    rerun is the shape of the problem that made egress 0.59 GB/day.
+    """
+    if not tag:
+        return None
+    if ready:
+        profile = dict(ready)
+    else:
+        if df is None or getattr(df, "empty", True) or len(df) < 5:
+            return None
+        cache = st.session_state.setdefault("_panel_profiles", {})
+        hit = cache.get(tag)
+        if hit and hit.get("_bars") == len(df):
+            return hit
+        try:
+            from indicators.money_flow_profile import \
+                calculate_money_flow_profile
+            profile = calculate_money_flow_profile(df, num_rows=25,
+                                                   source="Volume") or {}
+        except Exception:
+            return None
+        if not profile:
+            return None
+        profile = dict(profile)
+        profile["_bars"] = len(df)
+
+    try:
+        from ..profile_shape import run as _shape
+        profile["shape"] = _shape(profile.get("rows") or (),
+                                  poc=profile.get("poc_price"),
+                                  vah=profile.get("value_area_high"),
+                                  val=profile.get("value_area_low"),
+                                  source=str(tag))
+    except Exception:
+        pass
+
+    if not ready:
+        st.session_state.setdefault("_panel_profiles", {})[tag] = profile
+    return profile
+
+
 def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
     """NIFTY ‖ ATM Call ‖ ATM Put — one figure, so zoom, pan and crosshair
     stay locked together across all three."""
@@ -968,7 +1024,10 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
             signal=dec, window_minutes=window,
             call_levels=_leg_levels(st, ce), put_levels=_leg_levels(st, pe),
             call_zones=_leg_store(st, "_atm_leg_vob_volume", ce),
-            put_zones=_leg_store(st, "_atm_leg_vob_volume", pe))
+            put_zones=_leg_store(st, "_atm_leg_vob_volume", pe),
+            nifty_profile=_panel_profile(st, "NIFTY", nifty, mf),
+            call_profile=_panel_profile(st, ce, call_df),
+            put_profile=_panel_profile(st, pe, put_df))
         # scrollZoom off: the wheel zoomed the chart out from under anyone
         # scrolling the page past it. Zoom is on the buttons, where it is
         # deliberate and the current level is visible.
