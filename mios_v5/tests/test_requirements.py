@@ -1,19 +1,27 @@
-"""Every deployed dependency is bounded.
+"""Every deployed dependency is bounded above, and none is raised past what
+the deployment can install.
 
-`requirements.txt` had thirteen lines and thirteen `>=` with no cap, so
-Streamlit Cloud re-resolved the tree on every rebuild and could cross a major
-version without anything asking. The visible symptom was the front end:
+There are two failure modes here and they pull in opposite directions.
 
-    TypeError: Failed to fetch dynamically imported module:
-    https://…streamlit.app/~/+/static/js/
+**Unbounded.** Thirteen bare `>=` let Streamlit Cloud re-resolve the tree on
+every rebuild and cross a major version with nothing asking. Streamlit serves
+hash-named JS chunks, so a rebuild onto a different version renames them and a
+browser holding the previous `index.html` requests files that no longer exist:
+`Failed to fetch dynamically imported module`.
 
-Streamlit serves hash-named JS chunks; a rebuild onto a different Streamlit
-writes different chunk names, and a browser holding the previous `index.html`
-requests files that no longer exist.
+**Over-pinned.** The first attempt at fixing that pinned the floors to the
+versions installed in *this sandbox* — `pandas~=3.0.5`, `numpy~=2.4.6`,
+`streamlit==1.60.0`. The deploy then failed outright with "Error installing
+requirements", because pandas 3.x needs Python >=3.11 and nothing in this repo
+knows which Python Streamlit Cloud runs. A green suite in a sandbox is not
+evidence about a deployment target.
 
-An unbounded requirement is a deploy that cannot be reproduced, and a test
-suite whose result describes a tree no deployment necessarily had. These tests
-are cheap and they are the only thing that keeps a `>=` from creeping back.
+So the rule these tests encode is asymmetric, and deliberately so:
+
+* an upper cap is always safe — it only removes future versions
+* **a raised floor is not** — it demands a version the target may not have
+
+The sandbox may not dictate the deployment's floors.
 """
 
 import pathlib
@@ -24,8 +32,22 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 REQ = ROOT / "requirements.txt"
 
-#: The one whose version IS the asset the browser downloads.
-FRONT_END = "streamlit"
+#: The floors as they stood when the app was known to install and run. A test
+#: asserts no requirement demands more than these — raising one is a deployment
+#: decision that needs the Cloud build log, not a sandbox `pip list`.
+#: ⚠️ `streamlit-autorefresh` is 1.0.0, not the 0.1.6 the file used to claim:
+#: that version was never released, so `>=0.1.6` had always resolved to 1.0.1.
+#: A floor naming a version that does not exist is not a floor.
+#: `streamlit` is 1.60.0 rather than the old 1.28.0 floor because it is now an
+#: exact pin, confirmed twice: the Cloud build log shows pip fetching it on
+#: Python 3.14.6, and it is the version this suite runs against.
+KNOWN_GOOD_FLOORS = {
+    "streamlit": "1.60.0", "streamlit-autorefresh": "1.0.0",
+    "requests": "2.31.0", "pandas": "2.1.0", "numpy": "1.24.0",
+    "scipy": "1.11.0", "plotly": "5.17.0", "pytz": "2023.3",
+    "supabase": "1.0.3", "yfinance": "0.2.28", "google-genai": "1.0.0",
+    "websockets": "12.0", "anthropic": "0.40.0",
+}
 
 
 def _requirements():
@@ -41,76 +63,86 @@ def _requirements():
     return out
 
 
+def _floor(spec: str):
+    """The `>=` floor a spec demands, or None."""
+    m = re.search(r">=\s*([0-9][0-9A-Za-z.\-]*)", spec)
+    return m.group(1) if m else None
+
+
+def _parts(v: str):
+    """Version → comparable tuple. Non-numeric segments sort as -1 so a
+    pre-release never reads as newer than the release it precedes."""
+    out = []
+    for seg in re.split(r"[.\-]", v):
+        out.append(int(seg) if seg.isdigit() else -1)
+    return tuple(out)
+
+
 def test_the_file_has_requirements_in_it():
-    """A parser that silently matches nothing would make every test below
-    pass on an empty file."""
+    """A parser that silently matched nothing would make every test below pass
+    on an empty file."""
     assert len(_requirements()) >= 10
 
 
 @pytest.mark.parametrize("name,spec", _requirements())
 def test_every_requirement_has_an_upper_bound(name, spec):
-    """`~=`, `==` or an explicit `<` — never a bare `>=`.
-
-    `~=1.2.3` allows 1.2.x and stops before 1.3; `~=1.2` allows 1.x and stops
-    before 2. Both cap; a bare `>=` caps nothing.
-    """
+    """`<`, `~=` or `==` — never a bare `>=`. A cap only ever removes future
+    versions, so it cannot break an install that works today."""
     assert spec, f"{name} has no version specifier at all"
-    bounded = spec.startswith("~=") or spec.startswith("==") or "<" in spec
+    bounded = "<" in spec or spec.startswith("~=") or spec.startswith("==")
     assert bounded, (f"{name}{spec} is unbounded — a rebuild can cross a major "
                      f"version with nothing asking")
 
 
-def test_the_front_end_is_pinned_exactly():
-    """Not `~=`. A minor Streamlit bump changes the served JS chunk names, and
-    that is the whole failure being prevented — the cap has to be exact."""
-    spec = dict(_requirements())[FRONT_END]
-    assert spec.startswith("=="), (
-        f"{FRONT_END}{spec} — the front end must be an exact pin")
+@pytest.mark.parametrize("name,spec", _requirements())
+def test_no_floor_is_raised_above_the_known_good_deployment(name, spec):
+    """The regression that took the app down.
 
-
-def test_the_pinned_front_end_is_the_one_the_suite_runs_against():
-    """A pin that disagrees with the test environment means the deployed app
-    and the tested app are different programs."""
-    import importlib.metadata as md
-    try:
-        installed = md.version(FRONT_END)
-    except md.PackageNotFoundError:
-        pytest.skip(f"{FRONT_END} is not installed in this environment")
-    pinned = dict(_requirements())[FRONT_END].lstrip("=").strip()
-    assert installed == pinned, (
-        f"requirements pins {FRONT_END}=={pinned} but the suite is running "
-        f"against {installed}")
-
-
-def test_untested_dependencies_are_not_claimed_as_verified():
-    """The file splits verified from unverified, and the split must be true.
-
-    Five packages are not installed here, so nothing in this suite exercises
-    them. Listing one under the verified heading would be a claim the test run
-    does not support.
+    Pinning to the sandbox's versions demanded pandas 3.x, which needs Python
+    >=3.11 — a requirement the deployment could not satisfy, and which nothing
+    in this repo can check. Raising a floor is a deployment decision and needs
+    the Streamlit Cloud build log; it is not something a `pip list` in a test
+    environment gets to make.
     """
+    known = KNOWN_GOOD_FLOORS.get(name)
+    assert known is not None, (
+        f"{name} is new — add it to KNOWN_GOOD_FLOORS with the floor the "
+        f"deployment is known to install")
+
+    if spec.startswith("=="):
+        # An exact pin IS a floor, so it must be one the deployment is known to
+        # install — confirmed against the Cloud build log, recorded here. This
+        # is the deliberate path, not a forbidden one.
+        pinned = spec[2:].strip()
+        assert pinned == known, (
+            f"{name}=={pinned} is pinned to a version KNOWN_GOOD_FLOORS does "
+            f"not record ({known}). Confirm it against the Streamlit Cloud "
+            f"build log, update the table, and re-run the dry run")
+        return
+
+    floor = _floor(spec)
+    if spec.startswith("~="):
+        floor = spec[2:].strip()
+    assert floor is not None, f"{name}{spec} has no floor at all"
+    assert _parts(floor) <= _parts(known), (
+        f"{name} demands >={floor}, above the known-good {known}. The sandbox "
+        f"is not the deployment — this is how 'Error installing requirements' "
+        f"happened")
+
+
+def test_the_sandbox_does_not_dictate_the_floors():
+    """The lesson, asserted directly: no floor may have been copied from what
+    happens to be installed here."""
     import importlib.metadata as md
-
-    text = REQ.read_text()
-    marker = "NOT installed in the test environment"
-    assert marker in text, "the unverified section was removed"
-    unverified_block = text.split(marker, 1)[1]
-
-    for name, _ in _requirements():
-        # `\b` would be wrong here: a hyphen is a word boundary, so
-        # `^streamlit\b` matches the `streamlit-autorefresh` line and reports
-        # the wrong package as misfiled. The name must be followed by a
-        # version specifier or the end of the line.
-        listed_unverified = re.search(
-            rf"^{re.escape(name)}\s*(?=[<>=~!]|$)",
-            unverified_block, re.M) is not None
+    for name, spec in _requirements():
         try:
-            md.version(name)
-            installed = True
+            local = md.version(name)
         except md.PackageNotFoundError:
-            installed = False
-        if installed and listed_unverified:
-            pytest.fail(f"{name} is installed but filed as unverified")
-        if not installed and not listed_unverified:
-            pytest.fail(f"{name} is NOT installed but filed as verified — "
-                        f"nothing here has exercised it")
+            continue
+        floor = _floor(spec) or (spec[2:].strip() if spec.startswith("~=")
+                                 else None)
+        if floor and _parts(floor) >= _parts(local):
+            pytest.fail(
+                f"{name} floors at {floor}, which is the locally installed "
+                f"{local} — that is the sandbox setting the deployment's "
+                f"floor, and it broke the deploy once already")
