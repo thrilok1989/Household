@@ -59,5 +59,7 @@ CREATE INDEX IF NOT EXISTS idx_engine_state_structure_score ON engine_state(stru
 CREATE INDEX IF NOT EXISTS idx_engine_state_outcome ON engine_state(outcome);
 
 -- optional purge (run manually or as a scheduled job — nothing purges
+-- ⚙️ NOW EXECUTED: db/retention.py reads this policy and applies it (see POLICIES).
+--    The line below stays as the declaration of record; do not run it by hand.
 -- automatically today, same as the raw tables in migration 001)
 -- DELETE FROM engine_state WHERE trading_day < CURRENT_DATE - INTERVAL '730 days';

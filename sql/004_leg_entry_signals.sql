@@ -26,4 +26,6 @@ CREATE INDEX IF NOT EXISTS idx_leg_entry_signals_day
     ON leg_entry_signals (trading_day, ts DESC);
 
 -- optional purge of old rows (run manually or as a scheduled job)
+-- ⚙️ NOW EXECUTED: db/retention.py reads this policy and applies it (see POLICIES).
+--    The line below stays as the declaration of record; do not run it by hand.
 -- DELETE FROM leg_entry_signals WHERE trading_day < CURRENT_DATE - INTERVAL '30 days';

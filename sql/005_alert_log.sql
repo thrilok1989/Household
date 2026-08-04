@@ -15,4 +15,6 @@ CREATE INDEX IF NOT EXISTS idx_alert_log_day
     ON alert_log (trading_day, ts DESC);
 
 -- optional purge (run manually or as a scheduled job)
+-- ⚙️ NOW EXECUTED: db/retention.py reads this policy and applies it (see POLICIES).
+--    The line below stays as the declaration of record; do not run it by hand.
 -- DELETE FROM alert_log WHERE trading_day < CURRENT_DATE - INTERVAL '14 days';

@@ -19,4 +19,6 @@ CREATE INDEX IF NOT EXISTS idx_leg_flow_day
     ON leg_flow_snapshots (trading_day, ts);
 
 -- optional purge (run manually or as a scheduled job)
+-- ⚙️ NOW EXECUTED: db/retention.py reads this policy and applies it (see POLICIES).
+--    The line below stays as the declaration of record; do not run it by hand.
 -- DELETE FROM leg_flow_snapshots WHERE trading_day < CURRENT_DATE - INTERVAL '60 days';

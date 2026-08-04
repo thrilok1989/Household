@@ -39,4 +39,6 @@ CREATE INDEX IF NOT EXISTS idx_bias_pred_open
     ON bias_predictions (resolved_at) WHERE resolved_at IS NULL;
 
 -- optional purge (keep ~1 year)
+-- ⚙️ NOW EXECUTED: db/retention.py reads this policy and applies it (see POLICIES).
+--    The line below stays as the declaration of record; do not run it by hand.
 -- DELETE FROM bias_predictions WHERE trading_day < CURRENT_DATE - INTERVAL '365 days';

@@ -12630,6 +12630,76 @@ def compute_dual_profile(df, num_rows=25):
     return session_mfp, composite_mfp, migration
 
 
+def _render_retention_panel(st, db):
+    """🗑 Data retention — the preview, and the switch that is not on.
+
+    Every `sql/*.sql` migration that creates a growing table declares a purge
+    and comments it out. Ten of them do, and none has ever run, so every table
+    has been growing since it was created. `db/retention.py` executes those
+    policies; this shows what it would remove **before** it removes anything.
+
+    The preview is always live. The purge is gated twice — a module constant a
+    human edits, and a confirmation here — because deleting two years of trading
+    history has no undo, and a number a trader has actually read is the only
+    thing that makes the first run safe.
+    """
+    if db is None:
+        return
+    try:
+        from db import retention as _ret
+    except Exception:
+        return
+
+    with st.sidebar.expander("🗑 Data retention", expanded=False):
+        state = "🟢 enabled" if _ret.ENABLED else "⚪ preview only"
+        st.caption(f"{len(_ret.POLICIES)} policies · {state}")
+
+        if st.button("Preview what would be removed", key="_ret_preview"):
+            st.session_state['_retention_preview'] = _ret.preview(db)
+
+        rows = st.session_state.get('_retention_preview')
+        if rows:
+            total = _ret.total_over_retention(rows)
+            st.caption(
+                f"**{total['rows_over']:,} rows** over retention across "
+                f"{total['tables_over']} of {total['tables_counted']} tables"
+                + (f" · {total['tables_unknown']} could not be counted"
+                   if total['tables_unknown'] else ""))
+            over = [r for r in rows if (r['rows_over'] or 0) > 0]
+            for r in sorted(over, key=lambda r: -(r['rows_over'] or 0))[:12]:
+                src = "declared" if r['declared'] else "chosen here"
+                st.caption(
+                    f"`{r['table']}` — {r['rows_over']:,} rows before "
+                    f"{r['cutoff']} (keep {r['keep_days']}d, {src})")
+            unknown = [r['table'] for r in rows if not r['known']]
+            if unknown:
+                # Not the same as zero, and it must not render as zero.
+                st.caption(f"⚪ not counted: {', '.join(unknown[:8])}")
+
+        if not _ret.ENABLED:
+            st.caption(
+                "To enable: read the preview above, then set `ENABLED = True` "
+                "in `db/retention.py`. There is no undo.")
+            return
+
+        st.warning("Deleting is permanent.", icon="⚠️")
+        if st.checkbox("I have read the preview", key="_ret_ack"):
+            if st.button("Purge now", key="_ret_run"):
+                rep = _ret.run(db, confirm=True)
+                st.session_state['_retention_preview'] = None
+                if rep.get("blocked"):
+                    st.error(rep["blocked"])
+                else:
+                    st.success(f"Removed {rep['rows_removed']:,} rows across "
+                               f"{len(rep['tables'])} tables.")
+
+    # The scheduled pass: once a day, and only when a human has enabled it.
+    try:
+        _ret.run_daily(db)
+    except Exception:
+        pass
+
+
 def capture_day_open_and_gap(db, current_price):
     """🕘 Capture today's OPENING spot (the ~09:06 pre-open print) and classify
     the gap BEFORE the first 09:15 candle exists — so gap up/down is known from
@@ -13768,6 +13838,9 @@ def _render_main_analyzer():
                 st.rerun()
     except Exception:
         pass
+
+    # ── data retention: what would go, before anything goes ─────────────
+    _render_retention_panel(st, db)
 
     access_token = st.session_state.get('_dhan_token_override') or DHAN_ACCESS_TOKEN
     api = DhanAPI(access_token, DHAN_CLIENT_ID)
