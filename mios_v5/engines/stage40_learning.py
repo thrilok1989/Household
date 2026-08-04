@@ -44,6 +44,39 @@ def _grade(bias: str, move: float) -> bool:
     return abs(move) < _FLAT      # NEUTRAL / SIDEWAYS
 
 
+def _write_graded(db, graded) -> int:
+    """Write the graded predictions, and return how many actually landed.
+
+    One batched upsert first — predictions come due in clumps, so this is
+    usually one round-trip instead of twenty. **Any shortfall falls back to one
+    row at a time**, which is the behaviour this replaced.
+
+    The fallback is not defensive padding. A grading pass that writes nothing
+    loses predictions that have already matured: they were read as open,
+    graded, and if the write is dropped they are still open next cycle with a
+    `due_at` further in the past — measured, then forgotten, forever. The count
+    returned is what reached the database, never what was attempted.
+    """
+    try:
+        from db.write_batch import upsert_many
+        report = upsert_many(db, "bias_predictions", graded, conflict="id")
+        if not report.get("errors") and report.get("rows"):
+            return int(report["rows"])
+    except Exception:
+        pass
+
+    written = 0
+    for row in graded:
+        try:
+            fields = dict(row)
+            row_id = fields.pop("id", None)
+            if row_id is not None and db.update_bias_prediction(row_id, fields):
+                written += 1
+        except Exception:
+            pass
+    return written
+
+
 class LearningEngine(Engine):
     name = "stage40_learning"
     stage = 40
@@ -64,6 +97,15 @@ class LearningEngine(Engine):
 
         resolved = 0
         # ── 1) grade due predictions ─────────────────────────────────
+        # Batched: predictions come due in clumps — every one logged in the same
+        # window matures in the same window — so this loop used to issue one
+        # round-trip per prediction to write a handful of small rows. Graded in
+        # memory, written once.
+        #
+        # An update by primary key IS an upsert: the rows carry `id`, so the
+        # conflict target is the key they already collide on and each row
+        # updates in place. Nothing about what is written changes.
+        graded = []
         try:
             for p in (db.get_open_bias_predictions() or []):
                 due = _parse(p.get("due_at"))
@@ -74,14 +116,17 @@ class LearningEngine(Engine):
                     continue
                 move = (spot - s0) / s0 * 100
                 correct = _grade(str(p.get("preferred_bias", "")), move)
-                db.update_bias_prediction(p["id"], {
+                graded.append({
+                    "id": p.get("id"),
                     "spot_then": round(float(spot), 2),
                     "realized_move": round(move, 3),
                     "correct": bool(correct),
                     "resolved_at": now.isoformat()})
-                resolved += 1
         except Exception:
             pass
+
+        if graded:
+            resolved = _write_graded(db, graded)
 
         # ── 2) log a new prediction (throttled, market hours, healthy) ─
         logged = False
