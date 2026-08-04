@@ -72,13 +72,10 @@ CREATE POLICY liquidity_telemetry_all ON liquidity_telemetry
     FOR ALL USING (true) WITH CHECK (true);
 
 COMMENT ON TABLE liquidity_telemetry IS
-    'Stage 74 calibration evidence. Advisory — nothing reads it to make a '
-    'decision; a human reads the distribution and decides whether to freeze.';
+    'Stage 74 calibration evidence. Advisory — nothing reads it to make a decision; a human reads the distribution and decides whether to freeze.';
 
 COMMENT ON COLUMN liquidity_telemetry.confidence_unscored IS
-    'Clusters whose confidence was UNKNOWN. Counted apart from the histogram: '
-    'an unscored cluster is not a low-confidence one, and folding it in would '
-    'drag the distribution toward TOO_HARSH for the wrong reason.';
+    'Clusters whose confidence was UNKNOWN. Counted apart from the histogram: an unscored cluster is not a low-confidence one, and folding it in would drag the distribution toward TOO_HARSH for the wrong reason.';
 
 -- ⚙️ Retention: 180 days, declared in db/retention.py. Long enough to compare
 --    this quarter's calibration against last quarter's, short enough that a

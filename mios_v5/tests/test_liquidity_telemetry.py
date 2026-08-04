@@ -368,3 +368,62 @@ def test_the_calibration_panel_says_nothing_before_there_is_anything_to_say():
     from mios_v5.ui import liquidity_panel as P
     assert P.calibration_html(None) == ""
     assert P.calibration_html({}) == ""
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  collection status — the failure that is otherwise invisible
+# ══════════════════════════════════════════════════════════════════════
+
+def test_a_missing_migration_is_loud_not_silent():
+    """The write is per-minute and best-effort, so a missing sql/036 means it
+    fails silently every cycle and a week of "collecting" produces zero rows —
+    discoverable only by going to look, a week later, having lost the week."""
+    from mios_v5.ui import liquidity_panel as P
+    html = P.collection_html({
+        "ok": False, "wrote": 0,
+        "error": 'relation "liquidity_telemetry" does not exist'})
+    assert "NOT being collected" in html
+    assert "sql/036_liquidity_telemetry.sql" in html
+
+
+def test_a_write_failure_that_is_not_a_missing_table_still_reports():
+    from mios_v5.ui import liquidity_panel as P
+    html = P.collection_html({"ok": False, "wrote": 0,
+                              "error": "connection reset by peer"})
+    assert "NOT being collected" in html
+    assert "connection reset" in html
+
+
+def test_never_having_written_is_flagged_rather_than_assumed_fine():
+    from mios_v5.ui import liquidity_panel as P
+    html = P.collection_html(None)
+    assert "has not written yet" in html
+
+
+def test_healthy_collection_confirms_briefly_then_goes_quiet():
+    """Loud about the broken case, absent otherwise — a permanent green badge
+    is noise a reader learns to skip past."""
+    from mios_v5.ui import liquidity_panel as P
+    assert "Collecting" in P.collection_html({"ok": True, "wrote": 1})
+    assert P.collection_html({"ok": True, "wrote": 40}) == ""
+
+
+def test_the_write_failure_is_captured_not_swallowed():
+    src = (ROOT / "vob_minimal.py").read_text()
+    # Anchor on the section, not on a key that appears twice inside it.
+    block = (src.split("Stage 74 telemetry")[1]
+                .split("except Exception as _liq_err")[0])
+    assert "_liq_telemetry_status" in block, "the outcome is not recorded"
+    assert "except Exception as _tel_err" in block, "the error is swallowed"
+
+
+def test_the_status_reaches_the_dashboard():
+    src = (ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
+    assert "render_collection" in src
+    assert "_liq_telemetry_status" in src
+
+
+def test_the_status_panel_never_raises():
+    from mios_v5.ui import liquidity_panel as P
+    for junk in (None, {}, "a string", 42, {"ok": "maybe"}, {"error": None}):
+        P.collection_html(junk)

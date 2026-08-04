@@ -14063,8 +14063,21 @@ def _render_main_analyzer():
                             cycle=st.session_state.get('_render_seq'))
                         db.insert_liquidity_telemetry(_row)
                         st.session_state['_liq_telemetry_ts'] = _now
-                except Exception:
-                    pass
+                        st.session_state['_liq_telemetry_status'] = {
+                            'ok': True, 'at': _now,
+                            'wrote': st.session_state.get(
+                                '_liq_telemetry_wrote', 0) + 1}
+                        st.session_state['_liq_telemetry_wrote'] = (
+                            st.session_state.get('_liq_telemetry_wrote', 0) + 1)
+                except Exception as _tel_err:
+                    # NOT swallowed. Before this, a missing `sql/036` migration
+                    # meant the write failed silently every minute and a week
+                    # of "collection" produced zero rows — discoverable only by
+                    # going to look. The calibration panel renders this, so a
+                    # migration nobody applied says so within a minute.
+                    st.session_state['_liq_telemetry_status'] = {
+                        'ok': False, 'at': time.time(), 'error': str(_tel_err),
+                        'wrote': st.session_state.get('_liq_telemetry_wrote', 0)}
             except Exception as _liq_err:
                 st.session_state['_liquidity_context'] = None
                 st.caption(f"Liquidity Intelligence unavailable: {_liq_err}")

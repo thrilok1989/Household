@@ -614,9 +614,15 @@ def _strike_validation(st, fr: Dict[str, Any]) -> None:
         # passed alongside because the heatmap needs per-bin rows, which the
         # context deliberately does not carry (thirty bins are a chart, not a
         # field).
-        from .liquidity_panel import render_calibration, render_liquidity
+        from .liquidity_panel import (render_calibration, render_collection,
+                                      render_liquidity)
         render_liquidity(st, st.session_state.get("_liquidity_context"),
                          st.session_state.get("_money_flow_data"))
+
+        # Whether telemetry is actually being written. Silent when healthy;
+        # loud when the migration is missing, because that failure is otherwise
+        # invisible for a week.
+        render_collection(st, st.session_state.get("_liq_telemetry_status"))
 
         # ── Stage 74 calibration verdict ───────────────────────────────
         # A different question from the panel above: that one says what

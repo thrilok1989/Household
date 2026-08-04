@@ -353,6 +353,67 @@ def liquidity_html(ctx: Any = None, profile: Any = None) -> str:
         "</div>")
 
 
+def collection_html(status: Optional[Dict[str, Any]] = None) -> str:
+    """Is telemetry actually being written?
+
+    This exists because the failure it catches is invisible. The write is
+    per-minute and best-effort, so a missing `sql/036` migration means it fails
+    silently every cycle and a week of "collecting" produces **zero rows** —
+    discoverable only by going to look, a week later, having lost the week.
+
+    Renders nothing once collection is healthy and has rows. The point is to be
+    loud about the broken case and absent otherwise.
+    """
+    s = _d(status)
+    if not s:
+        return (f"<div style='background:#0d1117;border:1px solid #3a2a1a;"
+                f"border-radius:10px;padding:8px 12px;margin-bottom:8px;"
+                f"font-size:10.5px;color:{WARN}'>"
+                f"⏸ <b>Stage 74 telemetry has not written yet.</b> "
+                f"If this persists past the first minute of a session, apply "
+                f"<code>sql/036_liquidity_telemetry.sql</code>.</div>")
+
+    if s.get("ok"):
+        wrote = int(_num(s.get("wrote")) or 0)
+        return ("" if wrote > 3 else
+                f"<div style='background:#0d1117;border:1px solid #1e2836;"
+                f"border-radius:10px;padding:8px 12px;margin-bottom:8px;"
+                f"font-size:10.5px;color:{BULL}'>"
+                f"✅ <b>Collecting.</b> {wrote} sample"
+                f"{'' if wrote == 1 else 's'} written this session — one a "
+                f"minute. The calibration verdict appears once there is enough "
+                f"to judge.</div>")
+
+    error = str(s.get("error") or "")
+    missing = ("does not exist" in error or "relation" in error.lower()
+               or "42P01" in error)
+    return (
+        f"<div style='background:#0d1117;border:1px solid #4a1f1f;"
+        f"border-radius:10px;padding:9px 12px;margin-bottom:8px'>"
+        f"<div style='font-size:11px;font-weight:800;color:{ALERT}'>"
+        f"⛔ Stage 74 telemetry is NOT being collected</div>"
+        + (f"<div style='font-size:10.5px;color:{MUTED};margin-top:3px'>"
+           f"The <code>liquidity_telemetry</code> table does not exist. Apply "
+           f"<code>sql/036_liquidity_telemetry.sql</code> — until then every "
+           f"sample is discarded and the calibration week never starts.</div>"
+           if missing else
+           f"<div style='font-size:10.5px;color:{MUTED};margin-top:3px'>"
+           f"Writes are failing, so no calibration evidence is accumulating."
+           f"</div>")
+        + f"<div style='font-size:9px;color:{MICRO};margin-top:3px'>"
+        f"{error[:180]}</div></div>")
+
+
+def render_collection(st, status: Optional[Dict[str, Any]] = None) -> None:
+    """Draw the collection status, or nothing when it is healthy."""
+    try:
+        html = collection_html(status)
+        if html:
+            st.markdown(html, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+
 def calibration_html(summary: Optional[Dict[str, Any]] = None) -> str:
     """The telemetry verdict — is the confidence curve discriminating?
 
