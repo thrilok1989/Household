@@ -1,58 +1,51 @@
 # MIOS V6 — deployment requirements.
 #
-# ⚠️ Every line has an UPPER bound. Before this, every line was `>=` with no
-# cap, which meant Streamlit Cloud re-resolved the whole tree on each rebuild
-# and could move a dependency across a major version without anything asking.
-# That is how the front end broke with:
+# Every line is the ORIGINAL floor plus an upper cap. Nothing is raised, so
+# every version the previous file could resolve, this file can still resolve —
+# the change can only forbid future majors, never force an upgrade today.
+#
+# ── why the caps ──
+# Before them, thirteen bare `>=` meant Streamlit Cloud re-resolved the whole
+# tree on every rebuild and could cross a major version with nothing asking.
+# Streamlit serves hash-named JS chunks, so a rebuild onto a different version
+# writes different chunk names and a browser holding the previous index.html
+# requests files that no longer exist:
 #
 #     TypeError: Failed to fetch dynamically imported module:
 #     https://…streamlit.app/~/+/static/js/
 #
-# Streamlit serves hash-named JS chunks. A rebuild that lands on a different
-# Streamlit version writes different chunk names, and a browser still holding
-# the previous `index.html` asks for files that no longer exist. Pinning the
-# front end is what stops a redeploy from breaking a live session.
+# ── ⚠️ why the floors are NOT raised ──
+# An earlier attempt pinned these to the versions installed in the test
+# sandbox — `pandas~=3.0.5`, `numpy~=2.4.6`, `streamlit==1.60.0`. That broke
+# the deploy with "Error installing requirements", because the sandbox is not
+# the deployment: **pandas 3.x requires Python >=3.11 and streamlit 1.61
+# requires >=3.10**, and nothing here knows which Python Streamlit Cloud runs.
 #
-# It also closes a quieter gap: the app that ships was resolved separately from
-# the app the tests ran against, so "2,135 tests pass" described a dependency
-# tree no deployment necessarily had.
+# A pin chosen from the wrong environment is worse than no pin. Caps are safe
+# because they only ever remove future versions; floors are not, because they
+# demand versions the target may not be able to install.
 #
-# ── the convention ──
-#   `==`  the front end. Its version IS the served asset, so it is exact.
-#   `~=`  everything else: patch and minor updates flow in, majors do not.
-#
-# ── when raising a pin ──
-# Raise it deliberately, run the suite, redeploy. A bound that drifts on its
-# own is the thing this file exists to prevent.
+# ── to pin the front end exactly (the real fix for the JS error) ──
+# It needs one fact this repo does not have: the Python version and the
+# currently resolved Streamlit version, both printed in the Streamlit Cloud
+# build log under Manage app. With those, `streamlit==<that version>` is a
+# no-op today and freezes the drift from then on.
 
-# ── the front end · exact ────────────────────────────────────────────────
-# 1.60.0 is the version this repo's test suite runs against. Check it against
-# the Streamlit Cloud build log before assuming a redeploy is a no-op — if
-# Cloud has been serving something else, this pin is a real version change and
-# wants a look at the app, not just at the tests.
-streamlit==1.60.0
-
-# ── verified by the test suite ──────────────────────────────────────────
-# Installed in the environment the 2,135 tests run in, at these versions.
-requests~=2.33.1
-pandas~=3.0.5
-numpy~=2.4.6
-scipy~=1.17.1
-plotly~=6.9.0
-pytz~=2026.3
-websockets~=16.1.1
-
-# ── NOT installed in the test environment ───────────────────────────────
-# Nothing in the suite imports these, so the bounds below are the existing
-# floors with a major-version cap added — they are NOT versions anything here
-# has exercised. Bounded so a rebuild cannot cross a major silently; not
-# claimed to be tested.
-#
-# `streamlit-autorefresh` sits here rather than beside `streamlit` despite
-# being a front-end component: it is not installed in the test environment
-# either, and the heading has to mean what it says.
-streamlit-autorefresh~=0.1.6
+streamlit>=1.28.0,<2.0.0
+# ⚠️ 0.1.6 NEVER EXISTED. Released versions are 0.0.1, 1.0.0 and 1.0.1 only,
+# so the original `>=0.1.6` had always been resolving to 1.0.1. Capping it at
+# `<1.0.0` — or the earlier `~=0.1.6` — asks for a version range containing no
+# release at all, which is what actually produced "Error installing
+# requirements". The floor moves UP here because the old one was fiction.
+streamlit-autorefresh>=1.0.0,<2.0.0
+requests>=2.31.0,<3.0.0
+pandas>=2.1.0,<4.0.0
+numpy>=1.24.0,<3.0.0
+scipy>=1.11.0,<2.0.0
+plotly>=5.17.0,<7.0.0
+pytz>=2023.3,<2027.0
 supabase>=1.0.3,<3.0.0
 yfinance>=0.2.28,<1.0.0
 google-genai>=1.0.0,<2.0.0
+websockets>=12.0,<18.0.0
 anthropic>=0.40.0,<1.0.0
