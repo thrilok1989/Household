@@ -168,6 +168,16 @@ def today_slice(df, column: Optional[str] = None):
 
     Returns the frame unchanged when no date column can be found, since a
     silently empty chart is worse than one showing too much.
+
+    When today has no rows at all — pre-open, a holiday, a stale cache — this
+    falls back to **the most recent session present**, not to the whole window.
+    Falling back to the whole frame is what made the terminal draw three days of
+    candles: at 09:00, or on a Saturday, `now().date()` matched nothing and every
+    caller silently got the full `days_back` window back. Handing back one real
+    session satisfies the same "never blank" intent without lying about the
+    range, which matters most for the callers that compute a day range off this
+    — a three-day high/low reported as today's is the error this function exists
+    to prevent.
     """
     if df is None or getattr(df, "empty", True):
         return df
@@ -185,15 +195,21 @@ def today_slice(df, column: Optional[str] = None):
             dates = getattr(idx, "date", None)
             if dates is None:
                 return df
+            dates = list(dates)
             out = df[[d == today for d in dates]]
+            if getattr(out, "empty", True) and dates:
+                last = max(dates)
+                out = df[[d == last for d in dates]]
         else:
             series = df[col]
             dt = getattr(series, "dt", None)
             if dt is None:
                 return df
-            out = df[dt.date == today]
+            day = dt.date
+            out = df[day == today]
+            if getattr(out, "empty", True):
+                out = df[day == day.iloc[-1]]
     except Exception:
         return df
-    # a frame with no rows for today (pre-open, or a stale cache) is more
-    # useful shown whole than shown blank
+    # Still nothing (a frame of NaT, say) — whole is better than blank.
     return out if not getattr(out, "empty", True) else df

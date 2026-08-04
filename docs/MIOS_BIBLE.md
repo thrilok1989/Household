@@ -22,7 +22,7 @@ supporting `indicators/`, `db/`, `sql/` layers.
 | [4](#part-4--the-refresh-cycle) | What happens every 20 seconds, in order |
 | [5](#part-5--generation-1-the-native-app) | Market Picture · Entry Gate · the pre-MIOS app |
 | [6](#part-6--mios-v5-the-computation-layer) | The contract · the orchestrator · all 41 stages |
-| [7](#part-7--mios-v6-the-intelligence-layer) | Waves 1–7 · stages 42–70 · the V6 bias · **Stage 71 matrix** |
+| [7](#part-7--mios-v6-the-intelligence-layer) | Waves 1–7 · stages 42–70 · the V6 bias · **Stage 71 · 71.5 · 71.7 · 71.8 · 71.85** |
 | [8](#part-8--the-decision-engines) | Entry Gate ‖ v0 ‖ v2 · the Signal Lifecycle |
 | [9](#part-9--the-dashboards) | Trade Card · D1–D6 · the Trading Terminal |
 | [10](#part-10--alerts) | Telegram tiers · Discord · the allow-list |
@@ -88,6 +88,15 @@ Cash-Maerket/
 │   ├── core/               contract.py · orchestrator.py — the framework
 │   ├── horizon_owner.py    Stage 71 ownership registry (see §7.7)
 │   ├── opportunity*.py     Stage 71 · 71.5 — the Trade Opportunity Matrix
+│   ├── premium_energy.py  Stage 71.7 — Premium Energy & Spike (see §7.7)
+│   ├── strike_validation.py  Stage 71.8 — Strike Validation (see §7.7)
+│   ├── premium_behaviour.py  Stage 71.85 — Premium LTP Behaviour (see §7.7)
+│   ├── premium_structure.py   the one premium-analysis orchestrator
+│   ├── trading_context.py     Stage 71.95 — the bridge to Stage 72
+│   ├── entry_engine.py        Stage 72 — the first execution stage
+│   ├── dispatcher.py          Stage 72.9 — the only door out
+│   ├── dispatch_validation.py the fault-injection harness
+│   ├── trade_lifecycle.py     Stage 73 — life after entry
 │   ├── engines/            stage00…stage69 — 47 registered engines
 │   ├── ui/                 40 panels incl. dashboard_v6.py, terminal_chart.py
 │   ├── tests/              65 test files, 1,123 tests
@@ -881,6 +890,636 @@ excluded list behind expanders (~33 KB). Sits at the top of the Trading tab —
 the three context strips that used to precede the chart moved **below** it, so
 execution stays above the fold.
 
+### Stage 71.7 — Premium Energy & Spike
+
+`premium_energy.py` · `ui/premium_energy_panel.py`
+
+Stage 71 says *which horizon and which side*. 71.7 says **whether that premium
+is actually being traded, and whether it could expand violently.** Advisory,
+absent from `ALL_ENGINES`, and it never says buy or sell.
+
+**Energy is not Spike.** Energy is participation *now*; Spike is expansion
+*probability*. A premium grinding higher is high Energy, low Spike; one pinned
+under a dealer wall is moderate Energy, high Spike. They are built from
+different substrates on purpose — merging them is the tempting refactor and it
+destroys the point.
+
+**Each side is scored alone, never by subtraction.** `call 70, put 65` is two
+live premiums; `70 − 65 = 5` says "no edge", which is false. Dominance and
+Balance are *presentations* of the two scores, never sources.
+
+| Input | Owner |
+|---|---|
+| **CBV · CSV · CVD** — mandatory, per side, as **numbers** | `indicators/order_flow.totals` via `_atm_leg_ltf_delta` |
+| Leg direction (six glyph engines) | `_leg_bias_cache` |
+| Premium behaviour — building · distribution · squeeze · unwinding · absorbing · exhausted | **Stage 50**, read whole |
+| Reaction — acceptance · break · trap · sweep | **Stage 42**, routed to the side it favours |
+| Dealer Wall · Gamma Flip | **Stage 11** via `fr["dealer_levels"]` |
+| Compression · release · expansion readiness | **Stage 37** |
+| Stability | **Stage 71**'s `stability()` over 44/47/54 |
+
+⚠️ **Stage 44 reaches the output through Stability and nothing else.** It used
+to cap Spike as well, which counted one veto twice — Stage 71's `stability()`
+already consumes `freeze_entries`. A source-level test now fails the build if
+the freeze reappears in the Spike path.
+
+**Two numbers cap rather than average.** *Participation* caps Spike — a premium
+nobody trades cannot expand explosively, however coiled the tape is. *Relative
+volume* caps Energy — `buy_share` describes the book, not the size, so 0.1M
+split evenly would otherwise score like 27M split evenly.
+
+**Vocabularies are borrowed, never translated.** Energy bands are
+`Dead · Weak · Healthy · Strong · Explosive`; Stability reports **Stage 44's own
+four words**; Confidence reuses `decision._grade`, imported so this stage and
+the Decision Engine cannot print disagreeing letters.
+
+**Energy Shift has seven states**, not six:
+
+`Exploding · Increasing · Building · Holding · Compressing · Distributing · Decreasing`
+
+`Holding` is a reading, not a fallback. Energy that exists and is not changing
+is a different fact from energy that is *coiling* — compression is a structure
+Stage 37 measures, and "nothing moved" is not evidence of one. Where Stage 50
+names a structural state that agrees with the movement, its word wins, because
+it names the mechanism: `Distributing` says writers are selling into this
+premium where `Decreasing` only says the number fell.
+
+**Acceleration is reported beside the state**, because either alone misleads —
+`Increasing` says nothing about whether the rise is 6 points or 26, and `+18`
+says nothing about what produced it. A second reading, `accelerating`, says
+whether the change itself is growing; it needs a third cycle (two points
+describe a change, three are the fewest that describe a change *in* the change)
+and stays `UNKNOWN` until then. Magnitude is compared, not sign — a fall going
+from −4 to −15 is speeding up in the sense a trader means.
+
+```
+cycle 1   energy  29 Weak       UNKNOWN     accel  —
+cycle 2   energy  89 Explosive  Exploding   accel +60
+cycle 3   energy 100 Explosive  Building    accel +11   slowing
+```
+
+Cycle 3 is why the two numbers are separate: energy is at its ceiling and the
+move into it has nearly stopped.
+
+**One trigger, not three.** `TRIGGER_PRIORITY` is causal — a dealer wall giving
+way changes what every other read means, so a volume spike underneath it is a
+consequence, not a second finding. `top_reasons` carries up to five contributors
+as `{code, label, side, weight}`: codes a downstream stage branches on, not
+sentences it would have to parse.
+
+**Rotation measures energy migration**, not which side the matrix currently
+favours. Stage 71's side can flip on directional evidence while both premiums
+keep exactly the participation they had, and calling that rotation names a
+migration that never happened.
+
+**The horizon join is the point, and it is not in the spec.**
+`attach_to_horizons()` flags `scalp → PUT · energy 21 → CONTRADICTED` — a
+horizon ranking high on directional evidence whose option has no participation.
+Nothing else on the screen can say it.
+
+> `out["bridge"]` publishes ten flat fields for **Stage 71.8**, which consumes
+> them. **Stage 72** (Entry) does not exist and is declared in `MISSING_INPUTS`
+> by name rather than assumed.
+
+### Stage 71.8 — Premium Strike Selection & Validation
+
+`strike_validation.py` · `ui/strike_validation_panel.py`
+
+Answers **"is the premium I want to trade actually a good premium?"** — not
+*CALL or PUT*, which 71.7 answered and this stage reads.
+
+```
+71.7   which side has energy?          → Preferred Premium
+71.8   is this strike worth trading?   → Overall Strike Score   ← here
+72     can I enter now?                → not built
+```
+
+**The trader picks the strike; the stage grades it.** `selected` is a
+parameter, and disagreement with what the chain is actually trading is
+**reported, never corrected**. There is no mechanism to switch a strike and the
+stage is not permitted one: a validator that silently moves the thing it is
+validating is not a validator. `most_traded_agreement` is the whole of that
+report — `Agree` on the busiest strike, `Partially Agree` within one step,
+`Disagree` beyond. One step is `Partially Agree` because the adjacent strike is
+routinely right for delta reasons, and calling that a disagreement trains a
+trader to ignore the check.
+
+**Busiest means volume, not OI.** OI is what is *held*; volume is what is being
+*traded today*. A strike can carry huge OI from a position opened last week and
+trade nothing this morning, and it is this morning's liquidity that decides
+whether you get out. When the chain omits volume the OI fallback is **labelled**.
+
+Ten weighted checks, each `Agree · Partially Agree · Disagree` or `UNKNOWN`:
+
+| Check | Weight | Owner |
+|---|---|---|
+| Liquidity | 2.5 | Stage 12 chain |
+| Premium health | 2.0 | **Stage 71.7** |
+| Premium S/R | 1.5 | native premium S/R (the leg's own VOB levels) |
+| Most-traded | 1.5 | Stage 12 chain |
+| Dealer | 1.5 | Stage 11 wall · gamma flip · charm pin |
+| Behaviour · Acceptance · HTF · Reaction zone · Absorption | 1.0 each | Stages 50 · 42 · 45 · 35 · 43 |
+
+Liquidity leads because it is the only check that can make a *correct* read
+untradeable — every other one is an opinion about a fill you may not get. A
+`Disagree` there is **disqualifying**: it returns `Avoid` regardless of score,
+because ten agreeing opinions about direction cannot rescue a premium nobody is
+quoting.
+
+**Unknown checks leave the denominator, never score zero** (Stage 63's rule),
+and `reporting` travels with the score everywhere it goes. Fewer than three
+checks reporting is also `Avoid` — a five-star rating resting on two inputs is
+the exact failure this stack exists to prevent.
+
+Score → `★★★★★ ≥80 · ★★★★☆ ≥65 · ★★★☆☆ ≥50 · ★★☆☆☆ ≥35 · ★☆☆☆☆ ≥20`, with
+`Avoid` a separate verdict rather than the bottom band.
+
+**It absorbed the Premium S/R Analyzer** an earlier draft numbered 71.9: "is
+this premium holding its own levels" is one of the questions "is this strike
+worth trading" is made of, and splitting them would give two stages a claim on
+the same leg.
+
+#### Premium Structure — the one premium-analysis orchestrator
+
+`premium_structure.py` · audited in
+`docs/AUDIT_STAGE_71_8_PREMIUM_STRUCTURE.md` **before it was written**.
+
+That audit checked 23 Premium Structure requirements against the codebase and
+found **18 already existing**. The dominant finding was not absence but
+**discard**: `build_leg_bias_table` runs the per-leg engines every cycle and
+collapses each to one 🟢/🔴/⚪ glyph. `detect_ignition` returns *named*
+sub-signals — **Wyckoff Spring** and **Wyckoff Upthrust** among them, which are
+false-break-plus-snap-back and therefore *are* the fakeout evidence — and the
+leg table keeps only `bull`/`bear`/`neu`.
+
+So the module reads the engines, not their glyphs. It **consumes** support ·
+resistance · acceptance · rejection · VOB · trend · momentum · CBV · CSV · CVD ·
+POC · value area · absorption · ignition, each with its owner named in
+`CONSUMED`.
+
+It **computes eight things**, each argued for individually in §5 of the audit
+and listed in `COMPUTED_HERE`:
+
+| New | Why |
+|---|---|
+| **HVN · LVN** | the profile publishes bins with volume ratios; nothing labelled which are nodes. Thresholds are expressed against the **even share**, so they do not change meaning when the bin count does |
+| **RVOL** | `avg_vol_1m` was computed in two places and discarded in both |
+| **Volume Climax** | genuinely missing — and needs RVOL, which did not exist. **Three conditions, all required**: high RVOL *plus* a wide range *plus* a close rejecting its own extreme. Volume alone is participation; a high bar in a trend is the trend working |
+| **Break · Fakeout probability** | weighted reads over the evidence above, **scored separately** — a break on climax volume with a Wyckoff upthrust is genuinely likely to go *and* genuinely likely to fail, and one blended number hides exactly that |
+| **structure_score · confidence** | the orchestrator's own output; no other owner by definition |
+
+⚠️ The audit found **four POC implementations** (`compute_vpfr` ·
+`money_flow_profile` · `TriplePOC` · `compute_dynamic_poc`). **`compute_vpfr` is
+the chosen owner** — already published per leg, returns VAH/VAL alongside, and
+the HTF stack uses it, so a premium POC and an index POC are computed the same
+way. A fifth is forbidden and **a test asserts the module imports no profile
+builder at all**.
+
+Score and confidence are separate readings: a premium scoring 80 on two
+components and one scoring 80 on six are not the same finding. A high fakeout
+probability **caps** the score rather than averaging into it — reliability is a
+statement *about* the structure, the same veto shape Stage 71.7 uses for
+participation.
+
+> Stage 71.8's `premium_sr_strength` check now **converts** this score into an
+> agreement instead of grading `sr["state"]` itself. Two modules owning "what is
+> this premium's structure doing" was the duplication Premium Structure exists
+> to end, and `LOW` confidence cannot read `Agree` — a strong score on two
+> components is not a strong structure.
+
+**Phase 5 · overlays.** Premium support · resistance · POC · HVN · LVN go on the
+terminal chart that already exists, through `_leg_overlay`, which already drew
+the leg's own levels. No second chart. The structure is built **once** per cycle
+and consumed by both the validation and the chart.
+
+**Phase 6 · the CALL/PUT summary** sits in the per-side validation card rather
+than the six-card Command Center for an ordering reason: the Command Center
+renders *before* the strike picker, so the structure does not exist yet when
+those cards are built. Putting it there would need a reorder or last cycle's
+numbers.
+
+> ⛔ No BUY · SELL · ENTER · EXIT. Asserted over the stage's **output** across a
+> matrix of inputs, not by grepping the source — Stage 43 publishes
+> `BUYER ABSORPTION` and quoting that back is a description of the tape, not a
+> command. Absent from `ALL_ENGINES`, no mutators, `advisory_only` throughout.
+
+**The picker** offers ATM±3 from `_cockpit_ctx`, so it can only name strikes the
+app can fetch candles for. The selection lives in `session_state` and survives
+reruns; a stored strike that drifts outside the window falls back to ATM rather
+than validating against candles the app no longer has. A wing strike with no leg
+entry reports `UNKNOWN` S/R rather than borrowing the ATM's — substituting a
+neighbour would grade the wrong option with nothing on screen to say so.
+
+⚪ **Not persisted to Supabase.** `sql/022_vob_app_state.sql` exists and its
+writer went in the V6 reduction, so a selection survives reruns but not a
+restart. Declared rather than half-built.
+
+### Stage 71.85 — Premium LTP Behaviour
+
+`premium_behaviour.py` · `docs/AUDIT_STAGE_71_85_PREMIUM_BEHAVIOUR.md` ·
+`docs/STAGE71_85_OUTPUT_CONTRACT.md`
+
+**One question:** *what is the selected premium's LTP doing right now at its own
+Support / Resistance?* Not where the levels are — Stage 71.8 owns that. Not
+whether to act — Stage 72 owns that. This stage sits between them and describes
+the interaction.
+
+```
+71.7 Energy → 71.8 Structure → 71.85 Behaviour → 71.95 Context → 72 Entry
+```
+
+#### One ledger, one axis, one behaviour
+
+The evidence does not vote for four behaviours. It votes on a single axis —
+pressure on **this** premium, `UP` or `DOWN` — and the engaged level turns the
+winner into a state:
+
+| engaged level | `UP` wins | `DOWN` wins |
+|---|---|---|
+| support | `Support Building` | `Support Fading` |
+| resistance | `Resistance Fading` | `Resistance Building` |
+
+Plus `Acceptance` (no level engaged, premium holding its value area) and
+`Neutral` (the evidence did not agree). Exactly six, exactly one emitted. A
+blend is *impossible* here rather than merely forbidden: one winner, one axis,
+and the level decides what to call it.
+
+A level is engaged within **4%** of the LTP — premiums move several percent in a
+minute, so a band tight enough for a NIFTY level would report "no battle" during
+the fight. The nearer level wins; a tie in the ledger is `Neutral`.
+
+The same number can mean opposite things: a high **break probability** at
+support is `DOWN`, at resistance is `UP`. That is why it cannot be read without
+knowing which level is engaged, and why those votes are cast after engagement.
+
+#### It computes five things, and only five
+
+`behaviour · strength · confidence · momentum · reason ranking`. Everything else
+is transported and `CONSUMED` names the owner. The audit checked 30-odd inputs
+against the codebase before a line was written: **every one already existed.**
+
+* **Strength** — five stars, the winner's share of the reported evidence.
+* **Confidence** — `decision._grade`, **imported, not reimplemented**: agreement
+  and coverage averaged on the 1–5 scale `_grade` already speaks, then capped by
+  Stage 44 (`SHOCK` → ≤2.0). A second A+/A/B/C ladder would drift from the first
+  within a month.
+* **Momentum** — five words, from Stage 71.7's shift. `Compressing` maps to
+  `Holding` because coiled energy is stored, not spent. **Exhaustion outranks
+  everything**: a premium can read accelerating on the shift and still be spent,
+  and the spent reading is the one that costs money.
+* **Reasons** — at most five, never plain strings, each carrying `code · label ·
+  owner · weight · source · direction`. Dissenting rows are shown too, so a
+  55/45 read does not render as 100/0.
+
+#### `Neutral` is a verdict; `UNKNOWN` is an absence
+
+`Neutral` means the evidence reported and did not agree. It is one of the six
+and it ships with reasons. But its **strength and confidence are `UNKNOWN`** —
+five stars and an A+ on "not enough evidence to say" is the opposite of what the
+words mean. In Stage 72 it maps to `None`, so it *leaves the denominator* rather
+than scoring 50 and quietly holding the score up.
+
+#### Three ownership corrections
+
+The spec lists CBV/CSV/CVD, RVOL and Volume under Stage 71.7. **RVOL and Volume
+are Stage 71.8's** — `premium_structure` computes RVOL and 71.7 has none — and
+71.8 owns the numeric flow totals where 71.7 has only the per-side glyph. All
+five are read from 71.8. Reading flow from one stage and volume from another
+would give one leg's tape two owners.
+
+And the **value area is the premium's own**, not Stage 45's: Stage 45's VAH/VAL
+are NIFTY levels, and a premium accepted above its own VAH is a different fact —
+the one describing the option a trader is holding.
+
+#### One premium at a time ⚠️ BINDING
+
+`analyse()` takes **one** structure and a side. `build()` calls it twice with
+nothing shared. Never averaged, never subtracted, never compared — a test
+changes every PUT input and asserts the CALL read is byte-identical.
+
+> ⛔ No BUY · SELL · ENTER · EXIT · no CALL/PUT recommendation · never changes
+> the selected strike · never overrides Stage 72 · never recalculates Structure,
+> S/R, break or fakeout. Enforced on the **parse tree**, docstrings stripped —
+> `BUYER_ABSORPTION` is Stage 43's name for a measurement and must survive,
+> a bare `BUY` must not.
+
+**The panel is mandatory.** `premium.behaviour` is an eleventh weight in Stage
+72 as of contract `72.1`, so it moves decisions — and Principle 12 says a value
+that moves decisions must be inspectable somewhere.
+
+### Stage 71.95 — the Unified Trading Context
+
+`trading_context.py` · not an engine · no UI · no session_state · no network
+
+**One immutable object carrying every analysis result a trading decision needs,
+so Stage 72 reads one thing instead of thirty.**
+
+```
+Market  →  TradingContext  →  Stage 72  →  Trade Manager  →  Telegram
+```
+
+Without it, Stage 72 would read `final_read`, the Opportunity Matrix, Stage
+71.7, Stage 71.8, Premium Structure and a dozen `sections.*` nodes directly —
+duplicated reads, versions drifting inside one cycle, ordering dependencies
+nobody wrote down, and a decision whose inputs cannot be listed.
+
+#### Every field names its owner ⚠️ BINDING
+
+Principle 12 says nothing may influence a decision unless the trader can inspect
+that exact value. **A value with no owner cannot be inspected, because nobody
+knows where to look.** So a field is not a value here — it is a `Field` carrying
+`value · owner · stage · source`, where `source` is the **literal dotted path**
+`_get()` read. The path is live, not documentation: a source that goes stale
+yields `UNKNOWN` rather than a wrong number read from somewhere else.
+
+`ctx.owners()` prints the whole table — 37 fields across seven groups, each with
+its stage and path.
+
+#### One fact, one owner
+
+Two fields may read the same *object* for different facts — `market.stability`
+and `risk.freeze` are both Stage 44 — but **no two fields may read the same
+path**, and a test enforces it. Two names for one fact drift.
+
+Where the spec asks for a field that *is* another field's value, `ALIAS` records
+a **pointer** instead of a copy. `risk.recovery` is the example: `RECOVERY` is
+one of the four values `market.stability` takes, so reading it separately would
+give one fact two owners. It renders `UNKNOWN` with `source =
+"→ market.stability"` and the reason.
+
+| Group | Fields |
+|---|---|
+| **market** | market_state · market_phase · day_type · session · trend · transition · stability |
+| **opportunity** | best_horizon · best_side · opportunity_score · confidence · top_reason |
+| **premium** | selected_call · selected_put · preferred_premium · premium_structure · premium_score · premium_confidence · premium_ltp · **behaviour · behaviour_strength · behaviour_confidence · momentum · break_probability · fakeout_probability · acceptance · top_reason · structure_state · structure_strength** *(71.85)* |
+| **strike** | selected_strike · validation · liquidity · agreement |
+| **energy** | energy · dominance · rotation · shift · energy_acceleration · spike_probability |
+| **htf** | htf_bias · migration · alignment · structure |
+| **risk** | risk · validity · freeze · shock · *(recovery → alias)* |
+| **meta** | timestamp · cycle · version · roots supplied/missing · field count |
+
+#### Immutable after creation
+
+**Deep-frozen** — mappings become `MappingProxyType`, sequences become tuples,
+all the way down. Shallow immutability would be a promise the object cannot
+keep: a frozen dataclass holding a plain dict lets one consumer edit what
+another is about to read. Mutating a source *after* `build()` does not change
+the context, so two stages reading it in one cycle see one set of values.
+
+#### Missing stays UNKNOWN
+
+Never `0`, never a default — a zero looks like a measurement. `None` is
+propagated as `UNKNOWN` too, because engines publish `None` deliberately and a
+context must not pass it on as though something were measured. An absent root is
+**named** in `meta.roots_missing` rather than read as empty, and `coverage()`
+reports how much of the context this cycle actually filled.
+
+#### Where it is built
+
+At the **end** of the strike-validation pass — the last point where all six
+roots exist (`final_read`, matrix, 71.7, 71.8, the structures, 71.85). Building it
+earlier would freeze a context missing half its fields. Nothing renders it; it
+exists to be consumed.
+
+> ⛔ Never calculates · never infers · never averages · never mutates · never
+> stores state. Not in `ALL_ENGINES`, imports no producer and no network client
+> — asserted on the **import graph**, because the ownership table legitimately
+> *names* every producer it carries a value from and a grep cannot tell a label
+> from an import.
+
+### Stage 72 — the Entry Engine
+
+`entry_engine.py` · `docs/AUDIT_STAGE_72_ENTRY_ENGINE.md` ·
+`docs/STAGE72_OUTPUT_CONTRACT.md`
+
+The **first execution stage**. `EntryEngine(ctx).run()` — one argument, one
+frozen `EntryDecision`. It answers only *is there an executable trade right
+now*; direction, strike and premium energy were answered upstream and are read,
+not re-decided.
+
+It imports **two** local modules — `trading_context` and `decision_v2` — and a
+test asserts exactly that set. It cannot reach Stage 42, the Opportunity Matrix
+or Premium Structure, which is the entire value of the bridge.
+
+**The state machine is Stage 52's, imported and enforced.** `_checked()` raises
+if Stage 72 ever emits a state outside `decision_v2.STATES`. The specification
+named three states Stage 52 does not implement — `WATCH`, `PARTIAL_EXIT`,
+`FULL_EXIT` — and `SPEC_ALIAS` maps them to `WAIT`, `SCALE_OUT` and `EXIT`
+rather than inventing them. In practice it emits only the four pre-entry states
+(`WAIT · ENTRY_READY · ENTER · ABORT`); the rest describe an open position it
+has no input for.
+
+Ten phases, four of which compute anything — and all four compute over verdicts
+the context already carries:
+
+| Phase | Output | Note |
+|---|---|---|
+| 1 Readiness | `READY · NOT_READY · UNKNOWN` | freeze, shock, invalid strike and illiquidity are **gates**, checked before the score |
+| 2 Score | 0–100 | ten documented weights; **strike validation leads at 2.5** — a correct read on an unvalidated strike is the failure being right cannot fix. Unknown inputs leave the denominator |
+| 3 Entry zone | `Early · Optimal · Late · Missed` | table over Stage 42's reaction and Stage 71.5's timing; where they disagree the **later** wins |
+| 4 Risk | five bands | Stage 71.5's level, **escalated** by instability rather than averaged |
+| 5 Reward | four bands | execution quality, not a price forecast |
+| 6 Entry type | six types | mapped from Stage 71.5; a type it cannot source stays `UNKNOWN` |
+| 7 Package | entry · stop · targets · R:R | ⚠️ **`target2`/`target3` are permanently `UNKNOWN`** — Stage 35 publishes one target and a ladder would be inventing levels |
+| 8 Telegram | payload | **prepared, never sent.** No network client is importable; `sent: False` |
+| 9 Explainability | ≤5 reasons · trigger · warnings · invalidations | each reason carries the **context's own** `owner` and `source`, copied not written |
+| 10 Summary | `trade? why? why not?` | both are present on every decision — a stage that explains itself only when it acts teaches a trader to read silence as permission |
+
+**The audit changed the context, not the engine.** `TradingContext` as first
+built could not answer Phases 3, 6 or 7 — Stage 42's reaction, Stage 71.5's
+timing/type/quality/risk/lifetime and Stage 35's target/invalidation were not in
+it. Ten fields were **added to the context** rather than letting Stage 72 reach
+around it. `opportunity.trade_risk` is named apart from `risk.risk` because they
+are different facts with different owners: the tape's breakout risk and this
+horizon's trade risk.
+
+Every decision records `context_version`, `context_cycle` and
+`context_coverage`, so a decision made on a thin cycle is visibly thin, and the
+score can be recomputed by hand from the published weights and components.
+
+#### ❄️ FROZEN at `72.1`
+
+`docs/STAGE72_FROZEN.md` is the closed contract. Entry scoring, weights, gates,
+recommendation logic, the Telegram decision and `TradingContext` ownership do
+not change inside this stage — bug fixes only. Everything else is Stage 73+.
+
+**Amendment 1 (`72.0` → `72.1`)** added Stage 71.85's behaviour as an eleventh
+weight, plus one decision field and seven payload keys. The scoring *philosophy*
+is untouched — same weighted mean, same unknown-excluded denominator, same
+gates, and `premium.premium_score` still weighs 1.5. The dispatcher accepts
+**both** versions, so a stored `72.0` decision still replays against the shape
+it was written for. A freeze that can be edited without a version bump is not a
+freeze; a freeze that can never change is a museum. The bump is the difference,
+and the next amendment follows the same rule.
+
+Every decision carries four identity fields, minted once and never rewritten:
+
+| Field | Value |
+|---|---|
+| `id` | UUID4, unique per decision |
+| `version` | `"72.1"` |
+| `created_at` | UTC ISO 8601, seconds |
+| `hash` | SHA-256 over `id · version · state · confidence · score · created_at` |
+
+The hash covers **identity plus verdict**, deliberately not the whole object: a
+digest that changed when a reason's wording changed would make the integrity
+check cry wolf until someone stopped reading it. `decision.verify()` returns
+`False` for a record altered after the fact — which is what replay, audit and
+the learning join need.
+
+**A decision represents history.** Immutability is deep: `targets`, `telegram`,
+`metadata` and `metadata["components"]` all reject writes, and `Reason` is
+frozen too. A consumer that could edit a decision could rewrite what was
+decided, and every row built on it would describe something that never happened.
+
+**Stage 73+ carry `decision.identity()` forward** — they never mint their own id
+and never restate the timestamp. Position, PnL, trailing, scaling and exit are
+theirs; Stage 72 owns the execution decision and nothing after it, asserted by a
+test that no such field exists on the output.
+
+> ⛔ Advisory. Immutable. Sends nothing. Not in `ALL_ENGINES`.
+
+### Stage 72.9 — the Decision Dispatcher
+
+`dispatcher.py` · `sql/031_dispatch_history.sql` ·
+`docs/AUDIT_STAGE_72_9_DISPATCHER.md` · `STAGE72_9_OUTPUT_CONTRACT.md` ·
+`STAGE72_9_FROZEN_PLAN.md`
+
+**The single gateway between MIOS and the outside world.** Not analysis, not
+execution, not lifecycle. It owns one question: *should this decision leave
+MIOS?*
+
+```
+Stage 72 → Stage 72.9 → Telegram
+Stage 73 ────┘  ↑ the only door
+```
+
+⚠️ **It owns the gateway, not the socket.** `import requests` inside `mios_v5`
+is a named forbidden failure mode, so the **transport is injected** and the app
+supplies it. This is stronger than owning the client: a send is impossible
+without passing the gates, the stage is unit-testable with no network, and a
+test asserts no other `mios_v5` module takes a `transport` parameter. The
+`registry` is injected for the same reason — history lives in Supabase and this
+module reaches no database.
+
+The gate ladder, in order — and the order matters:
+
+| Rung | Condition | State |
+|---|---|---|
+| 1 | missing field · bad hash · unsupported version | `BLOCKED` |
+| 2 | older than 300 s | `EXPIRED` |
+| 3 | hash already dispatched | `DUPLICATE` |
+| 4 | a newer decision already went | `SUPERSEDED` |
+| 5 | confidence `UNKNOWN` | `WAIT` |
+| 6 | not a sendable state or action | `WAIT` |
+| 7 | otherwise | `READY` → send |
+
+Validation runs **before** the duplicate check: a duplicate check that ran first
+would let an altered record suppress a legitimate one.
+
+**`WAIT` is never broadcast.** It is the engine working correctly, and saying so
+every cycle trains the reader to mute the channel — the one outcome a signal
+channel cannot survive.
+
+**A transport that raises, returns nothing, or returns something unreadable is
+`FAILED`, never `SENT`.** A message assumed delivered is a duplicate waiting to
+happen: the next cycle would see the hash recorded and stay quiet.
+
+**Editing beats re-sending.** `sql/031` records `telegram_message_id`, so a
+trade going `ENTER → TRAIL → EXIT` updates **one** message instead of posting
+three that each read like a new signal. The migration carries a partial unique
+index on `(decision_hash) WHERE status = 'SENT'`, so the duplicate guarantee
+holds even if two app instances race.
+
+**History is append-only.** A decision that was `READY` and then `SENT` is two
+rows, so the record says what happened rather than only where it ended. The
+Phase 10 cache is *derived* from it rather than stored twice.
+
+**The claim closes the race.** Reading "have I sent this?" and then sending is
+two operations with a gap, and two instances starting together both pass the
+check before either sends. `reserve() → send → confirm()/release()` closes it,
+and in Supabase the claim *is* the unique index: the `SENT` row is inserted
+**before** the message goes out, so a racing instance loses on a violation
+rather than on cooperation. Send-then-record would leave a window where a crash
+produces a delivered message with no history row — a spurious `FAILED` row is
+recoverable, a duplicate alert is not.
+
+`metrics()` and `health()` are **derived from the history on read**, never
+accumulated: a counter incremented alongside the rows is a second source of
+truth that drifts the first time a write fails halfway. Both are ⛔ **monitoring
+only** — a test asserts `run()` never reads them, because a dispatch layer that
+throttled itself on its own failure rate would turn an outage into a silence.
+
+> ⛔ The payload's wording is Stage 72's. This stage adds identity and nothing
+> else — asserted.
+>
+> ⚠️ **`STATUS = "VALIDATED_SIMULATED"`, `CONTRACT_VERSION = "72.9.0"`.** All
+> seven fault-injection scenarios pass over ~1,250 simulated dispatches —
+> volume, duplicates, race, restart, 40%-fault failures, corruption and edits
+> (`STAGE72_9_VALIDATION_REPORT.md`, regenerable). The live criterion is
+> untouched: no market data, no Telegram credentials, no Supabase instance in
+> this environment. A simulation proves the decision logic and cannot prove
+> that Telegram behaves as assumed or that the Postgres index fires under real
+> concurrency. **Flipping `STATUS` to `"FROZEN"` after 500 live dispatches is
+> the only change the freeze requires.**
+
+### Stage 73 — the Trade Lifecycle Engine
+
+`trade_lifecycle.py` · `docs/AUDIT_STAGE_73_LIFECYCLE.md` ·
+`docs/STAGE73_OUTPUT_CONTRACT.md` · `docs/STAGE73_FROZEN_PLAN.md`
+
+Owns **life after entry**, and nothing before it.
+
+```
+TradingContext → Stage 72 → Stage 73 → Learning · Analytics · Replay
+                            ↑ here
+```
+
+`TradeLifecycle(decision, ctx).run()` — two inputs, and a test asserts the local
+import set is exactly `{entry_engine, trading_context}`. It never decides
+whether to enter, and **it never mutates an `EntryDecision`**: a decision is
+history, so this stage builds a new record that *references* `decision.id`.
+
+**Its states are its own** — `WAIT_ENTRY · ENTERED · HOLD · ADD · SCALE_OUT ·
+TRAIL · EXIT · COMPLETE · ABORT`. Stage 52's machine describes getting *into* a
+trade; this one describes being *in* one, and sharing a vocabulary would make
+`WAIT` mean two different things one stage apart.
+
+⚠️ **`position_known` is always `UNKNOWN`.** `EntryDecision.state == "ENTER"`
+means Stage 72 *concluded* an entry was executable — not that an order was
+placed or filled, and nothing in MIOS reports that yet. `intent` carries what
+Stage 72 decided as a separate fact; `position_state` and `fill_price` are named
+in `MISSING_PRODUCERS` and surfaced in the warnings on every decision. Treating
+`ENTER` as "we are in a trade" would have every trail, scale and exit decision
+managing a position that may not exist, with output that looked entirely normal.
+
+| Phase | Output |
+|---|---|
+| 1 Awareness | `intent` + `position_known` — two facts, never conflated |
+| 2 Health | six bands over eight weighted context fields; **stability leads at 2.5** — the only input that can invalidate the read the trade was opened on |
+| 3 Action | **exactly one** of six, by a priority ladder — an exit trigger cannot be outvoted by good health |
+| 4 Trail | a **band**, never a level. `adaptive_trail` is Stage 52's; the stop is consumed from `EntryDecision.stop` and echoed as `metadata.stop_consumed` |
+| 5 Scale | `Add · Reduce · Neither` by vote, **never an average** — blending "energy collapsing" with "structure strong" recommends adding to a position losing its exit |
+| 6 Exit | first trigger wins. **`Stop Hit` outranks `Shock`** — a stop hit during a shock is still a stop hit, and recording the shock would blame the tape for a level doing its job |
+| 7 Summary | `why` and `why_not` on every decision |
+| 8 Telegram | prepared, `sent: False` |
+
+Identity mirrors Stage 72: `id` · `decision_id` · `version 73.0` ·
+`created_at` · `hash`, with `verify()` and `identity()`. Stage 74+ join on
+`decision_id`.
+
+**Deliberately not owned:** position sizing, lot count, PnL, broker integration.
+They need capital, risk-per-trade and fills — three inputs that do not exist —
+and their absence would otherwise infect every phase. A test asserts no such
+field appears on the output.
+
+> ❄️ **Not frozen yet.** `STAGE73_FROZEN_PLAN.md` lists ten criteria; eight
+> hold. The two blocking ones are a position producer and two weeks of logged
+> decisions — the same observational rule that governs every other promotion
+> here. One change is expected: a third `position` input, after which
+> `position_known` reports and **no other phase changes**. That is the design
+> goal, and it is testable today.
+
 ## 7.8 · The Trading tab, end to end
 
 ```
@@ -1343,7 +1982,7 @@ desktop engine.
 python3 -m pytest mios_v5/tests/ -q
 ```
 
-Expect **1,123 tests, all passing**. Part 15 records what is still open.
+Expect **1,608 tests, all passing**. Part 15 records what is still open.
 
 ## 13.5 · Adding an engine — the checklist
 
@@ -1398,7 +2037,7 @@ Expect **1,123 tests, all passing**. Part 15 records what is still open.
 
 ## 15.1 · The suite is green
 
-**1,123 passing, 0 failing.**
+**1,608 passing, 0 failing.**
 
 Three tests failed for most of this project's recent history, and all three
 traced to a single revert rather than three bugs. Commit `9a79542` gave

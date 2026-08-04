@@ -142,6 +142,38 @@ Two corollaries worth stating, because they are where this gets violated:
 * **Consumed-but-unpublished is the smell.** If a value is read inside a
   computation and appears in no panel, either surface it or stop reading it.
 
+## 12a · One bridge, not thirty reads
+
+*Added with Stage 71.95.*
+
+A decision stage must consume **one object**, not the stages behind it.
+
+```
+Market  →  TradingContext  →  Stage 72  →  Trade Manager  →  Telegram
+```
+
+Reading stages directly produces four failures, and only the first is visible:
+duplicated reads, versions that drift *inside a single cycle*, ordering
+dependencies nobody wrote down, and a decision whose inputs cannot be
+enumerated — which puts principle 12 out of reach, because you cannot show a
+trader a list you cannot produce.
+
+`mios_v5/trading_context.py` is that bridge. Three rules make it one:
+
+1. **Every field declares `owner · stage · source`,** and `source` is the live
+   dotted path the value was read from — not a comment. A stale path yields
+   `UNKNOWN` instead of a wrong number.
+2. **No two fields read the same path.** Two names for one fact drift. Where the
+   spec wants a field that *is* another field's value, the context records a
+   pointer (`ALIAS`), not a copy.
+3. **Immutable, deep.** Frozen mappings and tuples all the way down, so two
+   consumers in one cycle cannot see different values, and mutating a source
+   after the build changes nothing.
+
+The context calculates nothing, infers nothing, averages nothing. It transports.
+
+---
+
 ## 13 · Non-negotiable
 
 Restated because it is the one that decays quietest:

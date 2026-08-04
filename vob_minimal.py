@@ -7485,6 +7485,18 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
     """Compact card: regime + probability bars + levels + playbook."""
     mp = compute_market_picture(spot_price, df, option_data, cat_scores)
     if not mp:
+        # A bare `return` here is why the Trade Card could only say "Market
+        # Picture has not produced a read yet" — true, but not a reason. This is
+        # the ONE precondition `compute_market_picture` refuses to proceed
+        # without, so name whichever half is missing. Everything downstream
+        # (`_market_picture`, and therefore the Trade Card, the Strike Cockpit
+        # and five of V6's inputs) hangs off this line succeeding.
+        _missing = ("no NIFTY candles — the intraday fetch and the Supabase "
+                    "cache both came back empty"
+                    if df is None or getattr(df, 'empty', True)
+                    else "no spot price" if not spot_price
+                    else "the regime vote produced nothing")
+        st.caption(f"🗺️ Market Picture unavailable — {_missing}.")
         return
     st.session_state['_market_picture'] = mp
     _c = {'UP': '#00ff88', 'DOWN': '#ff4444', 'SIDEWAYS': '#ffd000'}[mp['regime']]
@@ -13394,21 +13406,16 @@ def render_clean_card(spot_price, option_data=None):
 def _today_session(df):
     """Just the latest session's bars, for the chart.
 
-    "Today" is the date of the LAST bar, not the wall clock. Before the open, and
-    on a holiday, the newest bars are the previous session's — anchoring on
-    `datetime.now()` would return an empty frame and blank the chart, which looks
-    identical to a data outage. Anchoring on the last bar always draws the most
-    recent real session.
-
-    Returns the frame unchanged if it cannot tell, because a chart with too much
-    history is a smaller problem than no chart.
+    Delegates to `mios_v5.clock.today_slice`, which is the single owner of "one
+    session only" and is what `terminal_chart` already applies to all three
+    panels. A second implementation here is how the two would eventually
+    disagree about where a session starts — and the real bug was in that owner,
+    not in having one: it fell back to the WHOLE window whenever wall-clock
+    today had no rows, so pre-open and on holidays every caller got three days.
     """
     try:
-        if df is None or getattr(df, 'empty', True) or 'datetime' not in df.columns:
-            return df
-        last_day = df['datetime'].iloc[-1].date()
-        today = df[df['datetime'].dt.date == last_day]
-        return today if not today.empty else df
+        from mios_v5.clock import today_slice
+        return today_slice(df)
     except Exception:
         return df
 
@@ -13544,10 +13551,14 @@ def _publish_atm_legs(api, spot, option_data, render_id):
                         pe = v
         return (int(ce) if ce else None), (int(pe) if pe else None)
 
-    # ATM+/-2 ids for the Strike-Mode Cockpit's on-demand wing fetches.
+    # ATM+/-3 ids for the Strike-Mode Cockpit's on-demand wing fetches and for
+    # Stage 71.8's strike picker. Ids only — no fetch happens here, so widening
+    # the range from +/-2 costs two dictionary entries and no request budget.
+    # The picker needs them because a trader choosing ATM+3 must get that leg's
+    # own candles, not a silent fall back to ATM.
     try:
         wings = {}
-        for off in (-2, -1, 0, 1, 2):
+        for off in (-3, -2, -1, 0, 1, 2, 3):
             sv = atm + off * gap
             ce, pe = sids_for(sv)
             if ce:
@@ -13560,8 +13571,28 @@ def _publish_atm_legs(api, spot, option_data, render_id):
         pass
 
     for store in ('_atm_leg_dfs', '_atm_leg_sids', '_atm_leg_vob_volume',
-                  '_atm_leg_vidya', '_atm_leg_sr_behavior'):
+                  '_atm_leg_vidya', '_atm_leg_sr_behavior',
+                  '_atm_leg_ltf_delta'):
         st.session_state[store] = {}
+
+    # The three builders Premium Structure needs for a strike outside ATM±1.
+    #
+    # `mios_v5` cannot import this file (it boots Streamlit and reads secrets),
+    # and Premium Structure may not compute a profile of its own — the audit
+    # found FOUR POC implementations and chose `compute_vpfr` as the one owner.
+    # Publishing the callables lets the dashboard build a wing strike's profile
+    # with the same function the ATM±1 legs use, rather than a fifth copy.
+    #
+    # `detect_ignition` is here for the reason the audit called its headline:
+    # the leg table collapses its NAMED sub-signals — Wyckoff Spring and
+    # Upthrust among them — into one glyph, so a consumer that wants the
+    # fakeout evidence has to call the engine itself.
+    st.session_state['_premium_builders'] = {
+        'vpfr': lambda f: compute_vpfr(f, 60),
+        'mfp': lambda f: calculate_money_flow_profile(f, num_rows=25,
+                                                      source='Money Flow'),
+        'ignition': detect_ignition,
+    }
     st.session_state['_atm_leg_api'] = api
 
     legs = []
@@ -13590,6 +13621,25 @@ def _publish_atm_legs(api, spot, option_data, render_id):
                 if vidya:
                     st.session_state['_atm_leg_vidya'][name] = vidya
                     st.session_state['_atm_leg_vidya'][f"sid_{sid}"] = vidya
+            except Exception:
+                pass
+            # Per-leg buyer/seller split — Premium CBV / CSV / CVD.
+            #
+            # The reduction removed this store's WRITER and kept its readers:
+            # `dashboard_v6._leg_flow_readings` and Stage 71.7 both ask for
+            # `_atm_leg_ltf_delta` and have been getting `{}` ever since. The
+            # closure was built from what V6 *reads*, and a store the app fills
+            # for a later cycle produces no read edge — the same blind spot that
+            # severed the learning writers.
+            #
+            # Restored through `indicators/order_flow.totals`, which owns the
+            # CLV split, rather than by bringing back the inline copy the
+            # original used. Same numbers, one implementation.
+            try:
+                _tot = _of.totals(frame)
+                if _tot and not _of.is_missing(_tot):
+                    st.session_state['_atm_leg_ltf_delta'][name] = _tot
+                    st.session_state['_atm_leg_ltf_delta'][f"sid_{sid}"] = _tot
             except Exception:
                 pass
             mfp = None
