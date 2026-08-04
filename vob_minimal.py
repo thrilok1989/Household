@@ -17,6 +17,7 @@ from pytz import timezone
 import io
 import os
 from db.supabase_client import SupabaseDB
+from db.read_cache import wrap as _cache_reads
 from indicators.money_flow_profile import calculate_money_flow_profile
 from mios_v5.story_integration import get_story_task, process_market_event
 from mios_v5.market_events import build_event, EventType, EventSeverity
@@ -13687,7 +13688,15 @@ def _render_main_analyzer():
                  "```\n[supabase]\nurl = \"…\"\nanon_key = \"…\"\n```")
         return
     try:
-        db = SupabaseDB(supabase_url, supabase_key)
+        # Wrapped once, here, so every consumer — both dashboards, every panel,
+        # every engine that takes `db` — reads through the Streamlit cache
+        # without a single call site changing. Supabase is touched only when a
+        # value is not already cached, or after the app resets.
+        #
+        # Without this, `st_autorefresh` at 20s plus Streamlit running EVERY
+        # tab and expander body on EVERY rerun meant ~30,800 rows fetched per
+        # cycle, whether or not anyone was looking at the tab that asked.
+        db = _cache_reads(SupabaseDB(supabase_url, supabase_key))
         db.sync_pending()
         st.session_state['_db_obj'] = db
         st.session_state['_story_task'] = get_story_task()
@@ -13735,6 +13744,30 @@ def _render_main_analyzer():
             st.session_state['_dhan_token_override'] = _tok.strip()
             st.session_state['_dhan_token_expired'] = False
             st.rerun()
+
+    # ── database cache: what it saved, and the manual reset ─────────────
+    # The cache holds until the app restarts, so a trader who wants the
+    # analytics re-read needs a way to say so without restarting. This is that
+    # way — and the counters are here so the saving is visible rather than
+    # asserted.
+    try:
+        from db.read_cache import invalidate as _db_cache_clear
+        from db.read_cache import stats as _db_cache_stats
+        _cs = _db_cache_stats()
+        with st.sidebar.expander("🗄 Database cache", expanded=False):
+            _served = max(0, _cs['calls'] - _cs['fetches'])
+            st.caption(
+                f"{_cs['calls']:,} reads asked · **{_cs['fetches']:,}** reached "
+                f"Supabase · {_served:,} served from cache "
+                f"({_cs['rows']:,} rows fetched this session)")
+            st.caption(
+                "Analytics and history are held until the app resets; live "
+                "reads (open position, spot, config) refresh every cycle.")
+            if st.button("Refresh from Supabase"):
+                _db_cache_clear()
+                st.rerun()
+    except Exception:
+        pass
 
     access_token = st.session_state.get('_dhan_token_override') or DHAN_ACCESS_TOKEN
     api = DhanAPI(access_token, DHAN_CLIENT_ID)
