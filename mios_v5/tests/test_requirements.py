@@ -38,8 +38,11 @@ REQ = ROOT / "requirements.txt"
 #: ⚠️ `streamlit-autorefresh` is 1.0.0, not the 0.1.6 the file used to claim:
 #: that version was never released, so `>=0.1.6` had always resolved to 1.0.1.
 #: A floor naming a version that does not exist is not a floor.
+#: `streamlit` is 1.60.0 rather than the old 1.28.0 floor because it is now an
+#: exact pin, confirmed twice: the Cloud build log shows pip fetching it on
+#: Python 3.14.6, and it is the version this suite runs against.
 KNOWN_GOOD_FLOORS = {
-    "streamlit": "1.28.0", "streamlit-autorefresh": "1.0.0",
+    "streamlit": "1.60.0", "streamlit-autorefresh": "1.0.0",
     "requests": "2.31.0", "pandas": "2.1.0", "numpy": "1.24.0",
     "scipy": "1.11.0", "plotly": "5.17.0", "pytz": "2023.3",
     "supabase": "1.0.3", "yfinance": "0.2.28", "google-genai": "1.0.0",
@@ -107,9 +110,15 @@ def test_no_floor_is_raised_above_the_known_good_deployment(name, spec):
         f"deployment is known to install")
 
     if spec.startswith("=="):
-        pytest.fail(f"{name}{spec} — an exact pin sets the floor to that "
-                    f"version; confirm it against the Cloud build log and "
-                    f"update KNOWN_GOOD_FLOORS deliberately")
+        # An exact pin IS a floor, so it must be one the deployment is known to
+        # install — confirmed against the Cloud build log, recorded here. This
+        # is the deliberate path, not a forbidden one.
+        pinned = spec[2:].strip()
+        assert pinned == known, (
+            f"{name}=={pinned} is pinned to a version KNOWN_GOOD_FLOORS does "
+            f"not record ({known}). Confirm it against the Streamlit Cloud "
+            f"build log, update the table, and re-run the dry run")
+        return
 
     floor = _floor(spec)
     if spec.startswith("~="):
