@@ -14017,12 +14017,20 @@ def _render_main_analyzer():
                     if _side in ('CALL', 'PUT') and isinstance(_v, dict):
                         _prem.setdefault(_side, _v)
 
+                # The ONE ATR — Stage 00 publishes it, nothing here recomputes
+                # it. Last cycle's copy (the MIOS pass runs at step 11), which
+                # is fine: a 14-bar ATR does not move meaningfully in twenty
+                # seconds, and without it the cluster tolerance falls back to
+                # its floor and says so rather than guessing.
+                _atr = (st.session_state.get('_atr') or {}).get('atr')
+
                 st.session_state['_liquidity_context'] = _liq_build(
                     profile=_sess,
                     vpfr=compute_vpfr(df, min(len(df), 120), n_rows=24),
                     dynamic_poc=_dyn,
                     pools=_mp.get('liq_pools'),
                     dealer=_dealer,
+                    atr=_atr,
                     spot=_last,
                     price_change=_last - _prev_close,
                     previous=_prev_profile,

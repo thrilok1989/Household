@@ -97,6 +97,16 @@ def _px(v) -> str:
     return "—" if n is None else f"{n:,.1f}"
 
 
+def _conf_col(score: Optional[float]) -> str:
+    """Confidence bands. Deliberately coarse — the number is a 0–100 estimate
+    built partly from components that have no producer yet, and colouring it in
+    ten shades would imply a precision it does not have."""
+    if score is None:
+        return FAINT
+    return (BULL if score >= 80 else BULL_SOFT if score >= 60
+            else WARN if score >= 40 else MICRO)
+
+
 def _cell(label: str, value: str, tone: str = MUTED) -> str:
     return (f"<div style='min-width:0'>"
             f"<div style='font-size:8.5px;letter-spacing:.08em;color:{MICRO};"
@@ -198,21 +208,32 @@ def _levels_html(levels: Dict[str, Any]) -> str:
 
     def rows(entries, colour, arrow):
         out = []
-        for e in _seq(entries)[:4]:
-            e = _d(e)
+        for raw in _seq(entries)[:4]:
+            # `Level` is the frozen contract; a plain dict is still accepted so
+            # a stored or replayed level renders the same as a live one.
+            e = raw.to_dict() if hasattr(raw, "to_dict") else _d(raw)
+            if not e:
+                continue
             rank = str(e.get("rank") or MINOR)
+            conf = _num(e.get("confidence"))
             out.append(
                 f"<div style='display:flex;gap:6px;align-items:baseline;"
                 f"font-size:10.5px;padding:1px 0'>"
                 f"<span style='width:12px;color:{colour}'>{arrow}</span>"
                 f"<span style='width:64px;color:{_RANK_COL.get(rank, MICRO)};"
                 f"font-weight:700'>{_px(e.get('price'))}</span>"
-                f"<span style='width:52px;color:{MICRO};font-size:9px'>"
+                # Confidence leads the metadata: it is what a consuming stage
+                # gates on, and the witness count is one of its inputs.
+                f"<span style='width:34px;font-weight:800;font-size:10px;"
+                f"color:{_conf_col(conf)}'>"
+                f"{'—' if conf is None else f'{conf:.0f}'}</span>"
+                f"<span style='width:48px;color:{MICRO};font-size:9px'>"
                 f"{rank}</span>"
                 f"<span style='color:{MUTED};font-size:9px;min-width:0'>"
-                f"{' · '.join(str(k) for k in _seq(e.get('kinds'))[:4])}</span>"
+                f"{' · '.join(str(k) for k in _seq(e.get('kinds'))[:3])}</span>"
                 f"<span style='color:{MICRO};font-size:9px;margin-left:auto;"
-                f"white-space:nowrap'>{e.get('witnesses', '—')}w</span>"
+                f"white-space:nowrap'>{e.get('diversity', '—')}e · "
+                f"{e.get('reporting', '—')}/{e.get('of', '—')}</span>"
                 f"</div>")
         return "".join(out)
 
@@ -281,7 +302,15 @@ def liquidity_html(ctx: Any = None, profile: Any = None) -> str:
               (lambda s: "—" if s is None else f"{s:.0f}%")(
                   _num(get("index.poc_stability")))),
         _cell("Prev POC", _px(get("index.poc_previous"))),
+        # The regime says whether today's POC movement is a lot FOR THIS
+        # INSTRUMENT — the reading a fixed threshold could never give.
+        _cell("POC regime", _txt(get("index.poc_regime"))),
         _cell("Clusters", _txt(get("levels.clusters"))),
+        # The tolerance is volatility-adaptive, so it belongs on screen: two
+        # cycles' clusters are only comparable if the band did not move.
+        _cell("Cluster band",
+              (lambda t: "—" if t is None else f"{t:.3f}%")(
+                  _num(get("levels.tolerance_pct")))),
     ])
 
     rows = _seq(_d(profile).get("rows"))

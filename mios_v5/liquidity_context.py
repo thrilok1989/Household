@@ -73,6 +73,11 @@ SPEC: Dict[str, Dict[str, Tuple[str, str, str, str]]] = {
                          "poc_migration.velocity"),
         "poc_stability": ("Liquidity Intelligence", "74", "liq",
                           "poc_migration.stability"),
+        # Direction and magnitude are separate facts, and the second one is
+        # judged against this instrument's OWN recent movement rather than a
+        # constant — so the same reading works on a quiet Tuesday and on expiry.
+        "poc_regime": ("Liquidity Intelligence", "74", "liq",
+                       "poc_regime.regime"),
         "value_area_high": ("Money Flow Profile", "74", "liq",
                             "value_area.high"),
         "value_area_low": ("Money Flow Profile", "74", "liq",
@@ -102,6 +107,12 @@ SPEC: Dict[str, Dict[str, Tuple[str, str, str, str]]] = {
         "major_resistance": ("Liquidity Intelligence", "74", "liq",
                              "levels.major_resistance"),
         "clusters": ("Liquidity Intelligence", "74", "liq", "levels.clusters"),
+        # The tolerance is volatility-adaptive, so a consumer comparing two
+        # cycles' clusters needs to know whether the band moved underneath it.
+        "tolerance_pct": ("Liquidity Intelligence", "74", "liq",
+                          "levels.tolerance_pct"),
+        # The frozen contract version every `Level` was written against.
+        "schema": ("Liquidity Intelligence", "74", "liq", "levels.schema"),
     },
     # ── the premium chart · ALL of this is Stage 71.8, none of it is new ──
     "premium": {
@@ -219,6 +230,7 @@ def build(profile: Any = None, vpfr: Any = None,
           dynamic_poc: Any = None, vob: Any = None, pools: Any = None,
           dealer: Any = None, spot: Any = None, price_change: Any = None,
           previous: Any = None, premium: Any = None, chain: Any = None,
+          atr: Any = None, strike_gap: Any = None,
           cycle: Optional[int] = None, premium_lag: int = 0,
           timestamp: Optional[float] = None) -> LiquidityContext:
     """Assemble one cycle's liquidity context. Never raises.
@@ -239,7 +251,8 @@ def build(profile: Any = None, vpfr: Any = None,
     """
     liq = _analyse(profile=profile, vpfr=vpfr, dynamic_poc=dynamic_poc,
                    vob=vob, pools=pools, dealer=dealer, spot=spot,
-                   price_change=price_change, previous=previous)
+                   price_change=price_change, previous=previous,
+                   atr=atr, strike_gap=strike_gap)
 
     roots: Dict[str, Any] = {"liq": liq, "premium": premium, "chain": chain}
 

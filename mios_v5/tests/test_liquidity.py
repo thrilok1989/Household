@@ -344,8 +344,9 @@ def test_levels_from_different_owners_near_each_other_become_one():
                             dealer={"gamma_flip": 24002.0},
                             spot=23900.0)
     assert out["clusters"] == 1
-    assert out["resistance"][0]["witnesses"] == 3
-    assert out["resistance"][0]["rank"] == LQ.MAJOR
+    level = out["resistance"][0]
+    assert isinstance(level, LQ.Level)
+    assert level.diversity == 3 and level.rank == LQ.MAJOR
 
 
 def test_three_witnesses_from_one_owner_is_still_one_witness():
@@ -356,15 +357,18 @@ def test_three_witnesses_from_one_owner_is_still_one_witness():
             {"bin_low": 24005.0, "bin_high": 24015.0, "node_type": "High"},
             {"bin_low": 24010.0, "bin_high": 24020.0, "node_type": "High"}]
     out = LQ.cluster_levels(profile={"rows": rows}, spot=23000.0)
-    assert all(e["rank"] != LQ.MAJOR for e in out["resistance"])
+    assert all(e.rank != LQ.MAJOR for e in out["resistance"])
+    assert all(e.diversity == 1 for e in out["resistance"])
 
 
 def test_support_is_below_spot_and_resistance_above():
     out = LQ.cluster_levels(profile={"poc_price": 24100.0, "rows": []},
                             vpfr={"val": 23900.0}, spot=24000.0)
     assert out["resistance"] and out["support"]
-    assert all(e["price"] > 24000.0 for e in out["resistance"])
-    assert all(e["price"] < 24000.0 for e in out["support"])
+    assert all(e.price > 24000.0 and e.side == LQ.RESISTANCE
+               for e in out["resistance"])
+    assert all(e.price < 24000.0 and e.side == LQ.SUPPORT
+               for e in out["support"])
 
 
 def test_the_nearest_level_comes_first():
@@ -373,8 +377,8 @@ def test_the_nearest_level_comes_first():
         profile={"poc_price": 24500.0, "rows": []},
         vpfr={"poc": 24100.0, "vah": 24900.0, "val": 23500.0},
         spot=24000.0)
-    res = [e["price"] for e in out["resistance"]]
-    sup = [e["price"] for e in out["support"]]
+    res = [e.price for e in out["resistance"]]
+    sup = [e.price for e in out["support"]]
     assert res == sorted(res)
     assert sup == sorted(sup, reverse=True)
 
@@ -386,13 +390,17 @@ def test_a_level_at_spot_is_neither_support_nor_resistance():
 
 
 def test_the_tolerance_is_the_callers_because_a_premium_is_not_an_index():
-    """0.12% of NIFTY is thirty points; of a ₹100 premium it is twelve paise."""
-    tight = LQ.cluster_levels(profile={"poc_price": 100.0, "rows": []},
-                              vpfr={"poc": 102.0}, spot=90.0)
+    """An explicit tolerance overrides the adaptive one — a ₹100 premium needs
+    a far wider band than an index to mean the same thing, and the caller knows
+    which instrument it handed over."""
     wide = LQ.cluster_levels(profile={"poc_price": 100.0, "rows": []},
                              vpfr={"poc": 102.0}, spot=90.0,
                              tolerance_pct=5.0)
-    assert tight["clusters"] == 2 and wide["clusters"] == 1
+    tight = LQ.cluster_levels(profile={"poc_price": 100.0, "rows": []},
+                              vpfr={"poc": 102.0}, spot=90.0,
+                              tolerance_pct=0.01)
+    assert wide["clusters"] == 1 and tight["clusters"] == 2
+    assert wide["tolerance_pct"] == 5.0
 
 
 def test_no_level_source_reporting_is_unknown_not_an_empty_list():
@@ -408,8 +416,9 @@ def test_every_clustered_level_names_the_owners_behind_it():
     out = LQ.cluster_levels(profile={"poc_price": 24000.0, "rows": []},
                             dealer={"gamma_flip": 24001.0}, spot=23000.0)
     entry = out["resistance"][0]
-    assert entry["owners"] and all(isinstance(o, str) for o in entry["owners"])
-    assert entry["kinds"]
+    assert entry.engine_sources
+    assert all(isinstance(o, str) for o in entry.engine_sources)
+    assert entry.kinds
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -577,8 +586,10 @@ def test_every_session_key_the_wiring_reads_has_a_writer():
                .split("except Exception as _liq_err")[0]
     reads = set(re.findall(r"session_state\.get\('(_[a-z_]+)'\)", block))
     writers = set(re.findall(r"session_state\['(_[a-z_]+)'\] = ", src))
-    writers |= set(re.findall(r'session_state\["(_[a-z_]+)"\] = ',
-                              (ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()))
+    for extra in ("mios_v5/ui/dashboard_v6.py", "mios_v5/runner.py"):
+        text = (ROOT / extra).read_text()
+        writers |= set(re.findall(r'session_state\["(_[a-z_]+)"\] = ', text))
+        writers |= set(re.findall(r"session_state\['(_[a-z_]+)'\] = ", text))
     assert reads and not (reads - writers), reads - writers
 
 
@@ -737,3 +748,269 @@ def test_the_panel_is_wired_into_the_dashboard():
     src = (ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
     assert "from .liquidity_panel import render_liquidity" in src
     assert "_liquidity_context" in src
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  74.1 · the frozen level contract
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_level_schema_is_frozen_and_versioned():
+    """Seven stages are queued to consume these. Reading a bare dict would mean
+    improving the clustering breaks all seven."""
+    import dataclasses
+    lvl = LQ.Level(price=1.0, side=LQ.SUPPORT, rank=LQ.MINOR, confidence=50,
+                   witness_count=1, engine_sources=("a",), kinds=("POC",),
+                   dispersion=0.0, dispersion_pct=0.0, freshness=LQ.UNKNOWN,
+                   low=1.0, high=1.0, reporting=2, of=4)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        lvl.price = 2.0
+    assert lvl.schema == LQ.LEVEL_SCHEMA_VERSION
+
+
+def test_the_contract_carries_every_field_a_consumer_was_promised():
+    """price · confidence · witness_count · engine_sources · freshness ·
+    dispersion — the schema agreed before injection starts."""
+    out = LQ.cluster_levels(profile={"poc_price": 24000.0, "rows": []},
+                            vpfr={"poc": 24002.0},
+                            dealer={"gamma_flip": 24001.0},
+                            spot=23000.0, atr=25.0)
+    level = out["resistance"][0].to_dict()
+    for field in ("price", "confidence", "witness_count", "engine_sources",
+                  "freshness", "dispersion", "rank", "side", "schema",
+                  "diversity", "reporting", "of"):
+        assert field in level, field
+
+
+def test_the_clustered_output_stamps_its_schema_version():
+    out = LQ.cluster_levels(profile={"poc_price": 1.0, "rows": []}, spot=0.5)
+    assert out["schema"] == LQ.LEVEL_SCHEMA_VERSION
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  74.1 · cluster confidence
+# ══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("engines,expected", [(2, 45), (5, 82), (8, 97)])
+def test_confidence_matches_the_supplied_calibration(engines, expected):
+    """2 engines same price → 45, 5 → 82, 8 → 97. Exactly."""
+    got = LQ.cluster_confidence(engines=engines, witnesses=engines,
+                                dispersion_pct=0.0)
+    assert got["confidence"] == expected
+
+
+def test_diversity_is_a_ceiling_not_a_term_in_an_average():
+    """Two engines cannot reach 60 however perfectly they agree. Averaging a
+    perfect dispersion score against them would push it there and lose the
+    point of the calibration."""
+    perfect = LQ.cluster_confidence(2, 2, 0.0)
+    assert perfect["confidence"] == perfect["ceiling"] == 45
+    assert LQ.cluster_confidence(2, 2, 1.0)["confidence"] < 45
+
+
+def test_the_modifiers_can_only_reduce():
+    for spread in (0.0, 0.25, 0.5, 0.75, 1.0):
+        got = LQ.cluster_confidence(5, 5, spread)
+        assert got["confidence"] <= got["ceiling"]
+
+
+def test_a_loose_cluster_keeps_some_of_its_ceiling():
+    """Engines that agreed loosely still agreed. A level losing everything for
+    imprecision would rank below one nobody corroborated."""
+    loose = LQ.cluster_confidence(8, 8, 1.0)
+    uncorroborated = LQ.cluster_confidence(1, 1, 0.0)
+    assert loose["confidence"] > uncorroborated["confidence"]
+
+
+def test_witnesses_are_reported_but_never_scored():
+    """Three HVN bins from one profile must not inflate a level exactly one
+    engine named — the failure clustering exists to prevent."""
+    one, nine = LQ.cluster_confidence(1, 1, 0.0), LQ.cluster_confidence(1, 9, 0.0)
+    assert one["confidence"] == nine["confidence"]
+    assert nine["witnesses"] == 9
+
+
+def test_a_single_source_is_a_number_not_a_level():
+    assert LQ.cluster_confidence(1, 1, 0.0)["confidence"] <= 25
+
+
+def test_the_two_components_with_no_producer_are_named_not_hidden():
+    """An absent component is visible; a component nobody wrote is invisible."""
+    got = LQ.cluster_confidence(5, 5, 0.0)
+    assert set(got["missing"]) == {"engine_confidence", "freshness"}
+    assert got["reporting"] == 2 and got["of"] == 4
+
+
+def test_supplying_the_missing_components_moves_the_score():
+    """They are wired, not decorative."""
+    base = LQ.cluster_confidence(5, 5, 0.0)
+    fresh = LQ.cluster_confidence(5, 5, 0.0, engine_confidence=100.0,
+                                  freshness=100.0)
+    stale = LQ.cluster_confidence(5, 5, 0.0, engine_confidence=10.0,
+                                  freshness=0.0)
+    assert stale["confidence"] < base["confidence"]
+    assert fresh["reporting"] == 4 and not fresh["missing"]
+
+
+def test_more_agreeing_engines_never_lowers_confidence():
+    scores = [LQ.cluster_confidence(n, n, 0.0)["confidence"] for n in range(1, 13)]
+    assert scores == sorted(scores)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  74.1 · the adaptive cluster distance
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_tolerance_widens_with_volatility():
+    """The whole point: a quiet session clusters tightly, expiry clusters wide,
+    and cluster quality stays comparable across both."""
+    quiet = LQ.cluster_distance(24000.0, atr=22.0)
+    expiry = LQ.cluster_distance(24000.0, atr=70.0)
+    assert expiry["distance"] > quiet["distance"]
+    assert expiry["adaptive"] and quiet["adaptive"]
+
+
+def test_the_atr_multiple_is_scaled_for_the_atr_this_codebase_publishes():
+    """0.12 is calibrated for a DAILY ATR. `runner.py` publishes a per-bar ATR
+    of roughly 10–45 points, and 0.12 × 25 is three points — the floor would
+    win every time and nothing would adapt at all."""
+    assert LQ.cluster_distance(24000.0, atr=45.0)["distance"] > 20.0
+
+
+def test_a_floor_holds_when_volatility_collapses():
+    got = LQ.cluster_distance(24000.0, atr=1.0)
+    assert got["distance"] == 20.0 and got["basis"] == "floor"
+
+
+def test_the_strike_gap_term_is_available_but_off_unless_asked():
+    """NIFTY strikes are 50 apart, so the term is 100 points — right for chain
+    levels, wrong for price levels."""
+    without = LQ.cluster_distance(24000.0, atr=25.0)
+    with_gap = LQ.cluster_distance(24000.0, atr=25.0, strike_gap=50.0)
+    assert without["distance"] == 25.0
+    assert with_gap["distance"] == 100.0
+
+
+def test_no_spot_falls_back_and_says_so():
+    got = LQ.cluster_distance(None, atr=25.0)
+    assert got["adaptive"] is False and "falling back" in got["why"]
+
+
+def test_the_atr_is_read_never_computed():
+    """`runner.py` owns ATR(14). A second one here would be the same mistake as
+    a sixth POC."""
+    tree = ast.parse((ROOT / "mios_v5" / "liquidity.py").read_text())
+    defined = {n.name.lstrip("_").lower() for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef)}
+    assert "atr" not in defined and "true_range" not in defined
+
+
+def test_the_one_atr_has_a_publisher_and_the_wiring_reads_it():
+    runner = (ROOT / "mios_v5" / "runner.py").read_text()
+    assert 'session_state["_atr"]' in runner
+    assert "_atr" in (ROOT / "vob_minimal.py").read_text()
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  74.1 · the adaptive POC regime
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_regime_is_judged_against_the_instruments_own_movement():
+    """A threshold tuned on a quiet session calls every expiry day a rotation;
+    one tuned on expiry calls a quiet session stable."""
+    quiet = [24000.0 + (i % 3) * 0.5 for i in range(40)]
+    expiry = [24000.0 + (i % 7) * 18.0 for i in range(40)]
+    for series in (quiet, expiry):
+        assert LQ.poc_regime(series)["regime"] in LQ.POC_REGIMES
+
+
+def test_an_unusually_large_move_reads_as_rotating_on_a_quiet_series():
+    calm = [24000.0 + (i % 2) * 0.5 for i in range(40)] + [24090.0]
+    assert LQ.poc_regime(calm)["regime"] == LQ.POC_ROTATING
+
+
+def test_a_typical_move_on_a_volatile_series_is_not_rotating():
+    """The same 20-point step that is a rotation on a quiet tape is ordinary on
+    a volatile one — which is the whole reason the bands are derived."""
+    volatile = [24000.0]
+    for i in range(40):
+        volatile.append(volatile[-1] + (25.0 if i % 2 else -22.0))
+    volatile.append(volatile[-1] + 20.0)
+    assert LQ.poc_regime(volatile)["regime"] != LQ.POC_ROTATING
+
+
+def test_too_few_bars_is_unknown_rather_than_invented():
+    got = LQ.poc_regime([1.0, 2.0, 3.0])
+    assert got["regime"] == LQ.UNKNOWN
+    assert str(LQ._POC_REGIME_MIN_BARS) in got["why"]
+
+
+def test_the_regime_publishes_the_bands_it_judged_against():
+    got = LQ.poc_regime([24000.0 + i * 0.7 for i in range(40)])
+    assert got["p25"] is not None and got["p75"] is not None
+    assert got["median"] is not None and got["changed_pct"] is not None
+
+
+def test_direction_and_magnitude_are_separate_facts():
+    """`trend` says which way; `regime` says whether that is a lot for THIS
+    instrument today."""
+    series = [24000.0 + i * 3.0 for i in range(40)]
+    out = LQ.analyse(profile=_profile(), dynamic_poc=series, spot=24000.0)
+    assert out["poc_migration"]["trend"] in LQ.POC_TRENDS
+    assert out["poc_regime"]["regime"] in LQ.POC_REGIMES + (LQ.UNKNOWN,)
+
+
+def test_the_quantile_helper_needs_no_numerical_library():
+    """This module imports none, and a guard above asserts it."""
+    assert LQ._quantile([1, 2, 3, 4], 0.5) == 2.5
+    assert LQ._quantile([5], 0.9) == 5
+    assert LQ._quantile([], 0.5) is None
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  74.1 · the context and panel carry it
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_context_carries_the_regime_and_the_band():
+    series = [24000.0 + (i % 5) * 2.0 for i in range(40)]
+    ctx = LC.build(profile=_profile(poc=24000.0), dynamic_poc=series,
+                   dealer={"gamma_flip": 24001.0}, spot=23000.0, atr=25.0)
+    assert ctx.value("index.poc_regime") in LQ.POC_REGIMES + (LQ.UNKNOWN,)
+    assert ctx.value("levels.tolerance_pct") is not None
+    assert ctx.value("levels.schema") == LQ.LEVEL_SCHEMA_VERSION
+
+
+def test_the_panel_shows_confidence_ahead_of_the_witness_count():
+    """Confidence is what a stage gates on; the count is one of its inputs."""
+    from mios_v5.ui import liquidity_panel as P
+    out = LQ.cluster_levels(profile={"poc_price": 24000.0, "rows": []},
+                            vpfr={"poc": 24002.0},
+                            dealer={"gamma_flip": 24001.0},
+                            spot=23000.0, atr=25.0)
+    html = P._levels_html({"support": (), "resistance": out["resistance"]})
+    assert str(out["resistance"][0].confidence) in html
+
+
+def test_the_panel_renders_a_stored_level_the_same_as_a_live_one():
+    """A replayed level is a dict; a live one is a `Level`."""
+    from mios_v5.ui import liquidity_panel as P
+    level = LQ.Level(price=24000.0, side=LQ.RESISTANCE, rank=LQ.MAJOR,
+                     confidence=82, witness_count=3,
+                     engine_sources=("a", "b", "c"), kinds=("POC",),
+                     dispersion=1.0, dispersion_pct=0.1,
+                     freshness=LQ.UNKNOWN, low=23999.0, high=24001.0,
+                     reporting=2, of=4)
+    live = P._levels_html({"support": (), "resistance": (level,)})
+    stored = P._levels_html({"support": (), "resistance": (level.to_dict(),)})
+    assert live == stored and "24,000" in live
+
+
+def test_the_frozen_contract_is_written_down():
+    """Frozen before injection starts, not after. Seven stages will read it."""
+    doc = (ROOT / "docs" / "STAGE74_LEVEL_CONTRACT.md").read_text()
+    assert LQ.LEVEL_SCHEMA_VERSION in doc
+    for field in ("price", "confidence", "witness_count", "engine_sources",
+                  "freshness", "dispersion"):
+        assert field in doc, field
+    # the calibration must be recorded where a future reader will find it
+    for anchor in ("45", "82", "97"):
+        assert anchor in doc
