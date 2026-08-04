@@ -13961,9 +13961,77 @@ def _render_main_analyzer():
             # sessions). Using the session profile is what stops yesterday's
             # value bleeding into today's levels on a gap day.
             _sess, _comp, _mig = compute_dual_profile(df, num_rows=25)
+            # The previous cycle's profile, captured BEFORE this one overwrites
+            # it — Stage 74's shift reads compare the two, and nothing else in
+            # this app has ever compared a profile to the one before it.
+            _prev_profile = st.session_state.get('_money_flow_data')
             st.session_state['_money_flow_data'] = _sess
             st.session_state['_composite_profile'] = _comp
             st.session_state['_value_migration'] = _mig
+
+            # ── Stage 74 — Liquidity Intelligence ───────────────────────
+            # Built here because this is where the profiles already exist, and
+            # the specification's own runtime rule is to compute liquidity ONCE
+            # per refresh and have every stage read the result. Building it in a
+            # stage would put a per-bar histogram inside twenty consumers.
+            #
+            # The engine computes only the eight things the audit found had no
+            # owner; the profiles, POC and value area are all read.
+            try:
+                from mios_v5.liquidity_context import build as _liq_build
+                _dyn, _, _ = compute_dynamic_poc(df, bins=20)
+                _last = float(df['close'].iloc[-1])
+                _prev_close = (float(df['close'].iloc[-2])
+                               if len(df) > 1 else _last)
+
+                # Only keys that a writer actually publishes. This repo has
+                # twice been bitten by a reader kept while its writer was
+                # removed, and inventing `_dealer_levels` here — a key nothing
+                # sets — would be doing it on purpose. Every level below is
+                # mapped from something `compute_market_picture` or the GEX
+                # block really returns; what has no producer stays absent and
+                # `ctx.missing()` names it.
+                _mp = st.session_state.get('_market_picture') or {}
+                _gex = st.session_state.get('_gex_data') or {}
+                _dealer = {
+                    'gamma_flip': _gex.get('gamma_flip_level'),
+                    'max_pain': _mp.get('oi_pin'),
+                    'support': _mp.get('oi_floor'),
+                    'resistance': _mp.get('oi_ceiling'),
+                }
+
+                # `_premium_structures` is keyed by (side, strike) tuples;
+                # the context reads `{side}` paths, so it is re-keyed here.
+                # Passing it as-is would silently read UNKNOWN for every
+                # premium field — present, wrong shape, no error.
+                #
+                # It is also the PREVIOUS render pass's copy: Dashboard V6
+                # writes it at step 12 and this runs at step 3. That is the
+                # same one-cycle lag `_trading_context` already carries, and
+                # the values are Stage 71.8's either way — but a reader should
+                # know, so `meta.premium_lag` records it.
+                _prem_raw = st.session_state.get('_premium_structures') or {}
+                _prem = {}
+                for _k, _v in _prem_raw.items():
+                    _side = _k[0] if isinstance(_k, tuple) and _k else _k
+                    if _side in ('CALL', 'PUT') and isinstance(_v, dict):
+                        _prem.setdefault(_side, _v)
+
+                st.session_state['_liquidity_context'] = _liq_build(
+                    profile=_sess,
+                    vpfr=compute_vpfr(df, min(len(df), 120), n_rows=24),
+                    dynamic_poc=_dyn,
+                    pools=_mp.get('liq_pools'),
+                    dealer=_dealer,
+                    spot=_last,
+                    price_change=_last - _prev_close,
+                    previous=_prev_profile,
+                    premium=_prem or None,
+                    premium_lag=1 if _prem else 0,
+                    cycle=st.session_state.get('_render_seq'))
+            except Exception as _liq_err:
+                st.session_state['_liquidity_context'] = None
+                st.caption(f"Liquidity Intelligence unavailable: {_liq_err}")
         except Exception as err:
             st.caption(f"Money-flow profile unavailable: {err}")
         try:
