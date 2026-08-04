@@ -209,7 +209,10 @@ def terminal_chart(nifty_df=None, call_df=None, put_df=None,
                    call_levels: Optional[Dict[str, Any]] = None,
                    put_levels: Optional[Dict[str, Any]] = None,
                    call_zones: Optional[Sequence[Dict[str, Any]]] = None,
-                   put_zones: Optional[Sequence[Dict[str, Any]]] = None):
+                   put_zones: Optional[Sequence[Dict[str, Any]]] = None,
+                   nifty_profile: Optional[Dict[str, Any]] = None,
+                   call_profile: Optional[Dict[str, Any]] = None,
+                   put_profile: Optional[Dict[str, Any]] = None):
     """The three-panel terminal. Returns `(figure, notes)`; `notes` names any
     series that could not be drawn."""
     import plotly.graph_objects as go
@@ -241,6 +244,18 @@ def terminal_chart(nifty_df=None, call_df=None, put_df=None,
         subplot_titles=[n for n, _ in parsed])
 
     positions = [(1, 1), (1, 2), (2, 2)]
+
+    # ── the liquidity & sentiment profile, BEFORE the candles ──
+    # Drawn first so the bands sit under the price series. Each panel gets its
+    # OWN profile — the premium legs are not a projection of the index one.
+    # Stage 71.8's audit settled that: a premium profile is computed natively
+    # per leg, and drawing the index's POC on a premium panel would mark a
+    # price that series can never trade.
+    for prof, (r, c) in zip((nifty_profile, call_profile, put_profile),
+                            positions):
+        if prof:
+            _profile_overlay(fig, prof, r, c)
+
     for (name, p), (r, c) in zip(parsed, positions):
         if p is None:
             continue
@@ -349,6 +364,19 @@ ZONE_TONE = {
     "FADING":   ("rgba(159,176,196,.08)", "#7d8b9c"),
     "BREAKING": ("rgba(239,83,80,.14)", "#ef5350"),
 }
+
+
+def _profile_overlay(fig, profile: Dict[str, Any], row: int, col: int) -> None:
+    """One panel's liquidity & sentiment profile.
+
+    `profile` is whatever `calculate_money_flow_profile` returned, optionally
+    carrying a `shape` from Stage 71.86 and a `dynamic_poc` from
+    `compute_dynamic_poc`. Nothing is computed here or in the overlay module —
+    both only decide where a value already published is drawn.
+    """
+    from .profile_overlay import draw
+    draw(fig, row, col, rows=profile.get("rows"), profile=profile,
+         shape=profile.get("shape"))
 
 
 def _leg_overlay(fig, levels, zones, row: int, col: int) -> None:
