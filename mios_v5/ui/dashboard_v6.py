@@ -602,6 +602,21 @@ def _strike_validation(st, fr: Dict[str, Any]) -> None:
         # must be inspectable somewhere.
         from .premium_behaviour_panel import render_premium_behaviour
         render_premium_behaviour(st, _behaviour)
+
+        # ── Stage 74 — Liquidity Intelligence ──────────────────────────
+        # Principle 12 again, and pre-emptively: Stage 74 publishes eight facts
+        # nothing else computes, and the moment a stage reads one the rule
+        # binds. Rendering it before the stage injection is deliberate — a
+        # number nobody has looked at should not become load-bearing in twenty
+        # consumers.
+        #
+        # The context is what a consuming stage would read; the raw profile is
+        # passed alongside because the heatmap needs per-bin rows, which the
+        # context deliberately does not carry (thirty bins are a chart, not a
+        # field).
+        from .liquidity_panel import render_liquidity
+        render_liquidity(st, st.session_state.get("_liquidity_context"),
+                         st.session_state.get("_money_flow_data"))
     except Exception as err:
         # advisory panel — it may never take the execution screen down with it
         st.caption(f"Strike Validation unavailable: {err}")

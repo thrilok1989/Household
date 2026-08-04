@@ -605,3 +605,135 @@ def test_the_context_carries_the_engines_provenance():
     engine = ctx.meta["engine"]
     assert engine["ready"] is True
     assert set(engine["consumed"]) == set(LQ.CONSUMED)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  the panel — Principle 12, and the heatmap
+# ══════════════════════════════════════════════════════════════════════
+
+def _heat_rows(n=6):
+    out = []
+    for i in range(n):
+        bull, bear = (900 - i * 120), (200 + i * 120)
+        out.append({"bin_low": 23900.0 + i * 20, "bin_high": 23920.0 + i * 20,
+                    "total_volume": bull + bear, "bull_volume": bull,
+                    "bear_volume": bear, "delta": bull - bear,
+                    "ratio": max(0.08, 1.0 - abs(i - 3) * 0.22),
+                    "node_type": "High" if i == 3 else "Average",
+                    "sentiment": "Bullish" if bull > bear else "Bearish",
+                    "sentiment_strength": abs(bull - bear) / (bull + bear) * 100})
+    return out
+
+
+def _panel_ctx():
+    prof = {"rows": _heat_rows(), "poc_price": 23960.0,
+            "value_area_high": 24000.0, "value_area_low": 23920.0,
+            "price_high": 24020.0, "price_low": 23890.0}
+    ctx = LC.build(profile=prof, vpfr={"poc": 23962.0, "vah": 24001.0},
+                   dynamic_poc=[23930, 23940, 23950, 23950, 23960],
+                   dealer={"gamma_flip": 23965.0, "support": 23900.0},
+                   spot=23955.0, price_change=12.0,
+                   previous={**prof, "poc_price": 23930.0}, cycle=7)
+    return ctx, prof
+
+
+def test_the_engine_has_somewhere_to_be_inspected():
+    """Principle 12 — Stage 74 publishes eight facts nothing else computes."""
+    from mios_v5.ui import liquidity_panel as P
+    ctx, prof = _panel_ctx()
+    html = P.liquidity_html(ctx, prof)
+    assert "Stage 74" in html and len(html) > 500
+
+
+def test_the_panel_shows_both_heatmaps_because_they_answer_different_questions():
+    """"Where is the volume" and "who owns it" disagree at the interesting
+    bins, so rendering one would force a choice between them."""
+    from mios_v5.ui import liquidity_panel as P
+    html = P.liquidity_html(*_panel_ctx())
+    assert "how much traded here" in html
+    assert "who traded here" in html
+
+
+def test_the_heatmap_marks_the_point_of_control():
+    """A heatmap without it is a gradient nobody can locate."""
+    from mios_v5.ui import liquidity_panel as P
+    assert "◄ POC" in P.heatmap_html(_heat_rows(), "liquidity", 23960.0)
+
+
+def test_the_heatmap_reads_highest_price_first():
+    """The way a profile is read on a chart, not the way the list is ordered."""
+    from mios_v5.ui import liquidity_panel as P
+    html = P.heatmap_html(_heat_rows(), "liquidity")
+    assert html.index("24,020") < html.index("23,920")
+
+
+def test_the_intensity_ramp_never_goes_grey():
+    """Blue to yellow in plain RGB passes through grey at the quarter mark, and
+    a desaturated bin reads as "no data" rather than "a little"."""
+    import colorsys
+    from mios_v5.ui import liquidity_panel as P
+    for i in range(21):
+        colour = P.ramp(i / 20)
+        rgb = tuple(int(colour[j:j + 2], 16) / 255 for j in (1, 3, 5))
+        _, _, sat = colorsys.rgb_to_hsv(*rgb)
+        assert sat > 0.6, (i / 20, colour, sat)
+
+
+def test_an_unmeasured_bin_is_not_the_cold_end_of_the_ramp():
+    """A bin nobody measured and a bin that traded nothing are different."""
+    from mios_v5.ui import liquidity_panel as P
+    assert P.ramp(None) != P.ramp(0.0)
+
+
+def test_the_ramp_is_monotonic_from_cold_to_hot():
+    from mios_v5.ui import liquidity_panel as P
+    assert P.ramp(0.0) == P._RAMP[0] and P.ramp(1.0) == P._RAMP[-1]
+    assert P.ramp(-5) == P.ramp(0.0) and P.ramp(99) == P.ramp(1.0)
+
+
+def test_a_cycle_with_no_level_source_says_so_rather_than_showing_none():
+    """UNKNOWN levels must not render as "no support"."""
+    from mios_v5.ui import liquidity_panel as P
+    html = P._levels_html({"support": LQ.UNKNOWN, "resistance": LQ.UNKNOWN})
+    assert "No level source reported" in html
+
+
+def test_a_divergence_is_the_one_reading_that_gets_shouted():
+    """It contradicts the rest of the stack, which is exactly why it is worth
+    seeing."""
+    from mios_v5.ui import liquidity_panel as P
+    prof = {"rows": [{"ratio": 1.0, "sentiment": "Bearish",
+                      "bull_volume": 100, "bear_volume": 900,
+                      "bin_low": 1.0, "bin_high": 2.0}],
+            "poc_price": 1.5, "price_high": 3.0, "price_low": 1.0}
+    ctx = LC.build(profile=prof, price_change=5.0, spot=2.0,
+                   previous=prof, dynamic_poc=[1.4, 1.5])
+    assert ctx.value("index.divergence") == LQ.DIV_BEAR
+    assert LQ.DIV_BEAR in P.liquidity_html(ctx, prof)
+
+
+def test_the_panel_never_takes_the_tab_down():
+    from mios_v5.ui import liquidity_panel as P
+    for junk in (None, "a string", 42, {}, []):
+        P.liquidity_html(junk)
+        P.heatmap_html(junk)
+    P.liquidity_html(LC.build(), None)
+
+
+def test_the_panel_computes_nothing():
+    """Presentation only — it may not import a producer."""
+    tree = ast.parse((ROOT / "mios_v5" / "ui" / "liquidity_panel.py").read_text())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            imported.add((node.module or "").split(".")[0])
+    assert not (imported & {"numpy", "pandas", "indicators", "streamlit",
+                            "requests", "vob_minimal", "db"})
+
+
+def test_the_panel_is_wired_into_the_dashboard():
+    src = (ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
+    assert "from .liquidity_panel import render_liquidity" in src
+    assert "_liquidity_context" in src
