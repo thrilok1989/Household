@@ -89,6 +89,71 @@ def render_dashboard_v6(state=None, db=None) -> None:
 
 
 # ── 1 · DECISION ────────────────────────────────────────────────────────
+def _run_execution_chain(st, db=None) -> None:
+    """Stages 72 → 73 → 72.9, run once per cycle from the assembled context.
+
+    Each stage takes the previous one's output and adds one thing:
+
+    * **72** reads the `TradingContext` and nothing else, and returns a frozen
+      `EntryDecision` carrying its own id, version, created_at and hash.
+    * **73** takes that decision and the same context and returns a lifecycle
+      action — it never mints its own id, it carries 72's forward.
+    * **72.9** takes both and prepares a dispatch.
+
+    ⚠️ **It prepares; it does not send.** No transport is passed, so the
+    dispatcher builds the payload, decides whether it *would* send, and reports
+    `NOT_SENT`. Stage 72.9 is `VALIDATED_SIMULATED` and its validation report
+    records `freeze_ready: False` — five hundred live dispatches have not
+    happened, and wiring a stage is not the same as trusting it to broadcast.
+    Passing a live transport is a separate decision a human makes.
+
+    A registry is still used, because the claim protocol is what makes the
+    dispatch decision meaningful at all: without one, "would this be a
+    duplicate?" has no answer. `MemoryRegistry` lasts a session, which is the
+    right scope for a stage that sends nothing.
+
+    Advisory throughout, and every stage already promises never to raise — the
+    guard here is for the wiring, not for them.
+    """
+    ctx = st.session_state.get("_trading_context")
+    if ctx is None:
+        return
+    try:
+        from ..dispatcher import MemoryRegistry
+        from ..dispatcher import run as _dispatch
+        from ..entry_engine import run as _entry
+        from ..trade_lifecycle import run as _lifecycle
+
+        decision = _entry(ctx)
+        st.session_state["_entry_decision"] = decision
+
+        lifecycle = _lifecycle(decision, ctx)
+        st.session_state["_lifecycle_decision"] = lifecycle
+
+        # One registry for the session, so a decision already "dispatched" this
+        # session is recognised as a duplicate rather than re-prepared.
+        registry = st.session_state.get("_dispatch_registry")
+        if registry is None:
+            registry = MemoryRegistry()
+            st.session_state["_dispatch_registry"] = registry
+
+        st.session_state["_dispatch_decision"] = _dispatch(
+            decision, ctx, lifecycle=lifecycle, registry=registry,
+            transport=None)          # ⚠️ prepares only — see the docstring
+    except Exception as err:
+        st.session_state["_entry_decision"] = None
+        st.caption(f"Execution chain unavailable: {err}")
+        return
+
+    try:
+        from .execution_panel import render_execution
+        render_execution(st, st.session_state.get("_entry_decision"),
+                         st.session_state.get("_lifecycle_decision"),
+                         st.session_state.get("_dispatch_decision"))
+    except Exception as err:
+        st.caption(f"Execution panel unavailable: {err}")
+
+
 def _decision_center(st, fr: Dict[str, Any]) -> None:
     """Should I trade right now? — answerable in 3-5 seconds.
 
@@ -602,6 +667,57 @@ def _strike_validation(st, fr: Dict[str, Any]) -> None:
         # must be inspectable somewhere.
         from .premium_behaviour_panel import render_premium_behaviour
         render_premium_behaviour(st, _behaviour)
+
+        # ── the execution chain · Stages 72 → 73 → 72.9 ────────────────
+        # Built, frozen and tested earlier this session, and until now NOTHING
+        # CALLED THEM. That is the regression this repo has already suffered
+        # twice — a reader kept while its writer went, a stage that exists and
+        # never runs — so it is wired here, at the one point where the context
+        # they all consume has just been assembled.
+        #
+        # ⚠️ It prepares; it does not send. Stage 72.9 is VALIDATED_SIMULATED
+        # and `STAGE72_9_VALIDATION_REPORT.md` records `freeze_ready: False`,
+        # so the transport is deliberately absent: the dispatcher builds the
+        # payload, decides whether it WOULD send, and reports NOT_SENT. Passing
+        # a live transport here is a separate, human decision.
+        _run_execution_chain(st, db)
+
+        # ── Stage 74 — Liquidity Intelligence ──────────────────────────
+        # Principle 12 again, and pre-emptively: Stage 74 publishes eight facts
+        # nothing else computes, and the moment a stage reads one the rule
+        # binds. Rendering it before the stage injection is deliberate — a
+        # number nobody has looked at should not become load-bearing in twenty
+        # consumers.
+        #
+        # The context is what a consuming stage would read; the raw profile is
+        # passed alongside because the heatmap needs per-bin rows, which the
+        # context deliberately does not carry (thirty bins are a chart, not a
+        # field).
+        from .liquidity_panel import (render_calibration, render_collection,
+                                      render_liquidity)
+        render_liquidity(st, st.session_state.get("_liquidity_context"),
+                         st.session_state.get("_money_flow_data"))
+
+        # Whether telemetry is actually being written. Silent when healthy;
+        # loud when the migration is missing, because that failure is otherwise
+        # invisible for a week.
+        render_collection(st, st.session_state.get("_liq_telemetry_status"))
+
+        # ── Stage 74 calibration verdict ───────────────────────────────
+        # A different question from the panel above: that one says what
+        # liquidity is doing, this says whether those numbers can be trusted
+        # yet. Read from a week of telemetry, and it must stay on screen until
+        # the verdict is HEALTHY — injecting Stage 42 on an untested curve is
+        # the expensive mistake this whole exercise exists to avoid.
+        try:
+            from ..liquidity_telemetry import summarise as _liq_summary
+            _telemetry = (db.get_liquidity_telemetry(days=7)
+                          if db is not None
+                          and hasattr(db, "get_liquidity_telemetry") else None)
+            if _telemetry:
+                render_calibration(st, _liq_summary(_telemetry))
+        except Exception:
+            pass
     except Exception as err:
         # advisory panel — it may never take the execution screen down with it
         st.caption(f"Strike Validation unavailable: {err}")

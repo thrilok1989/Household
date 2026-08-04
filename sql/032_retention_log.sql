@@ -44,5 +44,4 @@ CREATE POLICY retention_log_all ON retention_log
     FOR ALL USING (true) WITH CHECK (true);
 
 COMMENT ON TABLE retention_log IS
-    'Audit trail for db/retention.py. Never auto-purged: the record of what was '
-    'removed must outlive the data it describes.';
+    'Audit trail for db/retention.py. Never auto-purged: the record of what was removed must outlive the data it describes.';
