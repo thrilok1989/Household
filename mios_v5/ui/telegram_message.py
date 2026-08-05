@@ -1,0 +1,191 @@
+"""Stage 72's payload, rendered as a message a human reads.
+
+**Presentation only.** Every value here was decided by Stage 72 or Stage 73;
+this file chooses wording and layout and nothing else. It is in `ui/` for that
+reason — the dispatcher is explicit that it *"does not modify the payload's
+wording"*, so the wording has to live somewhere that is allowed to have taste.
+
+## It cannot invent a level
+
+The single rule this file exists to enforce: **an `UNKNOWN` never renders as a
+number.** Stage 72 publishes `target2` and `target3` as `UNKNOWN` by name
+(`MISSING_PRODUCERS`), because Stage 35 publishes one target and a ladder would
+be fabricated. A template with three hard-coded target lines renders three
+targets whether or not two of them exist — in the one artefact a trader acts on.
+
+So every field goes through `_v()`, absent rows are **dropped entirely** rather
+than printed with a dash, and a test asserts no `UNKNOWN` reaches the output.
+
+## Entry and exit are the same object
+
+An entry message comes from the `EntryDecision`; an exit message comes from the
+`TradeLifecycleDecision` that references it. They share an id, so a trader can
+see that the exit belongs to the entry they were sent twenty minutes ago —
+which is the whole reason Stage 73 references rather than mints.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Mapping, Optional
+
+UNKNOWN = "UNKNOWN"
+
+#: Entry states worth a message. `WAIT` is the engine working correctly, and
+#: saying so every cycle trains a reader to mute the channel — the one outcome
+#: a signal channel cannot survive. The dispatcher gates on the same tuple.
+ENTRY_HEAD = {
+    "ENTER": ("🟢", "ENTRY"),
+    "ENTRY_READY": ("🟡", "ENTRY READY"),
+    "ABORT": ("🛑", "ABORT"),
+}
+
+#: Lifecycle actions worth an update to a live message.
+EXIT_HEAD = {
+    "EXIT": ("🚪", "EXIT"),
+    "SCALE_OUT": ("➖", "PARTIAL EXIT"),
+    "ADD": ("➕", "ADD"),
+    "ABORT": ("🛑", "ABORT"),
+    "TRAIL": ("📈", "TRAIL"),
+}
+
+
+def _v(value: Any) -> Optional[str]:
+    """A printable value, or `None` when the producer did not report.
+
+    `None` means **drop the line**. A dash would still occupy a row and imply
+    the field was expected; a missing row says nothing, which is accurate.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text == UNKNOWN:
+        return None
+    return text
+
+
+def _num(value: Any, fmt: str = "{:,.2f}") -> Optional[str]:
+    try:
+        return fmt.format(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _row(label: str, value: Optional[str], unit: str = "") -> str:
+    return f"{label}: <b>{unit}{value}</b>\n" if value else ""
+
+
+def _targets(payload: Mapping[str, Any]) -> str:
+    """Only the targets that exist.
+
+    Stage 35 publishes one. `target2` and `target3` are `UNKNOWN` by name, and
+    a fixed three-line block would print them as levels.
+    """
+    tg = payload.get("targets") or {}
+    if not isinstance(tg, Mapping):
+        return ""
+    lines = []
+    for key in ("target1", "target2", "target3"):
+        got = _num(tg.get(key))
+        if got:
+            lines.append(f"  T{key[-1]}: <b>₹{got}</b>")
+    return ("🎯 Targets\n" + "\n".join(lines) + "\n") if lines else ""
+
+
+def _reasons(payload: Mapping[str, Any], limit: int = 4) -> str:
+    items = payload.get("reasons") or ()
+    out = [f"  ✓ {r}" for r in list(items)[:limit] if _v(r)]
+    return ("\n".join(out) + "\n") if out else ""
+
+
+def _warnings(payload: Mapping[str, Any], limit: int = 3) -> str:
+    items = payload.get("warnings") or ()
+    out = [f"  ⚠ {w}" for w in list(items)[:limit] if _v(w)]
+    return ("\n".join(out) + "\n") if out else ""
+
+
+def _identity(payload: Mapping[str, Any]) -> str:
+    """The join key, short. A message that cannot be traced back to the
+    decision it came from is a message with no record behind it."""
+    ident = _v(payload.get("id")) or ""
+    ver = _v(payload.get("version")) or ""
+    bits = [b for b in (ident[:8], f"v{ver}" if ver else "") if b]
+    return ("<code>" + " · ".join(bits) + "</code>") if bits else ""
+
+
+def entry_message(payload: Optional[Mapping[str, Any]] = None) -> str:
+    """The entry signal. `""` when the state is not one worth sending."""
+    p = dict(payload or {})
+    state = str(p.get("state") or UNKNOWN)
+    if state not in ENTRY_HEAD:
+        return ""
+    emoji, word = ENTRY_HEAD[state]
+
+    side = _v(p.get("side"))
+    # A strike is a whole number — "24500.0" reads like a price.
+    strike = _num(p.get("strike"), "{:,.0f}") or _v(p.get("strike"))
+    head = f"{emoji} <b>MIOS {word}</b>"
+    if side:
+        head += f" — {side}"
+    if strike:
+        head += f" {strike}"
+
+    body = (
+        _row("Quality", _v(p.get("quality")))
+        + _row("Confidence", _v(p.get("confidence")))
+        + _row("Zone", _v(p.get("timing")))
+        + _row("Entry", _num(p.get("entry")), "₹")
+        + _row("Stop", _num(p.get("stop")), "₹")
+        + _targets(p)
+        + _row("Risk", _v(p.get("risk")))
+        + _row("Reward", _v(p.get("reward")))
+        + _row("Behaviour", _v(p.get("behaviour")))
+        + _row("Horizon", _v(p.get("horizon")))
+    )
+
+    why = _reasons(p)
+    warn = _warnings(p)
+    return (
+        f"{head}\n"
+        f"{'─' * 22}\n"
+        f"{body}"
+        + (f"{'─' * 22}\n{why}" if why else "")
+        + (warn if warn else "")
+        + f"{'─' * 22}\n{_identity(p)}"
+    ).strip()
+
+
+def exit_message(lifecycle: Optional[Mapping[str, Any]] = None,
+                 entry: Optional[Mapping[str, Any]] = None) -> str:
+    """The exit / management update, carrying the entry's id so a reader can
+    join it to the signal they were sent earlier."""
+    lc = dict(lifecycle or {})
+    action = str(lc.get("action") or UNKNOWN)
+    if action not in EXIT_HEAD:
+        return ""
+    emoji, word = EXIT_HEAD[action]
+
+    side = _v((entry or {}).get("side"))
+    strike = (_num((entry or {}).get("strike"), "{:,.0f}")
+              or _v((entry or {}).get("strike")))
+    head = f"{emoji} <b>MIOS {word}</b>"
+    if side:
+        head += f" — {side}"
+    if strike:
+        head += f" {strike}"
+
+    body = (
+        _row("State", _v(lc.get("state")))
+        + _row("Health", _v(lc.get("health")))
+        + _row("Reason", _v(lc.get("exit_reason")))
+        + _row("Trail", _v(lc.get("trail")))
+        + _row("Scale", _v(lc.get("scale")))
+        # ⚠️ Always UNKNOWN today: no producer reports a fill, so
+        # `position_known` is named in Stage 73's MISSING_PRODUCERS. It renders
+        # only if that ever changes — it must never be implied.
+        + _row("Position", _v(lc.get("position_known")))
+    )
+
+    ref = _v((entry or {}).get("id")) or _v(lc.get("decision_id"))
+    tail = f"<code>entry {ref[:8]}</code>" if ref else ""
+    return (f"{head}\n{'─' * 22}\n{body}"
+            + (f"{'─' * 22}\n{tail}" if tail else "")).strip()

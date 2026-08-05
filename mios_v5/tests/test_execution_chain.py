@@ -91,17 +91,59 @@ def test_the_chain_publishes_its_results_for_other_readers():
 #  ⚠️ nothing is sent
 # ══════════════════════════════════════════════════════════════════════
 
-def test_no_transport_is_passed():
-    """Stage 72.9 is VALIDATED_SIMULATED and its validation report records
-    freeze_ready: False. Wiring a stage is not trusting it to broadcast."""
+def test_the_transport_is_never_constructed_here():
+    """⚠️ This guard replaced `test_no_transport_is_passed`, which asserted the
+    transport was a literal `None`.
+
+    Sending is now possible, so that assertion could not survive — but its
+    *intent* must: **the chain may not wire a live transport of its own.** It
+    may only read one somebody else decided to provide. So the argument has to
+    be a plain session_state lookup, never a call, an import or a constructor.
+
+    Stage 72.9 is still VALIDATED_SIMULATED with `freeze_ready: False`. What
+    changed is who decides, not whether a decision is needed.
+    """
     tree = ast.parse(DASH.read_text())
     fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
               and n.name == "_run_execution_chain")
+    found = False
     for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
         for kw in call.keywords:
             if kw.arg == "transport":
-                assert isinstance(kw.value, ast.Constant)
-                assert kw.value.value is None, "a live transport is wired in"
+                found = True
+                assert isinstance(kw.value, ast.Name), (
+                    "transport must be a variable read from session_state, "
+                    "never built here")
+    assert found, "the chain no longer passes a transport at all"
+
+    # …and the variable must come from session_state, defaulting to absent.
+    src = DASH.read_text()
+    assert '_mios_transport' in src
+    assert 'st.session_state.get("_mios_transport")' in src
+
+
+def test_sending_is_behind_a_human_switch_that_defaults_off():
+    """The promotion gate this repo uses everywhere: `ENABLED = False` in
+    retention, the LIVE TRADING checkbox in auto_option_trader. A signal
+    channel that turns itself on is the one failure that is loud and public."""
+    src = (ROOT / "vob_minimal.py").read_text()
+    tree = ast.parse(src)
+    toggles = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+               and getattr(n.func, "attr", "") == "checkbox"
+               and any(isinstance(a, ast.Constant)
+                       and "MIOS V6 signals" in str(a.value) for a in n.args)]
+    assert toggles, "no toggle for MIOS V6 Telegram signals"
+    for t in toggles:
+        default = next((kw.value for kw in t.keywords if kw.arg == "value"), None)
+        assert isinstance(default, ast.Constant) and default.value is False, (
+            "the toggle must default to OFF")
+
+
+def test_the_transport_key_is_removed_when_the_toggle_is_off():
+    """Not merely unset on first run — actively popped, so turning the toggle
+    off mid-session stops sending immediately rather than at the next reload."""
+    src = (ROOT / "vob_minimal.py").read_text()
+    assert 'st.session_state.pop("_mios_transport", None)' in src
 
 
 def test_the_dispatch_reports_not_sent():

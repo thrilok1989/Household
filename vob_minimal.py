@@ -626,6 +626,10 @@ def _msg_allowed(message):
 # all context/muted alerts) is Discord-only + Supabase. (User paused the old
 # entry alerts on Telegram; they still fire on Discord.)
 _TELEGRAM_ENTRY_MARKERS = (
+    'MIOS ENTRY',           # Stage 72 — the V6 entry decision
+    'MIOS ENTRY READY',     # Stage 72 — armed, waiting on the window
+    'MIOS EXIT',            # Stage 73 — life after entry
+    'MIOS PARTIAL EXIT', 'MIOS ADD', 'MIOS TRAIL', 'MIOS ABORT',
     'FRESH ENTRY',          # options positioning + spot action agree at a level
     'ENTRY GATE',           # spot AT strong/building zone + engines aligned
     'EXIT GATE',            # active zone trade: target hit / invalidated / time
@@ -898,6 +902,44 @@ def send_telegram_alert_bot(message):
             st.session_state['_alert_bot_last_error'] = str(e)
             _time.sleep(1 + _attempt)
     return None
+
+
+def mios_v6_transport(payload, edits=None):
+    """The injected transport for Stage 72.9 — entry and exit signals.
+
+    Returns `"ok"` on a send, `"failed"` otherwise; the dispatcher understands
+    both and never assumes success. It is handed to the stage as a callable, so
+    `mios_v5` keeps its promise never to import a network client.
+
+    **Every gate upstream still applies.** Stage 72.9 has already decided the
+    decision is fresh, is not a duplicate, has not been superseded and is in a
+    sendable state; this function does not re-litigate any of that. It renders
+    and delivers, and nothing else.
+
+    `edits` names a message this one would update. Editing is not implemented
+    here yet, so an edit is sent as a new message rather than silently dropped
+    — a missing exit is worse than a duplicate one.
+    """
+    try:
+        from mios_v5.ui.telegram_message import entry_message, exit_message
+        body = dict(payload or {})
+        lc = st.session_state.get("_lifecycle_decision")
+        lc_d = lc.to_dict() if hasattr(lc, "to_dict") else (lc or {})
+
+        text = entry_message(body)
+        # An exit is only a message when Stage 73 asked for one; the dispatcher
+        # gates on SENDABLE_ACTIONS, so reaching here with an action means it
+        # already agreed.
+        if not text:
+            text = exit_message(lc_d, body)
+        if not text:
+            return "failed"
+        if edits:
+            text = "🔄 <b>UPDATE</b>\n" + text
+        send_telegram_message_sync(text, force=False)
+        return "ok"
+    except Exception:
+        return "failed"
 
 
 def send_telegram_message_sync(message, force=False):
@@ -13776,6 +13818,28 @@ def _render_main_analyzer():
 
     # ── sidebar: only what changes what is fetched ──────────────────────
     st.sidebar.header("Configuration")
+
+    # ── 📨 MIOS V6 entry / exit signals to Telegram ────────────────────
+    # OFF by default, and the switch is a human's — the same promotion gate
+    # `db/retention.py` uses for deleting and `auto_option_trader` uses for
+    # placing orders. Stage 72.9's validation report records
+    # `freeze_ready: False`, so this toggle IS the human decision that report
+    # asks for; it does not replace it.
+    #
+    # While it is off, `_mios_transport` is absent, the dispatcher receives
+    # `None`, and the chain prepares without sending exactly as before.
+    _mios_tg = st.sidebar.checkbox(
+        "📨 MIOS V6 signals → Telegram", value=False,
+        help="Stage 72 entries and Stage 73 exits, sent through Stage 72.9. "
+             "Duplicate, supersession and staleness gates are the "
+             "dispatcher's and always apply. OFF = prepare only.")
+    if _mios_tg:
+        st.session_state["_mios_transport"] = mios_v6_transport
+        st.sidebar.caption("🔴 Live — Stage 72.9 will send entry and exit "
+                           "signals it judges sendable.")
+    else:
+        st.session_state.pop("_mios_transport", None)
+
     timeframes = {"1 min": "1", "3 min": "3", "5 min": "5",
                   "15 min": "15", "25 min": "25", "60 min": "60"}
     interval = timeframes[st.sidebar.selectbox(
