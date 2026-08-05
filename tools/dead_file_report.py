@@ -25,7 +25,11 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SKIP = ("__pycache__", "/.git/", "/scratchpad/")
+#: `archive/` is excluded on purpose. Once Stage B moves a file there it is no
+#: longer part of the app, so counting it as an importer would keep its own
+#: dependencies alive forever — `config.py` stayed "held back by
+#: alerts/telegram.py" after telegram.py had already been archived.
+SKIP = ("__pycache__", "/.git/", "/scratchpad/", "archive/")
 ENTRYPOINTS = ["vob_minimal.py"]        # the Streamlit main module
 
 allpy = sorted(str(p.relative_to(ROOT)) for p in ROOT.rglob("*.py")
