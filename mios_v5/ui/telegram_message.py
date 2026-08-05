@@ -149,6 +149,32 @@ def market_block(market: Optional[Mapping[str, Any]] = None) -> str:
         head += (" ✓\n" if v5 and v6 and v5 == v6 else
                  " ⚠ diverging\n" if v5 and v6 else "\n")
 
+    # ── spot support / resistance, each with its own odds ────────────
+    # `break` and `rejection` are complements from `zone_intel.probabilities()`
+    # — rejection IS the bounce, so it is labelled that way rather than
+    # invented as 100 − break. `trap` is an INDEPENDENT read (how likely a move
+    # through the level is a liquidity grab) and is printed only when it is
+    # high enough to change what a trader does.
+    zones = ""
+    for key, mark in (("support", "🛡"), ("resistance", "🧱")):
+        z = m.get(key) or {}
+        if not isinstance(z, Mapping):
+            continue
+        price = _num(z.get("price"), "{:,.0f}")
+        if not price:
+            continue
+        brk = _num(z.get("break"), "{:,.0f}")
+        bounce = _num(z.get("bounce"), "{:,.0f}")
+        trap = _num(z.get("trap"), "{:,.0f}")
+        line = f"{mark} {key.title()}: <b>{price}</b>"
+        odds = " · ".join(x for x in (f"bounce {bounce}%" if bounce else "",
+                                      f"break {brk}%" if brk else "") if x)
+        if odds:
+            line += f"  ({odds})"
+        if trap and float(z.get("trap") or 0) >= 40:
+            line += f" ⚠ trap {trap}%"
+        zones += line + "\n"
+
     legs = ""
     for side in ("CALL", "PUT"):
         leg = m.get(side.lower()) or {}
@@ -171,12 +197,21 @@ def market_block(market: Optional[Mapping[str, Any]] = None) -> str:
         if sup or res:
             band = " / ".join(x for x in (f"S ₹{sup}" if sup else "",
                                           f"R ₹{res}" if res else "") if x)
-            line += f"    {band}\n"
+            line += f"    {band}"
+            # Stage 71.8's own odds for THIS premium's level. Named `fakeout`
+            # rather than folded into break: a fakeout and a break are
+            # different outcomes and the trader acts differently on each.
+            pb = _num(leg.get("break_probability"), "{:,.0f}")
+            pf = _num(leg.get("fakeout_probability"), "{:,.0f}")
+            extra = " · ".join(x for x in (f"break {pb}%" if pb else "",
+                                           f"fakeout {pf}%" if pf else "")
+                               if x)
+            line += f"  ({extra})\n" if extra else "\n"
         if beh:
             line += f"    {beh}\n"
         legs += line
 
-    block = head + legs
+    block = head + zones + legs
     return (f"{'─' * 22}\n{block}" if block else "")
 
 

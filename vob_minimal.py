@@ -945,6 +945,25 @@ def _mios_market_read():
         out["v6"] = (_b.get("v6") or {}).get("label")
     except Exception:
         pass
+    # Spot S/R with their odds — the SAME ranked levels the S/R panel drew,
+    # published by dashboard_v6 rather than reassembled here. `rejection` is
+    # zone_intel's name for the bounce; it is renamed once, at the boundary,
+    # instead of being recomputed as 100 - break.
+    try:
+        for _lv in (st.session_state.get("_sr_levels") or []):
+            _side = str((_lv or {}).get("side") or "").upper()
+            _key = ("support" if _side == "SUPPORT" else
+                    "resistance" if _side == "RESISTANCE" else None)
+            if not _key or _key in out:
+                continue          # ranked list → the first of a side is the best
+            _pr = (_lv.get("probabilities") or {})
+            out[_key] = {"price": _lv.get("price"),
+                         "break": _pr.get("break"),
+                         "bounce": _pr.get("rejection"),
+                         "trap": _pr.get("trap")}
+    except Exception:
+        pass
+
     _energy = (st.session_state.get("_premium_energy") or {}).get(
         "energy_score") or {}
     _struct = st.session_state.get("_premium_structures") or {}
@@ -956,16 +975,23 @@ def _mios_market_read():
         for key in ("ltp", "support", "resistance"):
             if sdata.get(key) is not None:
                 leg[key] = sdata.get(key)
-        # Stage 71.85, through the bridge that already carries it per side.
-        try:
-            if _ctx is not None:
-                _beh = _ctx.value("premium.behaviour")
-                if isinstance(_beh, dict):
-                    _beh = _beh.get(side)
-                if _beh and _beh != "UNKNOWN":
-                    leg["behaviour"] = _beh
-        except Exception:
-            pass
+        # Stage 71.85's behaviour and Stage 71.8's odds for THIS premium's
+        # level, through the bridge that already carries them per side.
+        for _field, _target in (("premium.behaviour", "behaviour"),
+                                ("premium.break_probability",
+                                 "break_probability"),
+                                ("premium.fakeout_probability",
+                                 "fakeout_probability")):
+            try:
+                if _ctx is None:
+                    break
+                _val = _ctx.value(_field)
+                if isinstance(_val, dict):
+                    _val = _val.get(side)
+                if _val is not None and _val != "UNKNOWN":
+                    leg[_target] = _val
+            except Exception:
+                pass
         if leg:
             out[side.lower()] = leg
     return out

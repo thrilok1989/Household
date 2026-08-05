@@ -265,3 +265,85 @@ def test_the_transport_assembles_the_read_from_published_state_only():
               for c in ast.walk(fn) if isinstance(c, ast.Call)}
     assert not (called & {"compute_vpfr", "calculate_money_flow_profile",
                           "analyse", "classify_sr_behavior"})
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  support / resistance with their odds
+# ══════════════════════════════════════════════════════════════════════
+
+def _zones(**over):
+    m = _market()
+    m.update({"support": {"price": 24450, "break": 28, "bounce": 72,
+                          "trap": 15},
+              "resistance": {"price": 24580, "break": 61, "bounce": 39,
+                             "trap": 44}})
+    m.update(over)
+    return m
+
+
+def test_both_levels_print_with_break_and_bounce():
+    out = M.market_block(_zones())
+    assert "Support: <b>24,450</b>" in out
+    assert "Resistance: <b>24,580</b>" in out
+    assert "bounce 72%" in out and "break 28%" in out
+    assert "bounce 39%" in out and "break 61%" in out
+
+
+def test_bounce_is_zone_intels_rejection_not_a_computed_complement():
+    """`break` and `rejection` are complements produced together by
+    `zone_intel.probabilities()`. Rendering `100 - break` would invent a number
+    that happens to agree — until the day the producer changes."""
+    out = M.market_block(_zones(support={"price": 24450, "break": 28,
+                                         "bounce": 66}))
+    assert "bounce 66%" in out          # not 72
+    assert "72%" not in out.split("🧱 Resistance")[0]
+
+
+def test_a_high_trap_is_flagged_and_a_low_one_is_not():
+    """Trap is INDEPENDENT of break/bounce — how likely a move through is a
+    liquidity grab. It earns a line only when it would change what you do."""
+    out = M.market_block(_zones())
+    assert "trap 44%" in out            # resistance, high
+    assert "trap 15%" not in out        # support, low — noise
+
+
+def test_a_level_without_a_price_is_dropped():
+    # Anchored on the zone marker: the bare word "Support" also appears in the
+    # behaviour line ("Support Building"), so a loose check passed on broken
+    # output and failed on correct output.
+    assert "🛡 Support:" not in M.market_block(_zones(support={"break": 28}))
+
+
+def test_odds_are_omitted_when_the_producer_did_not_report():
+    out = M.market_block(_zones(support={"price": 24450}))
+    assert "Support: <b>24,450</b>" in out
+    assert "bounce" not in out.split("🧱 Resistance")[0]
+    assert "0%" not in out
+
+
+def test_the_premium_level_carries_its_own_break_and_fakeout():
+    """Stage 71.8's odds for the PREMIUM's level — a different fact from the
+    spot zone's, and printed on the leg it belongs to."""
+    m = _zones()
+    m["call"] = dict(m["call"], break_probability=22, fakeout_probability=18)
+    call = M.market_block(m).split("🟢 <b>CALL</b>")[1].split("🔴")[0]
+    assert "break 22%" in call and "fakeout 18%" in call
+
+
+def test_fakeout_is_not_folded_into_break():
+    """A fakeout and a break are different outcomes and a trader acts
+    differently on each; one blended number would erase the distinction."""
+    m = _zones()
+    m["call"] = dict(m["call"], break_probability=22, fakeout_probability=18)
+    call = M.market_block(m).split("🟢 <b>CALL</b>")[1].split("🔴")[0]
+    assert "40%" not in call
+
+
+def test_the_spot_zone_and_the_premium_level_are_not_confused():
+    """24,450 is a NIFTY level; ₹175 is where that CALL trades. Neither may
+    appear in the other's block."""
+    m = _zones()
+    m["call"] = dict(m["call"], break_probability=22)
+    out = M.market_block(m)
+    call = out.split("🟢 <b>CALL</b>")[1].split("🔴")[0]
+    assert "24,450" not in call and "24,580" not in call
