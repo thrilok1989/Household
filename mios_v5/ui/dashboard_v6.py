@@ -1313,7 +1313,12 @@ def _sr_intelligence(st, fr: Dict[str, Any], state) -> None:
         st.markdown(_sr_status(st, rsr), unsafe_allow_html=True)
         return
 
-    render_sr_panel(rank_levels(levels))
+    _ranked = rank_levels(levels)
+    # Published so the Telegram signal reads the SAME assembled levels the
+    # panel draws — a second assembly here would be a second owner, and the
+    # message and the screen could then disagree about the same level.
+    st.session_state["_sr_levels"] = _ranked
+    render_sr_panel(_ranked)
     if unenriched:
         st.caption(f"⚠️ {unenriched} level(s) shown WITHOUT Zone Intelligence — "
                    f"price and strength only. `enrich_zone_intel` did not "

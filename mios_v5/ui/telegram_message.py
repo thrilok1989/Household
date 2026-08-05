@@ -112,8 +112,123 @@ def _identity(payload: Mapping[str, Any]) -> str:
     return ("<code>" + " · ".join(bits) + "</code>") if bits else ""
 
 
-def entry_message(payload: Optional[Mapping[str, Any]] = None) -> str:
-    """The entry signal. `""` when the state is not one worth sending."""
+def market_block(market: Optional[Mapping[str, Any]] = None) -> str:
+    """The market read that goes out WITH the signal.
+
+    Six things, all of which already have an owner elsewhere in MIOS and none
+    of which is computed here:
+
+    * **spot** — the price everything below is relative to
+    * **V5 vs V6 bias** — Stage 27's arbitrated read against Stage 71's, because
+      the interesting moment is when they disagree
+    * **CALL / PUT energy** — Stage 71.7, scored independently and never by
+      subtraction, so both are printed rather than a difference
+    * **CALL / PUT LTP with its own support and resistance** — Stage 71.8's
+      premium structure. These are PREMIUM levels, not spot levels converted:
+      there is no delta-based conversion anywhere in MIOS, and printing a spot
+      level against an option's LTP would mark a price that series never trades
+    * **S/R behaviour per side** — Stage 71.85, what the premium is doing at
+      its own level
+
+    Every one is dropped when its owner did not report, by the same rule as
+    everything else here: absent is a missing row, never a zero.
+    """
+    m = dict(market or {})
+    spot = _num(m.get("spot"), "{:,.1f}")
+    v5, v6 = _v(m.get("v5")), _v(m.get("v6"))
+
+    head = ""
+    if spot:
+        head += f"📍 Spot: <b>{spot}</b>\n"
+    if v5 or v6:
+        # Printed side by side on purpose — one line that agrees is reassuring,
+        # one that disagrees is the reason to look at the chart.
+        both = " · ".join(x for x in (f"V5 {v5}" if v5 else "",
+                                      f"V6 {v6}" if v6 else "") if x)
+        head += f"🧭 Bias: <b>{both}</b>"
+        head += (" ✓\n" if v5 and v6 and v5 == v6 else
+                 " ⚠ diverging\n" if v5 and v6 else "\n")
+
+    # ── spot support / resistance, each with its own odds ────────────
+    # `break` and `rejection` are complements from `zone_intel.probabilities()`
+    # — rejection IS the bounce, so it is labelled that way rather than
+    # invented as 100 − break. `trap` is an INDEPENDENT read (how likely a move
+    # through the level is a liquidity grab) and is printed only when it is
+    # high enough to change what a trader does.
+    zones = ""
+    for key, mark in (("support", "🛡"), ("resistance", "🧱")):
+        z = m.get(key) or {}
+        if not isinstance(z, Mapping):
+            continue
+        price = _num(z.get("price"), "{:,.0f}")
+        if not price:
+            continue
+        brk = _num(z.get("break"), "{:,.0f}")
+        bounce = _num(z.get("bounce"), "{:,.0f}")
+        trap = _num(z.get("trap"), "{:,.0f}")
+        line = f"{mark} {key.title()}: <b>{price}</b>"
+        odds = " · ".join(x for x in (f"bounce {bounce}%" if bounce else "",
+                                      f"break {brk}%" if brk else "") if x)
+        if odds:
+            line += f"  ({odds})"
+        if trap and float(z.get("trap") or 0) >= 40:
+            line += f" ⚠ trap {trap}%"
+        zones += line + "\n"
+
+    legs = ""
+    for side in ("CALL", "PUT"):
+        leg = m.get(side.lower()) or {}
+        if not isinstance(leg, Mapping):
+            continue
+        ltp = _num(leg.get("ltp"))
+        energy = _v(leg.get("energy"))
+        sup = _num(leg.get("support"))
+        res = _num(leg.get("resistance"))
+        beh = _v(leg.get("behaviour"))
+        if not any((ltp, energy, sup, res, beh)):
+            continue
+        emoji = "🟢" if side == "CALL" else "🔴"
+        line = f"{emoji} <b>{side}</b>"
+        if ltp:
+            line += f" ₹{ltp}"
+        if energy:
+            line += f" · energy {energy}"
+        line += "\n"
+        if sup or res:
+            band = " / ".join(x for x in (f"S ₹{sup}" if sup else "",
+                                          f"R ₹{res}" if res else "") if x)
+            line += f"    {band}"
+            # Stage 71.8's own odds for THIS premium's level. Named `fakeout`
+            # rather than folded into break: a fakeout and a break are
+            # different outcomes and the trader acts differently on each.
+            pb = _num(leg.get("break_probability"), "{:,.0f}")
+            pf = _num(leg.get("fakeout_probability"), "{:,.0f}")
+            extra = " · ".join(x for x in (f"break {pb}%" if pb else "",
+                                           f"fakeout {pf}%" if pf else "")
+                               if x)
+            line += f"  ({extra})\n" if extra else "\n"
+        if beh:
+            line += f"    {beh}\n"
+        legs += line
+
+    block = head + zones + legs
+    return (f"{'─' * 22}\n{block}" if block else "")
+
+
+def entry_message(payload: Optional[Mapping[str, Any]] = None,
+                  market: Optional[Mapping[str, Any]] = None,
+                  reasons: bool = True) -> str:
+    """The entry signal. `""` when the state is not one worth sending.
+
+    `reasons=False` is the **terse** variant: the same decision, the same
+    levels, the same odds — without the ✓ block that explains which components
+    scored. Two channels carry the two variants.
+
+    ⚠️ **Warnings are in BOTH.** They are the half that changes what a trader
+    does: a `SHOCK` or a frozen tape is not detail, and a "terse" message that
+    dropped it would be shorter and more dangerous. Only the explanation of a
+    *good* read is optional.
+    """
     p = dict(payload or {})
     state = str(p.get("state") or UNKNOWN)
     if state not in ENTRY_HEAD:
@@ -142,12 +257,13 @@ def entry_message(payload: Optional[Mapping[str, Any]] = None) -> str:
         + _row("Horizon", _v(p.get("horizon")))
     )
 
-    why = _reasons(p)
+    why = _reasons(p) if reasons else ""
     warn = _warnings(p)
     return (
         f"{head}\n"
         f"{'─' * 22}\n"
         f"{body}"
+        + market_block(market)
         + (f"{'─' * 22}\n{why}" if why else "")
         + (warn if warn else "")
         + f"{'─' * 22}\n{_identity(p)}"
@@ -155,7 +271,9 @@ def entry_message(payload: Optional[Mapping[str, Any]] = None) -> str:
 
 
 def exit_message(lifecycle: Optional[Mapping[str, Any]] = None,
-                 entry: Optional[Mapping[str, Any]] = None) -> str:
+                 entry: Optional[Mapping[str, Any]] = None,
+                 market: Optional[Mapping[str, Any]] = None,
+                 reasons: bool = True) -> str:
     """The exit / management update, carrying the entry's id so a reader can
     join it to the signal they were sent earlier."""
     lc = dict(lifecycle or {})
@@ -184,6 +302,11 @@ def exit_message(lifecycle: Optional[Mapping[str, Any]] = None,
         # only if that ever changes — it must never be implied.
         + _row("Position", _v(lc.get("position_known")))
     )
+
+    body += market_block(market)
+
+    if reasons:
+        body += _reasons(lc)
 
     ref = _v((entry or {}).get("id")) or _v(lc.get("decision_id"))
     tail = f"<code>entry {ref[:8]}</code>" if ref else ""

@@ -650,6 +650,24 @@ def _msg_entry_tier(message):
 # alert message is withheld — so Stage 40 (bias/outcome validation) keeps its
 # data. Flip to False to restore the legacy entry alerts.
 RETIRE_ENTRY_ALERTS = True
+
+# ── 📨 MIOS V6 signals → Telegram: the DEFAULT for the sidebar toggle ──
+# ⚠️ True means entry and exit signals are LIVE from the moment the app loads,
+#    on every fresh session, without anyone opting in. Set by the owner
+#    deliberately; the sidebar toggle still turns it off for the session.
+#
+# What still protects you with this on, and what does not:
+#   ✅ Stage 72.9's gates all apply — a decision must verify, must not be a
+#      duplicate, must not be superseded, must be under MAX_AGE_SECONDS, and
+#      must be in a sendable state. WAIT is never sent.
+#   ✅ Delivery is market-hours only (08:30-15:45 IST, weekdays).
+#   ✅ Nothing places an order. This is a message, not execution.
+#   ❌ Stage 72.9 is still VALIDATED_SIMULATED — freeze_ready is False in
+#      STAGE72_9_VALIDATION_REPORT.md. Its gates are proven in simulation, not
+#      against five hundred live dispatches.
+#
+# Flip to False to go back to opt-in.
+MIOS_V6_TELEGRAM_DEFAULT = True
 _RETIRED_ALERT_CLASSES = frozenset({
     'leg_entry', 'confirmed_entry', 'entry_result', 'all_aligned_entry',
     'sr_confluence', 'fresh_entry', 'bias_enter',
@@ -904,6 +922,81 @@ def send_telegram_alert_bot(message):
     return None
 
 
+def _mios_market_read():
+    """Spot, V5/V6 bias, per-side energy, premium LTP + its own S/R, and the
+    Stage 71.85 behaviour — assembled from what the cycle already published.
+
+    Reads only; computes nothing. Every value has an owner elsewhere, and a
+    key that is missing simply does not reach the message.
+    """
+    out = {}
+    try:
+        out["spot"] = (st.session_state.get("_cached_option_data") or {}).get(
+            "underlying")
+    except Exception:
+        pass
+    # Stage 27's arbitrated read vs Stage 71's — the disagreement is the point.
+    try:
+        from mios_v5.final_read import build_final_read
+        from mios_v5.v6_bias import compare as _cmp
+        _fr = build_final_read(st.session_state.get("_mios_state")) or {}
+        _b = _cmp(_fr) or {}
+        out["v5"] = (_b.get("v5") or {}).get("label")
+        out["v6"] = (_b.get("v6") or {}).get("label")
+    except Exception:
+        pass
+    # Spot S/R with their odds — the SAME ranked levels the S/R panel drew,
+    # published by dashboard_v6 rather than reassembled here. `rejection` is
+    # zone_intel's name for the bounce; it is renamed once, at the boundary,
+    # instead of being recomputed as 100 - break.
+    try:
+        for _lv in (st.session_state.get("_sr_levels") or []):
+            _side = str((_lv or {}).get("side") or "").upper()
+            _key = ("support" if _side == "SUPPORT" else
+                    "resistance" if _side == "RESISTANCE" else None)
+            if not _key or _key in out:
+                continue          # ranked list → the first of a side is the best
+            _pr = (_lv.get("probabilities") or {})
+            out[_key] = {"price": _lv.get("price"),
+                         "break": _pr.get("break"),
+                         "bounce": _pr.get("rejection"),
+                         "trap": _pr.get("trap")}
+    except Exception:
+        pass
+
+    _energy = (st.session_state.get("_premium_energy") or {}).get(
+        "energy_score") or {}
+    _struct = st.session_state.get("_premium_structures") or {}
+    _ctx = st.session_state.get("_trading_context")
+    for side in ("CALL", "PUT"):
+        leg, sdata = {}, (_struct.get(side) or {})
+        if _energy.get(side) is not None:
+            leg["energy"] = _energy.get(side)
+        for key in ("ltp", "support", "resistance"):
+            if sdata.get(key) is not None:
+                leg[key] = sdata.get(key)
+        # Stage 71.85's behaviour and Stage 71.8's odds for THIS premium's
+        # level, through the bridge that already carries them per side.
+        for _field, _target in (("premium.behaviour", "behaviour"),
+                                ("premium.break_probability",
+                                 "break_probability"),
+                                ("premium.fakeout_probability",
+                                 "fakeout_probability")):
+            try:
+                if _ctx is None:
+                    break
+                _val = _ctx.value(_field)
+                if isinstance(_val, dict):
+                    _val = _val.get(side)
+                if _val is not None and _val != "UNKNOWN":
+                    leg[_target] = _val
+            except Exception:
+                pass
+        if leg:
+            out[side.lower()] = leg
+    return out
+
+
 def mios_v6_transport(payload, edits=None):
     """The injected transport for Stage 72.9 — entry and exit signals.
 
@@ -926,17 +1019,38 @@ def mios_v6_transport(payload, edits=None):
         lc = st.session_state.get("_lifecycle_decision")
         lc_d = lc.to_dict() if hasattr(lc, "to_dict") else (lc or {})
 
-        text = entry_message(body)
-        # An exit is only a message when Stage 73 asked for one; the dispatcher
-        # gates on SENDABLE_ACTIONS, so reaching here with an action means it
-        # already agreed.
-        if not text:
-            text = exit_message(lc_d, body)
-        if not text:
+        market = _mios_market_read()
+
+        # Two variants of ONE dispatch. The registry claims on the decision
+        # hash alone, so a second dispatch for the same decision would be a
+        # duplicate by its own definition — the fan-out belongs here, at the
+        # transport, where `send_telegram_message_sync` already mirrors to
+        # Discord. The dispatcher still sees exactly one send.
+        terse = (entry_message(body, market, reasons=False)
+                 or exit_message(lc_d, body, market, reasons=False))
+        full = (entry_message(body, market, reasons=True)
+                or exit_message(lc_d, body, market, reasons=True))
+        if not terse:
             return "failed"
         if edits:
-            text = "🔄 <b>UPDATE</b>\n" + text
-        send_telegram_message_sync(text, force=False)
+            terse = "🔄 <b>UPDATE</b>\n" + terse
+            full = "🔄 <b>UPDATE</b>\n" + full
+
+        # Terse → the main bot. This is the one that must land, so its result
+        # is the transport's result.
+        send_telegram_message_sync(terse, force=False)
+
+        # Reasoned → the second bot. Best-effort and deliberately NOT part of
+        # the return value: the reasoning failing to arrive must never mark the
+        # signal itself as undelivered, or the dispatcher would release the
+        # claim and re-send a signal the trader already has.
+        try:
+            if full and full != terse:
+                send_telegram_alert_bot(full)
+                st.session_state["_mios_full_channel"] = (
+                    "ok" if TELEGRAM_ALERT_CHAT_ID else "unconfigured")
+        except Exception:
+            st.session_state["_mios_full_channel"] = "failed"
         return "ok"
     except Exception:
         return "failed"
@@ -13820,16 +13934,15 @@ def _render_main_analyzer():
     st.sidebar.header("Configuration")
 
     # ── 📨 MIOS V6 entry / exit signals to Telegram ────────────────────
-    # OFF by default, and the switch is a human's — the same promotion gate
-    # `db/retention.py` uses for deleting and `auto_option_trader` uses for
-    # placing orders. Stage 72.9's validation report records
-    # `freeze_ready: False`, so this toggle IS the human decision that report
-    # asks for; it does not replace it.
+    # The default lives in `MIOS_V6_TELEGRAM_DEFAULT` (top of file) so it is
+    # one findable line rather than a literal buried in the sidebar. The owner
+    # set it ON: signals are live from load, and this toggle turns them off for
+    # the session rather than on.
     #
-    # While it is off, `_mios_transport` is absent, the dispatcher receives
-    # `None`, and the chain prepares without sending exactly as before.
+    # Whichever way it sits: off → `_mios_transport` is absent, the dispatcher
+    # receives `None`, and the chain prepares without sending.
     _mios_tg = st.sidebar.checkbox(
-        "📨 MIOS V6 signals → Telegram", value=False,
+        "📨 MIOS V6 signals → Telegram", value=MIOS_V6_TELEGRAM_DEFAULT,
         help="Stage 72 entries and Stage 73 exits, sent through Stage 72.9. "
              "Duplicate, supersession and staleness gates are the "
              "dispatcher's and always apply. OFF = prepare only.")
@@ -13837,6 +13950,16 @@ def _render_main_analyzer():
         st.session_state["_mios_transport"] = mios_v6_transport
         st.sidebar.caption("🔴 Live — Stage 72.9 will send entry and exit "
                            "signals it judges sendable.")
+        # Two channels: terse on the main bot, the reasoned one on the alert
+        # bot. Say when the second is unconfigured — `send_telegram_alert_bot`
+        # is a silent no-op without it, and a reasoning channel that quietly
+        # never arrives looks exactly like one with nothing to say.
+        if TELEGRAM_ALERT_BOT_TOKEN and TELEGRAM_ALERT_CHAT_ID:
+            st.sidebar.caption("📄 Reasoned copy → alert bot.")
+        else:
+            st.sidebar.caption(
+                "⚠️ Terse only — set TELEGRAM_ALERT_BOT_TOKEN and "
+                "TELEGRAM_ALERT_CHAT_ID for the reasoned copy.")
     else:
         st.session_state.pop("_mios_transport", None)
 

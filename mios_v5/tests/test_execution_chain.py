@@ -122,21 +122,53 @@ def test_the_transport_is_never_constructed_here():
     assert 'st.session_state.get("_mios_transport")' in src
 
 
-def test_sending_is_behind_a_human_switch_that_defaults_off():
-    """The promotion gate this repo uses everywhere: `ENABLED = False` in
-    retention, the LIVE TRADING checkbox in auto_option_trader. A signal
-    channel that turns itself on is the one failure that is loud and public."""
+def test_the_send_default_is_one_findable_named_constant():
+    """⚠️ This replaced an assertion that the toggle defaulted to OFF.
+
+    The owner set it ON deliberately, so that assertion had to go — but the
+    property underneath it must not: **whether this app sends unprompted has
+    to be one line somebody can find.** A literal `value=True` buried in a
+    sidebar call is a live signal channel nobody can locate.
+
+    So the default is a module-level constant, and the toggle must read it
+    rather than hard-code either answer.
+    """
     src = (ROOT / "vob_minimal.py").read_text()
     tree = ast.parse(src)
+
+    consts = [n for n in tree.body if isinstance(n, ast.Assign)
+              and any(getattr(t, "id", "") == "MIOS_V6_TELEGRAM_DEFAULT"
+                      for t in n.targets)]
+    assert consts, "the send default must be a named module-level constant"
+    assert isinstance(consts[0].value, ast.Constant)
+    assert isinstance(consts[0].value.value, bool)
+
     toggles = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                and getattr(n.func, "attr", "") == "checkbox"
                and any(isinstance(a, ast.Constant)
                        and "MIOS V6 signals" in str(a.value) for a in n.args)]
     assert toggles, "no toggle for MIOS V6 Telegram signals"
     for t in toggles:
-        default = next((kw.value for kw in t.keywords if kw.arg == "value"), None)
-        assert isinstance(default, ast.Constant) and default.value is False, (
-            "the toggle must default to OFF")
+        default = next((kw.value for kw in t.keywords if kw.arg == "value"),
+                       None)
+        assert isinstance(default, ast.Name), (
+            "the toggle must read the named constant, not hard-code a default")
+        assert default.id == "MIOS_V6_TELEGRAM_DEFAULT"
+
+
+def test_the_toggle_can_still_turn_sending_off():
+    """Defaulting on is a decision about the starting state, not a removal of
+    the switch. Turning it off mid-session must still stop sending."""
+    src = (ROOT / "vob_minimal.py").read_text()
+    assert 'st.session_state.pop("_mios_transport", None)' in src
+    # AST, not a text slice — the phrase now appears in the constant's comment
+    # as well as the widget, and slicing on the first hit found the comment.
+    tree = ast.parse(src)
+    assert any(isinstance(n, ast.Call)
+               and getattr(n.func, "attr", "") == "checkbox"
+               and any(isinstance(a, ast.Constant)
+                       and "MIOS V6 signals" in str(a.value) for a in n.args)
+               for n in ast.walk(tree)), "the switch itself was removed"
 
 
 def test_the_transport_key_is_removed_when_the_toggle_is_off():
