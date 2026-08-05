@@ -54,7 +54,10 @@ from dataclasses import dataclass, field as _dc_field
 from types import MappingProxyType
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
-VERSION = "71.95.2"
+#: 71.95.2 → 71.95.3 — the futures root. Additive: a consumer that never asks
+#: for `futures.*` is unaffected, and `build()` without a `futures=` argument
+#: yields UNKNOWN fields exactly as any other absent root does.
+VERSION = "71.95.3"
 
 #: The value of a field whose owner did not report. Never `None`, never `0` —
 #: a zero looks like a measurement.
@@ -221,6 +224,33 @@ SPEC: Dict[str, Dict[str, Tuple[str, str, str, str]]] = {
                       "htf_alignment.score"),
         "structure": ("Higher-Timeframe VPFR", "45", "fr", "htf.structure"),
     },
+    # ── futures · 71.90 ──────────────────────────────────────────────
+    # The instrument the roadmap says to weight ABOVE spot, and which no stage
+    # could see: `get_nifty_futures_data()` has published price, OI, basis and
+    # stance every cycle since long before this bridge existed, and its only
+    # reader was a display panel.
+    #
+    # `oi_state` is deliberately not called `positioning` — Stage 13 publishes
+    # option-chain positioning modes with the same classical names, and a
+    # consumer reading both must see two instruments rather than one
+    # contradiction.
+    "futures": {
+        "oi_state": ("Futures OI (day-anchored)", "71.90", "futures",
+                     "futures_oi_state"),
+        "oi_direction": ("Futures OI (day-anchored)", "71.90", "futures",
+                         "oi_direction"),
+        "price_direction": ("Futures OI (day-anchored)", "71.90", "futures",
+                            "price_direction"),
+        "day_oi_pct": ("Futures OI (day-anchored)", "71.90", "futures",
+                       "day_oi_pct"),
+        "day_price_change": ("Futures OI (day-anchored)", "71.90", "futures",
+                             "day_price_change"),
+        # Basis and stance come from the quote, not from Stage 71.90 — it
+        # carries them without computing them, and the owner column says so.
+        "basis": ("Dhan futures quote", "71.90", "futures", "basis"),
+        "price": ("Dhan futures quote", "71.90", "futures", "current_price"),
+        "symbol": ("Dhan futures quote", "71.90", "futures", "symbol"),
+    },
     "risk": {
         "risk": ("Market Context — breakout risk", "04", "fr", "breakout_risk"),
         "validity": ("Signal Validity Filter", "51", "fr", "validity.verdict"),
@@ -247,7 +277,7 @@ ALIAS: Dict[str, Dict[str, Tuple[str, str]]] = {
 #: Which `build()` argument each root names, for the error message when one is
 #: missing — a context built without the matrix should say so, not read empty.
 ROOTS: Tuple[str, ...] = ("fr", "matrix", "premium", "validation", "structure",
-                          "behaviour")
+                          "behaviour", "futures")
 
 #: The two option sides, in the order every panel prints them.
 SIDES: Tuple[str, str] = ("CALL", "PUT")
@@ -329,13 +359,14 @@ class TradingContext:
     energy: Mapping[str, Field]
     htf: Mapping[str, Field]
     risk: Mapping[str, Field]
+    futures: Mapping[str, Field]
     meta: Mapping[str, Any]
     advisory_only: bool = ADVISORY_ONLY
 
     #: group order, fixed so serialisation and the owners table are stable
     GROUPS: Tuple[str, ...] = _dc_field(
         default=("market", "opportunity", "premium", "strike", "energy",
-                 "htf", "risk"), repr=False)
+                 "htf", "risk", "futures"), repr=False)
 
     # ── access ────────────────────────────────────────────────────────
     def group(self, name: str) -> Mapping[str, Field]:
@@ -422,6 +453,7 @@ def build(fr: Optional[Mapping[str, Any]] = None,
           validation: Optional[Mapping[str, Any]] = None,
           structure: Optional[Mapping[str, Any]] = None,
           behaviour: Optional[Mapping[str, Any]] = None,
+          futures: Optional[Mapping[str, Any]] = None,
           cycle: Optional[int] = None,
           timestamp: Optional[float] = None) -> TradingContext:
     """Assemble one cycle's context. Always returns a context, never raises.
@@ -432,6 +464,7 @@ def build(fr: Optional[Mapping[str, Any]] = None,
     `validation` — Stage 71.8
     `structure`  — `{"CALL": premium_structure.analyse(…), "PUT": …}`
     `behaviour`  — Stage 71.85, `premium_behaviour.build(…)`
+    `futures`    — Stage 71.90, `futures_oi.read(quote, baseline).to_dict()`
 
     Every argument is a **finished output**. Nothing is fetched, nothing is
     computed, and an absent argument yields `UNKNOWN` fields rather than an
@@ -441,7 +474,7 @@ def build(fr: Optional[Mapping[str, Any]] = None,
     roots: Dict[str, Any] = {
         "fr": fr, "matrix": matrix, "premium": premium,
         "validation": validation, "structure": structure,
-        "behaviour": behaviour,
+        "behaviour": behaviour, "futures": futures,
     }
 
     groups: Dict[str, Mapping[str, Field]] = {}
@@ -472,7 +505,7 @@ def build(fr: Optional[Mapping[str, Any]] = None,
         market=groups["market"], opportunity=groups["opportunity"],
         premium=groups["premium"], strike=groups["strike"],
         energy=groups["energy"], htf=groups["htf"], risk=groups["risk"],
-        meta=meta)
+        futures=groups["futures"], meta=meta)
 
 
 def spec_rows() -> Tuple[Dict[str, str], ...]:
