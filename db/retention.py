@@ -192,6 +192,10 @@ _CHOSEN: Tuple[Policy, ...] = (
     # table in this schema became.
     _p("liquidity_telemetry", 180, "trading_day", "this module",
        "calibration evidence — kept across quarters, not forever"),
+    # One row per trading day per futures contract. A year is nothing in
+    # storage terms and lets this expiry cycle be compared with the last.
+    _p("futures_oi_baseline", 365, "trading_day", "this module",
+       "the day's futures OI anchor — one row per day"),
 )
 
 POLICIES: Dict[str, Policy] = {

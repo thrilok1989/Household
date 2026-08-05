@@ -113,7 +113,10 @@ def test_the_sql_seed_matches_the_python_policies_exactly():
 
 def test_the_seed_covers_every_policy_and_no_protected_table():
     seeded = _seeded()
-    assert len(seeded) == len(RT.POLICIES) == 44
+    # 44 → 45: `futures_oi_baseline` (the day's futures OI anchor). The literal
+    # is deliberate — a new table must be added to BOTH the Python policies and
+    # the SQL seed, and bumping this number is the moment that gets noticed.
+    assert len(seeded) == len(RT.POLICIES) == 45
     for table in RT.PROTECTED:
         assert table not in seeded, f"{table} is protected and must not be seeded"
 
