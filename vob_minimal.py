@@ -14006,6 +14006,10 @@ def _render_main_analyzer():
              "that side has the energy · the premium is building. "
              "All five, or nothing is sent.")
     st.session_state["_simple_entry_on"] = _simple_on
+    # A placeholder, not a direct write: the sidebar is built near the top of
+    # the script and the rules are evaluated near the bottom, so writing here
+    # would show the PREVIOUS cycle's answer — worse than showing none.
+    st.session_state["_simple_entry_slot"] = st.sidebar.empty()
 
     if _mios_tg:
         st.session_state["_mios_transport"] = mios_v6_transport
@@ -14525,7 +14529,13 @@ def _render_main_analyzer():
                 # first would evaluate five rules against last cycle's data.
                 if st.session_state.get("_simple_entry_on"):
                     try:
-                        run_simple_entry()
+                        _se_signal = run_simple_entry()
+                        # The five rules' verdict was stored and read by
+                        # nothing. One line, every cycle, naming the blocker.
+                        from mios_v5.ui.simple_entry_panel import render_status
+                        render_status(
+                            st.session_state.get("_simple_entry_slot"),
+                            _se_signal)
                     except Exception:
                         pass
             except Exception as err:
