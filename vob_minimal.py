@@ -14262,7 +14262,30 @@ def _render_main_analyzer():
 
 def main():
     st.title("📈 Nifty Trading & Options Analyzer")
+
+    # ── hot-path measurement · OFF unless MIOS_PROFILE=1 ──────────────
+    # The duplication survey counted 11 call sites for
+    # `calculate_money_flow_profile` and 8 for `compute_vpfr` in this ~20s
+    # rerun path, and said explicitly that call sites are not executions. This
+    # is how that stops being a guess. Disabled it costs one env lookup at
+    # import and wraps nothing; there is no production path through it.
+    _prof = None
+    try:
+        from tools import hotpath_profiler as _prof
+        if _prof.ENABLED:
+            _prof.install(globals())
+    except Exception:
+        _prof = None
+
     _render_main_analyzer()
+
+    # Flushed per rerun, not per session: the question is what ONE cycle
+    # costs, and a running total answers something else.
+    if _prof is not None and _prof.ENABLED:
+        try:
+            st.caption(_prof.summary_line(_prof.flush()))
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
