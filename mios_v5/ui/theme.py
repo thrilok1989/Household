@@ -58,3 +58,46 @@ PANEL_BG, GRID = "#0f1622", "#161b22"
 
 #: the greys this replaced, so a stray one is recognisable in review
 RETIRED = ("#4d5b6d", "#5d6b7d", "#66788c", "#7f8ea3", "#8fa1b3", "#aeb9c7")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  the shared maps — one meaning, one colour
+# ══════════════════════════════════════════════════════════════════════
+#
+# Seven panels defined their own bias map and three defined their own grade
+# map. Bull and bear agreed everywhere; **neutral did not** — it was `MUTED`
+# grey in `absorption_panel` and `terminal_panel`, and `WARN` amber in the
+# other five. Two panels called the same reading "nothing is happening" and
+# five called it "be careful", on the same screen.
+#
+# ⚠️ `NEUTRAL` is `WARN` here because that is what five of the seven maps
+#    already used, so unifying costs two panels a colour change rather than
+#    five. It is NOT an endorsement: on this repo's own reasoning an *absence*
+#    of direction should not wear a caution colour, and `Neutral` elsewhere
+#    (Stage 71.85, Stage 71.86) is deliberately treated as an absence. Changing
+#    it is one line here — a deliberate decision, not a silent drift.
+
+#: bias → colour. Keys are matched case-insensitively by `bias_tone()`, because
+#: half the panels wrote `BULL` and half wrote `bull`, which is how one map
+#: became seven.
+BIAS_TONE = {"BULL": BULL, "BEAR": BEAR, "NEUTRAL": WARN}
+
+BIAS_EMOJI = {"BULL": "🟢", "BEAR": "🔴", "NEUTRAL": "🟡"}
+
+#: trade quality → colour. `dashboard.py` used `#f0b429`/`#f0455a` for B and C
+#: where the other two panels used `WARN`/`ALERT`; the semantic constants win,
+#: so a B on one screen is a B on every screen.
+GRADE_TONE = {"A+": BULL, "A": BULL_SOFT, "B": WARN, "C": ALERT}
+
+
+def bias_tone(value, default=INK) -> str:
+    """A bias's colour whatever case it arrived in."""
+    return BIAS_TONE.get(str(value or "").strip().upper(), default)
+
+
+def bias_emoji(value, default="⚪") -> str:
+    return BIAS_EMOJI.get(str(value or "").strip().upper(), default)
+
+
+def grade_tone(value, default=MUTED) -> str:
+    return GRADE_TONE.get(str(value or "").strip().upper(), default)

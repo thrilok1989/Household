@@ -18,9 +18,8 @@ is information.
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+from .theme import bias_emoji, bias_tone
 
-_DIR_COLOR = {"BULL": "#00ff88", "BEAR": "#ff4444", "NEUTRAL": "#ffd000"}
-_DIR_EMOJI = {"BULL": "🟢", "BEAR": "🔴", "NEUTRAL": "🟡"}
 _REL_COLOR = {"HIGH": "#cfd9e6", "MEDIUM": "#ffcc33", "LOW": "#ff9500"}
 _FRESH_MARK = {"LIVE": "", "RECENT": "·recent", "OLD": "·old"}
 
@@ -38,7 +37,7 @@ def family_panel_html(corr: Optional[Dict[str, Any]]) -> str:
                 f"{f['label']}</span><span style='font-size:12px;color:#cfd9e6'>"
                 f"no data</span></div>")
             continue
-        col = _DIR_COLOR.get(f["direction"], "#ffffff")
+        col = bias_tone(f["direction"], "#ffffff")
         strength = int(f.get("strength") or 0)
         rel, fresh = f.get("reliability", "HIGH"), f.get("freshness", "LIVE")
         note = ""
@@ -53,7 +52,7 @@ def family_panel_html(corr: Optional[Dict[str, Any]]) -> str:
             f"<div style='display:flex;align-items:center;gap:8px;margin-top:4px'>"
             f"<span style='width:132px;font-size:13px;color:#ffffff;font-weight:700'>"
             f"{f['label']}</span>"
-            f"<span style='font-size:14px'>{_DIR_EMOJI.get(f['direction'], '⚪')}</span>"
+            f"<span style='font-size:14px'>{bias_emoji(f['direction'], '⚪')}</span>"
             f"<div style='flex:1;height:8px;background:#1e2836;border-radius:4px;"
             f"overflow:hidden'><div style='width:{max(2, strength)}%;height:100%;"
             f"background:{col}'></div></div>"
@@ -62,7 +61,7 @@ def family_panel_html(corr: Optional[Dict[str, Any]]) -> str:
             f"<span style='font-size:10px;color:#b3c2d4'>{fm}</span></div>")
 
     dom = corr.get("dominant", "—")
-    dcol = _DIR_COLOR.get(dom.replace("STRONG_", ""), "#ffffff")
+    dcol = bias_tone(dom.replace("STRONG_", ""), "#ffffff")
     sev = corr.get("severity", "—")
     sev_em = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}.get(sev, "⚪")
     head = (

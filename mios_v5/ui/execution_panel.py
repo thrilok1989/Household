@@ -33,8 +33,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from .theme import (ALERT, BEAR, BULL, BULL_SOFT, FAINT, INK, MICRO, MUTED,
-                    WARN)
+from .theme import (ALERT, BEAR, BULL, BULL_SOFT, FAINT, INK, MICRO,
+                    MUTED, WARN, grade_tone)
 
 UNKNOWN = "UNKNOWN"
 
@@ -54,7 +54,6 @@ _DISPATCH_COL = {
     "RATE_LIMIT": WARN, "RETRY": WARN, "DELIVERY_FAILED": ALERT,
 }
 
-_QUALITY_COL = {"A+": BULL, "A": BULL_SOFT, "B": WARN, "C": ALERT}
 
 
 def _num(v) -> Optional[float]:
@@ -149,7 +148,7 @@ def execution_html(decision: Any = None, lifecycle: Any = None,
         _cell("Score", "—" if score is None else f"{score:.0f}/100",
               BULL if (score or 0) >= 75 else WARN if (score or 0) >= 60
               else MUTED),
-        _cell("Quality", _txt(quality), _QUALITY_COL.get(quality, MUTED)),
+        _cell("Quality", _txt(quality), grade_tone(quality, MUTED)),
         _cell("Side", _txt(_get(decision, "side"))),
         _cell("Strike", _px(_get(decision, "strike"))),
         _cell("Zone", _txt(_get(decision, "entry_zone"))),

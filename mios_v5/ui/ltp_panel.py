@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+from .theme import bias_tone
 
-_TONE = {"bull": "#00ff88", "bear": "#ff4444", "neutral": "#ffd000"}
 _STATE_COLOR = {
     "building": "#00ff88", "absorbing": "#a78bfa", "exhausted": "#ff9500",
     "weakening": "#ff4444", "neutral": "#cfd9e6", "rising": "#00ff88",
@@ -29,7 +29,7 @@ def ltp_panel_html(data: Optional[Dict[str, Any]]) -> str:
     if not d.get("ready"):
         return ""
     ov = d.get("overall") or {}
-    tone = _TONE.get(ov.get("tone"), "#ffd000")
+    tone = bias_tone(ov.get("tone"), "#ffd000")
     rows = [
         f"<div style='background:#0d1117;border:1px solid #1e2836;border-radius:10px;"
         f"padding:10px 12px;margin-bottom:8px'>",
@@ -64,5 +64,5 @@ def ltp_line(data: Optional[Dict[str, Any]]) -> str:
         return ""
     ov = d.get("overall") or {}
     return (f"<div style='text-align:center;font-size:14px;margin-top:4px;"
-            f"font-weight:700;color:{_TONE.get(ov.get('tone'), '#ffd000')}'>"
+            f"font-weight:700;color:{bias_tone(ov.get('tone'), '#ffd000')}'>"
             f"📖 {ov.get('text', '')}</div>")

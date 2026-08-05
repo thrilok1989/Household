@@ -9,11 +9,11 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+from .theme import bias_tone
 
 _STATE_COLOR = {"STABLE": "#cfd9e6", "STRENGTHENING": "#00ff88",
                 "WEAKENING": "#ff9500", "TRANSITION": "#ffcc33",
                 "REVERSING": "#ff4444"}
-_BIAS_COLOR = {"BULL": "#00ff88", "BEAR": "#ff4444", "NEUTRAL": "#ffd000"}
 _NICE = {"dealer": "Dealer", "orderflow": "Order Flow", "options": "Options",
          "institutions": "Institutions", "liquidity": "Liquidity",
          "structure": "Structure", "macro": "Macro"}
@@ -33,7 +33,7 @@ def transition_panel_html(data: Optional[Dict[str, Any]]) -> str:
     if not d.get("state"):
         return ""
     scol = _STATE_COLOR.get(d["state"], "#cfd9e6")
-    bcol = _BIAS_COLOR.get(d.get("bias"), "#ffffff")
+    bcol = bias_tone(d.get("bias"), "#ffffff")
     rows = [
         f"<div style='background:#0d1117;border:1px solid #1e2836;border-radius:10px;"
         f"padding:10px 12px;margin-bottom:8px'>",

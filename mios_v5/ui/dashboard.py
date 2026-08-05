@@ -29,8 +29,8 @@ from .ltp_panel import render_ltp_panel
 from .transition_panel import render_transition_panel
 from .validity_panel import render_validity_panel
 from .zone_card import render_reaction_block, render_zone_card
+from .theme import grade_tone
 
-_GRADE_COLOR = {"A+": "#00ff88", "A": "#17c98b", "B": "#f0b429", "C": "#f0455a"}
 _LEAN_COLOR = {"BULL": "#17c98b", "BEAR": "#f0455a",
                "NEUTRAL": "#ffffff", "N/A": "#555"}
 
@@ -175,7 +175,7 @@ def render_dashboard(state=None, db=None, run_backfill=None) -> None:
     # ── 🎯 7-Layer Scorecard + Trade-Quality grade (read-only synthesis) ─
     try:
         ls = build_layer_scores(state, health_score=fr.get("health_score"))
-        _gc = _GRADE_COLOR.get(ls["grade"], "#ffffff")
+        _gc = grade_tone(ls["grade"], "#ffffff")
         _dc = _LEAN_COLOR.get(ls["direction"], "#ffffff")
         st.markdown(
             f"<div style='background:#0d1117;border:2px solid {_gc};border-radius:10px;"
