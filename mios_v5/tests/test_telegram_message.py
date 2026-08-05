@@ -347,3 +347,96 @@ def test_the_spot_zone_and_the_premium_level_are_not_confused():
     out = M.market_block(m)
     call = out.split("🟢 <b>CALL</b>")[1].split("🔴")[0]
     assert "24,450" not in call and "24,580" not in call
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  two variants of one dispatch
+# ══════════════════════════════════════════════════════════════════════
+
+def test_terse_drops_the_reasons_and_full_keeps_them():
+    terse = M.entry_message(_entry(), _zones(), reasons=False)
+    full = M.entry_message(_entry(), _zones(), reasons=True)
+    assert "✓ Strike Validation VALID" in full
+    # Not a bare "✓" check — that character also marks bias agreement
+    # ("V5 BULLISH · V6 BULLISH ✓"), so the loose version failed on correct
+    # output. The reason LINES are what terse drops.
+    assert "✓ Strike Validation VALID" not in terse
+    assert "✓ Energy" not in terse
+    assert len(full) > len(terse)
+
+
+def test_warnings_survive_in_BOTH():
+    """The half that changes what a trader does. A terse message that dropped
+    a SHOCK would be shorter and more dangerous; only the explanation of a
+    GOOD read is optional."""
+    for reasons in (True, False):
+        out = M.entry_message(_entry(), _zones(), reasons=reasons)
+        assert "⚠ RBI event today" in out
+
+
+def test_everything_actionable_survives_in_terse():
+    """Levels, odds, bias and the decision itself are not 'reasons'."""
+    terse = M.entry_message(_entry(), _zones(), reasons=False)
+    for kept in ("Entry", "₹182.40", "Stop", "T1", "Support: <b>24,450</b>",
+                 "bounce 72%", "V5 BULLISH", "energy 78", "abcdef12"):
+        assert kept in terse, kept
+
+
+def test_the_exit_has_both_variants_too():
+    lc = dict(_lc(), reasons=None)
+    assert M.exit_message(lc, _entry(), _zones(), reasons=False)
+    assert M.exit_message(lc, _entry(), _zones(), reasons=True)
+
+
+def test_the_fan_out_is_one_dispatch_not_two():
+    """The registry claims on the decision hash alone, so a SECOND dispatch for
+    one decision is a duplicate by its own definition. Both variants must go
+    out inside a single transport call."""
+    import ast
+    src = (ROOT / "vob_minimal.py").read_text()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "mios_v6_transport")
+    sends = [c for c in ast.walk(fn) if isinstance(c, ast.Call)
+             and getattr(c.func, "id", "") in ("send_telegram_message_sync",
+                                               "send_telegram_alert_bot")]
+    assert len(sends) == 2, "both variants send from one transport call"
+
+
+def test_the_reasoned_copy_failing_does_not_fail_the_signal():
+    """If the second channel counted, the dispatcher would release the claim
+    and re-send a signal the trader already has."""
+    import ast
+    tree = ast.parse((ROOT / "vob_minimal.py").read_text())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "mios_v6_transport")
+    # The alert-bot call must sit in its OWN try whose handlers never return
+    # "failed". A text scan could not tell that from the outer handler, which
+    # legitimately does.
+    guarded = []
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Try):
+            continue
+        if any(getattr(c.func, "id", "") == "send_telegram_alert_bot"
+               for c in ast.walk(node) if isinstance(c, ast.Call)):
+            inner = [t for t in ast.walk(node)
+                     if isinstance(t, ast.Try) and t is not node]
+            if not inner:
+                guarded.append(node)
+    assert guarded, "the reasoned copy is not individually guarded"
+    for node in guarded:
+        for handler in node.handlers:
+            for r in ast.walk(handler):
+                if isinstance(r, ast.Return) and isinstance(r.value,
+                                                            ast.Constant):
+                    assert r.value.value != "failed", (
+                        "a failed reasoned copy must not mark the dispatch "
+                        "undelivered")
+
+
+def test_an_unconfigured_second_channel_is_visible():
+    """`send_telegram_alert_bot` is a silent no-op without credentials, and a
+    reasoning channel that never arrives looks like one with nothing to say."""
+    src = (ROOT / "vob_minimal.py").read_text()
+    assert "TELEGRAM_ALERT_BOT_TOKEN" in src.split("MIOS V6 signals")[-1]
+    assert "Terse only" in src
