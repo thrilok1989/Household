@@ -26,8 +26,8 @@ from ..premium_behaviour import (ACCELERATING, ACCEPTANCE, BUILDING, DOWN,
                                  EXHAUSTING, FADING, HOLDING, NEUTRAL,
                                  RESISTANCE_BUILDING, RESISTANCE_FADING,
                                  SUPPORT_BUILDING, SUPPORT_FADING, UNKNOWN, UP)
-from .theme import (ALERT, BEAR, BULL, BULL_SOFT, FAINT, INK, MICRO, MUTED,
-                    WARN)
+from .theme import (ALERT, BEAR, BULL, BULL_SOFT, FAINT, INK, MICRO,
+                    MUTED, WARN, grade_tone)
 
 _CALL_COL = BULL
 _PUT_COL = BEAR
@@ -46,7 +46,6 @@ _BEHAVIOUR_COL = {
 _MOMENTUM_COL = {ACCELERATING: BULL, BUILDING: BULL_SOFT, HOLDING: MUTED,
                  FADING: WARN, EXHAUSTING: ALERT}
 
-_GRADE_COL = {"A+": BULL, "A": BULL_SOFT, "B": WARN, "C": ALERT}
 
 _DIR_GLYPH = {UP: "▲", DOWN: "▼"}
 _DIR_COL = {UP: BULL, DOWN: ALERT}
@@ -116,7 +115,7 @@ def _side_html(read: Optional[Dict[str, Any]], name: str, col: str) -> str:
         f"font-size:12.5px'>{_txt(beh)}</span>"
         f"<span style='color:{BULL_SOFT};font-size:13px;letter-spacing:1px'>"
         f"{_txt(d.get('strength'))}</span>"
-        f"<span style='color:{_GRADE_COL.get(conf, FAINT)};font-weight:800'>"
+        f"<span style='color:{grade_tone(conf, FAINT)};font-weight:800'>"
         f"{_txt(conf)}</span>"
         f"<span style='color:{MICRO};font-size:9.5px'>"
         f"{ev.get('reporting', 0)} signals</span>"

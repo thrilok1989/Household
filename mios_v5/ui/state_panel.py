@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+from .theme import bias_tone
 
-_TONE = {"bull": "#00ff88", "bear": "#ff4444", "neutral": "#ffd000"}
 _URGENT = {"TRAP_ACTIVE": "#ff2d55", "WAR_ZONE": "#a78bfa",
            "REVERSAL_BUILDING": "#ff9500", "COMPRESSION": "#ffcc33",
            "WAIT": "#cfd9e6"}
 
 
 def _col(d: Dict[str, Any]) -> str:
-    return _URGENT.get(d.get("state"), _TONE.get(d.get("tone"), "#ffd000"))
+    return _URGENT.get(d.get("state"), bias_tone(d.get("tone"), "#ffd000"))
 
 
 def state_panel_html(data: Optional[Dict[str, Any]]) -> str:

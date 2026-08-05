@@ -15,10 +15,9 @@ immediately instead of having to be inferred.
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+from .theme import bias_emoji, bias_tone
 
 _TF_ORDER = ("1H", "4H", "Daily", "Weekly", "Monthly", "Yearly")
-_COL = {"BULL": "#00ff88", "BEAR": "#ff4444", "NEUTRAL": "#ffd000"}
-_EM = {"BULL": "🟢", "BEAR": "🔴", "NEUTRAL": "🟡"}
 
 
 def htf_panel_html(data: Optional[Dict[str, Any]]) -> str:
@@ -30,7 +29,7 @@ def htf_panel_html(data: Optional[Dict[str, Any]]) -> str:
         r = reads.get(tf)
         if not r or r.get("status") != "OK":
             continue
-        col = _COL.get(r["bias"], "#ffffff")
+        col = bias_tone(r["bias"], "#ffffff")
         prof = r.get("profile") or {}
         lv = ""
         if prof.get("vah") and prof.get("val"):
@@ -42,7 +41,7 @@ def htf_panel_html(data: Optional[Dict[str, Any]]) -> str:
             f"<div style='display:flex;align-items:center;gap:8px;margin-top:4px'>"
             f"<span style='width:56px;font-size:12.5px;font-weight:800;color:#ffffff'>"
             f"{tf}</span>"
-            f"<span style='font-size:13px'>{_EM.get(r['bias'], '⚪')}</span>"
+            f"<span style='font-size:13px'>{bias_emoji(r['bias'], '⚪')}</span>"
             f"<span style='width:62px;font-size:12.5px;font-weight:800;color:{col}'>"
             f"{r['bias']}</span>"
             f"<span style='width:88px;font-size:11.5px;color:#dfe7f0'>"
@@ -51,7 +50,7 @@ def htf_panel_html(data: Optional[Dict[str, Any]]) -> str:
 
     al = (data or {}).get("alignment") or {}
     mg = (data or {}).get("migration") or {}
-    acol = _COL.get(al.get("bias"), "#ffffff")
+    acol = bias_tone(al.get("bias"), "#ffffff")
     dis = (f" <span style='color:#ff9500;font-size:11px'>"
            f"({', '.join(al['disagree'][:3])} disagree)</span>"
            if al.get("disagree") else "")

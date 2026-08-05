@@ -9,11 +9,11 @@ the trader needs to know which engine to distrust without leaving the tab.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
+from .theme import bias_tone
 
 _CARD = ("background:#0d1117;border:1px solid #1e2836;border-radius:10px;"
          "padding:9px 11px;margin-bottom:8px")
 
-_TONE = {"bull": "#00ff88", "bear": "#ff4444", "neutral": "#cfd9e6"}
 
 
 def _f(v) -> Optional[float]:
@@ -63,8 +63,8 @@ def leg_card_html(leg: Optional[Dict[str, Any]], title: str) -> str:
     badges = "".join(
         f"<span style='display:inline-block;font-size:10.5px;font-weight:800;"
         f"padding:1px 6px;margin:1px 3px 1px 0;border-radius:4px;"
-        f"border:1px solid {_TONE.get(b['tone'], '#cfd9e6')};"
-        f"color:{_TONE.get(b['tone'], '#cfd9e6')}' title='{b['engine']}'>"
+        f"border:1px solid {bias_tone(b['tone'], '#cfd9e6')};"
+        f"color:{bias_tone(b['tone'], '#cfd9e6')}' title='{b['engine']}'>"
         f"{b['text']}</span>" for b in (d.get("badges") or []))
 
     strength = _f(d.get("strength"))
@@ -154,7 +154,7 @@ def intelligence_html(rows: Optional[Sequence[Dict[str, Any]]]) -> str:
                 f"font-size:12px;padding:1px 0'>"
                 f"<span style='width:96px;color:#cfd9e6'>{r['label']}</span>"
                 f"<span style='font-weight:700;color:"
-                f"{_TONE.get(r.get('tone'), '#edf3f9')}'>{r['value']}</span>"
+                f"{bias_tone(r.get('tone'), '#edf3f9')}'>{r['value']}</span>"
                 + (f"<span style='color:#ffd000;font-size:11px'>{r['stars']}"
                    f"</span>" if r.get("stars") else "")
                 + f"<span style='margin-left:auto;font-size:9.5px;"

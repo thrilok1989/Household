@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+from .theme import bias_tone
 
-_TONE = {"bull": "#00ff88", "bear": "#ff4444", "neutral": "#cfd9e6"}
 
 
 def absorption_panel_html(data: Optional[Dict[str, Any]]) -> str:
@@ -12,7 +12,7 @@ def absorption_panel_html(data: Optional[Dict[str, Any]]) -> str:
     b = d.get("behaviour")
     if not b or b == "NONE":
         return ""
-    col = _TONE.get(d.get("tone"), "#cfd9e6")
+    col = bias_tone(d.get("tone"), "#cfd9e6")
     dur = int(d.get("duration_cycles") or 0)
     return (
         f"<div style='background:#0b0f16;border:2px solid {col};border-radius:10px;"
@@ -48,7 +48,7 @@ def absorption_line(data: Optional[Dict[str, Any]]) -> str:
     d = data or {}
     if not d.get("behaviour") or d["behaviour"] == "NONE":
         return ""
-    col = _TONE.get(d.get("tone"), "#cfd9e6")
+    col = bias_tone(d.get("tone"), "#cfd9e6")
     return (f"<div style='text-align:center;font-size:14px;margin-top:4px;"
             f"font-weight:800;color:{col}'>🏛 {d.get('label', '')} "
             f"{d.get('confidence', 0)}%</div>")
