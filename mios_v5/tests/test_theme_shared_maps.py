@@ -57,7 +57,7 @@ def test_no_panel_redefines_the_bias_or_grade_map(path):
 
 def test_the_shared_maps_use_the_semantic_constants():
     """Not raw hexes. A literal here would drift from the palette silently."""
-    assert T.BIAS_TONE == {"BULL": T.BULL, "BEAR": T.BEAR, "NEUTRAL": T.WARN}
+    assert T.BIAS_TONE == {"BULL": T.BULL, "BEAR": T.BEAR, "NEUTRAL": T.MUTED}
     assert T.GRADE_TONE == {"A+": T.BULL, "A": T.BULL_SOFT,
                             "B": T.WARN, "C": T.ALERT}
 
@@ -66,7 +66,7 @@ def test_lookup_is_case_insensitive():
     """Half the panels wrote `BULL` and half wrote `bull`. That is how one map
     became seven, so the helper accepts both."""
     assert T.bias_tone("bull") == T.bias_tone("BULL") == T.BULL
-    assert T.bias_tone("Neutral") == T.WARN
+    assert T.bias_tone("Neutral") == T.MUTED
     assert T.grade_tone("a+") == T.grade_tone("A+") == T.BULL
 
 
@@ -75,6 +75,28 @@ def test_an_unknown_value_falls_back_rather_than_raising():
     assert T.bias_tone("SIDEWAYS", default=T.MUTED) == T.MUTED
     assert T.grade_tone("Z") == T.MUTED
     assert T.bias_emoji("") == "⚪"
+
+
+def test_neutral_does_not_wear_a_caution_colour():
+    """A neutral bias is an ABSENCE of direction, and this codebase is
+    consistent that an absence must not look like a verdict — Stage 71.85 maps
+    `Neutral` to `None` so it leaves Stage 72's denominator, and Stage 71.86
+    reports `UNKNOWN` confidence rather than a low number.
+
+    `WARN` is the colour of caution: it is what a B-grade and a TRAIL state
+    wear. Painting "we have no read" the same way tells a trader something is
+    wrong when nothing is.
+    """
+    assert T.bias_tone("NEUTRAL") != T.WARN
+    assert T.bias_tone("NEUTRAL") != T.ALERT
+    assert T.bias_tone("NEUTRAL") == T.MUTED
+    # …and it must stay distinguishable from an actual direction
+    assert T.bias_tone("NEUTRAL") not in (T.BULL, T.BEAR)
+
+
+def test_the_neutral_emoji_is_not_a_state_either():
+    """🟡 reads as a state; ⚪ reads as the absence of one."""
+    assert T.bias_emoji("NEUTRAL") == "⚪"
 
 
 def test_the_semantic_accents_are_unchanged():

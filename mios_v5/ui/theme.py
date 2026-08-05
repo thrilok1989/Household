@@ -70,19 +70,29 @@ RETIRED = ("#4d5b6d", "#5d6b7d", "#66788c", "#7f8ea3", "#8fa1b3", "#aeb9c7")
 # other five. Two panels called the same reading "nothing is happening" and
 # five called it "be careful", on the same screen.
 #
-# ⚠️ `NEUTRAL` is `WARN` here because that is what five of the seven maps
-#    already used, so unifying costs two panels a colour change rather than
-#    five. It is NOT an endorsement: on this repo's own reasoning an *absence*
-#    of direction should not wear a caution colour, and `Neutral` elsewhere
-#    (Stage 71.85, Stage 71.86) is deliberately treated as an absence. Changing
-#    it is one line here — a deliberate decision, not a silent drift.
+# `NEUTRAL` resolves to `MUTED`, not `WARN`. Five of the seven maps used amber
+# and only two used grey, so this is the minority reading — chosen deliberately
+# rather than by count.
+#
+# A neutral bias is an **absence of direction**, and this codebase is
+# consistent that an absence must not look like a verdict: Stage 71.85 maps
+# `Neutral` to `None` so it leaves Stage 72's denominator instead of scoring
+# 50, and Stage 71.86 reports `UNKNOWN` confidence rather than a low number
+# when no shape wins. `WARN` amber is the colour of *caution* — it is what
+# `B`-grade quality and a `TRAIL` state wear. Painting "we have no read" in the
+# same colour tells a trader something is wrong when nothing is.
+#
+# Cost: `family_panel`, `htf_panel`, `transition_panel`, `ltp_panel` and
+# `state_panel` show a grey neutral where they showed amber.
 
 #: bias → colour. Keys are matched case-insensitively by `bias_tone()`, because
 #: half the panels wrote `BULL` and half wrote `bull`, which is how one map
 #: became seven.
-BIAS_TONE = {"BULL": BULL, "BEAR": BEAR, "NEUTRAL": WARN}
+BIAS_TONE = {"BULL": BULL, "BEAR": BEAR, "NEUTRAL": MUTED}
 
-BIAS_EMOJI = {"BULL": "🟢", "BEAR": "🔴", "NEUTRAL": "🟡"}
+#: ⚪ rather than 🟡 for the same reason the colour changed — a yellow dot is a
+#: state, a white one is the absence of one.
+BIAS_EMOJI = {"BULL": "🟢", "BEAR": "🔴", "NEUTRAL": "⚪"}
 
 #: trade quality → colour. `dashboard.py` used `#f0b429`/`#f0455a` for B and C
 #: where the other two panels used `WARN`/`ALERT`; the semantic constants win,
