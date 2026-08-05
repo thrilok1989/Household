@@ -100,12 +100,20 @@ def _run_execution_chain(st, db=None) -> None:
       action — it never mints its own id, it carries 72's forward.
     * **72.9** takes both and prepares a dispatch.
 
-    ⚠️ **It prepares; it does not send.** No transport is passed, so the
-    dispatcher builds the payload, decides whether it *would* send, and reports
-    `NOT_SENT`. Stage 72.9 is `VALIDATED_SIMULATED` and its validation report
-    records `freeze_ready: False` — five hundred live dispatches have not
-    happened, and wiring a stage is not the same as trusting it to broadcast.
-    Passing a live transport is a separate decision a human makes.
+    ⚠️ **It sends only when a human has switched sending on.** The transport
+    is read from `session_state["_mios_transport"]`, which the app sets *only*
+    while the "MIOS V6 Telegram signals" toggle is on. With the toggle off the
+    key is absent, the dispatcher receives `None`, builds the payload, decides
+    whether it *would* send, and reports `NOT_SENT` — exactly as before.
+
+    Stage 72.9 is still `VALIDATED_SIMULATED` with `freeze_ready: False`: five
+    hundred live dispatches have not happened. The toggle is the human decision
+    that report asks for, not a replacement for it, and the panel says so.
+
+    The transport is a **callable taken from the app**. This module still
+    imports no network client — `import requests` inside `mios_v5` is a named
+    forbidden failure mode, and reading a function somebody else built is how
+    that rule and a live send coexist.
 
     A registry is still used, because the claim protocol is what makes the
     dispatch decision meaningful at all: without one, "would this be a
@@ -137,9 +145,11 @@ def _run_execution_chain(st, db=None) -> None:
             registry = MemoryRegistry()
             st.session_state["_dispatch_registry"] = registry
 
+        # Absent unless the human toggle is on → `None` → prepares only.
+        transport = st.session_state.get("_mios_transport")
         st.session_state["_dispatch_decision"] = _dispatch(
             decision, ctx, lifecycle=lifecycle, registry=registry,
-            transport=None)          # ⚠️ prepares only — see the docstring
+            transport=transport)
     except Exception as err:
         st.session_state["_entry_decision"] = None
         st.caption(f"Execution chain unavailable: {err}")
