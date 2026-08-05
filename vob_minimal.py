@@ -626,7 +626,7 @@ def _msg_allowed(message):
 # all context/muted alerts) is Discord-only + Supabase. (User paused the old
 # entry alerts on Telegram; they still fire on Discord.)
 _TELEGRAM_ENTRY_MARKERS = (
-    'MIOS ENTRY',           # Stage 72 — the V6 entry decision
+    'MIOS ENTRY',           # Stage 72 · and the simple entry system
     'MIOS ENTRY READY',     # Stage 72 — armed, waiting on the window
     'MIOS EXIT',            # Stage 73 — life after entry
     'MIOS PARTIAL EXIT', 'MIOS ADD', 'MIOS TRAIL', 'MIOS ABORT',
@@ -668,6 +668,10 @@ RETIRE_ENTRY_ALERTS = True
 #
 # Flip to False to go back to opt-in.
 MIOS_V6_TELEGRAM_DEFAULT = True
+
+# ── ⚡ the simple entry system's default. Five plain rules, ANDed, with its
+#    own dedup — see `run_simple_entry`. On by default at the owner's request.
+SIMPLE_ENTRY_DEFAULT = True
 _RETIRED_ALERT_CLASSES = frozenset({
     'leg_entry', 'confirmed_entry', 'entry_result', 'all_aligned_entry',
     'sr_confluence', 'fresh_entry', 'bias_enter',
@@ -995,6 +999,52 @@ def _mios_market_read():
         if leg:
             out[side.lower()] = leg
     return out
+
+
+def run_simple_entry():
+    """The simple entry system — five rules, evaluated every cycle, sent once.
+
+    Deliberately NOT routed through Stage 72.9. That dispatcher claims on an
+    `EntryDecision` hash, and this system produces no decision — feeding it one
+    would mean minting a fake decision to satisfy a claim protocol. Instead it
+    carries its own, narrower guard:
+
+      * one message per (side, level) — re-arms when the level or side changes
+      * a cooldown, so a level flickering in and out of range cannot spam
+      * market-hours delivery, from `send_telegram_message_sync`
+
+    Returns the signal so the UI can show it whether or not anything was sent.
+    """
+    from mios_v5.simple_entry import run as _simple
+    from mios_v5.ui.telegram_message import simple_signal_message
+
+    market = _mios_market_read()
+    signal = _simple(market)
+    st.session_state["_simple_entry"] = signal
+    if not getattr(signal, "fired", False):
+        return signal
+
+    # One per (side, level). A level is a zone, so the same signal re-firing
+    # 5 points later is the same signal.
+    key = f"{signal.side}@{signal.level:.0f}" if signal.level else signal.side
+    now = datetime.now(pytz.timezone('Asia/Kolkata'))
+    last_key = st.session_state.get("_simple_entry_key")
+    last_at = st.session_state.get("_simple_entry_at")
+    if last_key == key and last_at and (now - last_at).total_seconds() < 900:
+        return signal
+
+    text = simple_signal_message(signal, market)
+    if not text:
+        return signal
+    try:
+        send_telegram_message_sync(text, force=False)
+        st.session_state["_simple_entry_key"] = key
+        st.session_state["_simple_entry_at"] = now
+        st.session_state["_simple_entry_sent"] = st.session_state.get(
+            "_simple_entry_sent", 0) + 1
+    except Exception:
+        pass
+    return signal
 
 
 def mios_v6_transport(payload, edits=None):
@@ -13946,6 +13996,17 @@ def _render_main_analyzer():
         help="Stage 72 entries and Stage 73 exits, sent through Stage 72.9. "
              "Duplicate, supersession and staleness gates are the "
              "dispatcher's and always apply. OFF = prepare only.")
+    # ── ⚡ the simple entry system: five rules, its own switch ─────────
+    # Separate from the V6 toggle on purpose. They are two alert systems and
+    # the app already had two too many; keeping the switches apart at least
+    # makes it obvious which one produced a message.
+    _simple_on = st.sidebar.checkbox(
+        "⚡ Simple entry (5 rules) → Telegram", value=SIMPLE_ENTRY_DEFAULT,
+        help="Spot at a level · bounce beats break · V5 or V6 agrees · "
+             "that side has the energy · the premium is building. "
+             "All five, or nothing is sent.")
+    st.session_state["_simple_entry_on"] = _simple_on
+
     if _mios_tg:
         st.session_state["_mios_transport"] = mios_v6_transport
         st.sidebar.caption("🔴 Live — Stage 72.9 will send entry and exit "
@@ -14458,6 +14519,15 @@ def _render_main_analyzer():
             try:
                 from mios_v5.ui.dashboard_v6 import render_dashboard_v6
                 render_dashboard_v6(state=st.session_state.get('_mios_state'), db=db)
+                # ⚡ The simple entry system runs AFTER the dashboard, because
+                # it reads `_sr_levels`, `_premium_structures` and the trading
+                # context — all of which that render publishes. Running it
+                # first would evaluate five rules against last cycle's data.
+                if st.session_state.get("_simple_entry_on"):
+                    try:
+                        run_simple_entry()
+                    except Exception:
+                        pass
             except Exception as err:
                 st.caption(f"Dashboard V6 unavailable: {err}")
     with _v5_container:

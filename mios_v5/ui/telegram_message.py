@@ -312,3 +312,41 @@ def exit_message(lifecycle: Optional[Mapping[str, Any]] = None,
     tail = f"<code>entry {ref[:8]}</code>" if ref else ""
     return (f"{head}\n{'─' * 22}\n{body}"
             + (f"{'─' * 22}\n{tail}" if tail else "")).strip()
+
+
+def simple_signal_message(signal: Any = None,
+                          market: Optional[Mapping[str, Any]] = None) -> str:
+    """The simple entry system's alert — the verdict, the five rules, the read.
+
+    `""` when the gate did not fire. A rule engine that messages on every cycle
+    to say "not yet" is a rule engine nobody reads.
+
+    The rules are listed **with their measurements**, not just ticked. "bounce
+    beats break" is a claim; "bounce 72% vs break 28%" is the evidence for it,
+    and the evidence is what lets a trader disagree.
+    """
+    side = getattr(signal, "side", None) or (signal or {}).get("side")
+    fired = getattr(signal, "fired", None)
+    if fired is None:
+        fired = (signal or {}).get("fired")
+    if not fired or side not in ("CALL", "PUT"):
+        return ""
+
+    emoji = "🟢" if side == "CALL" else "🔴"
+    kind = (getattr(signal, "level_kind", "") or "").title()
+    level = _num(getattr(signal, "level", None), "{:,.0f}")
+
+    head = f"{emoji} <b>MIOS ENTRY — BUY {side}</b>"
+    if kind and level:
+        head += f"\nat {kind} <b>{level}</b>"
+
+    rules = getattr(signal, "rules", ()) or ()
+    ticks = "".join(f"  ✓ {name} — {detail}\n" for name, ok, detail in rules
+                    if ok)
+
+    warn = "".join(f"  ⚠ {w}\n"
+                   for w in (getattr(signal, "warnings", ()) or ()))
+
+    return (f"{head}\n"
+            + market_block(market)
+            + f"{'─' * 22}\n{ticks}{warn}").strip()
