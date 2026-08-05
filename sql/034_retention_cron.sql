@@ -70,6 +70,7 @@ VALUES
     ('dispatch_history', 365, 'created_at', 'this module', 'the duplicate-suppression index only looks at recent hashes'),
     ('entry_gate_signals', 365, 'trading_day', 'sql/012_entry_gate_signals.sql', ''),
     ('event_impact_log', 365, 'trading_day', 'this module', ''),
+    ('futures_oi_baseline', 365, 'trading_day', 'this module', 'the day''s futures OI anchor — one row per day'),
     ('market_events', 365, 'created_at', 'this module', ''),
     ('market_stories', 365, 'created_at', 'this module', ''),
     ('mios_decisions', 365, 'trading_day', 'this module', ''),

@@ -13930,6 +13930,34 @@ def _render_main_analyzer():
             _fut = get_nifty_futures_data(api, spot)
             if _fut:
                 st.session_state['_nifty_futures_data'] = _fut
+                # ── the day's OI anchor ─────────────────────────────
+                # `_fut['chg_oi']` is the delta since the previous ~20s
+                # refresh, held in session_state — so it resets to 0.0 on a
+                # restart, which is indistinguishable from "OI was flat".
+                # Short Covering and Long Unwinding are claims about the DAY,
+                # so they need an anchor that outlives the session.
+                #
+                # One read and one write per day: the anchor is cached here
+                # for the rest of the session, and is never rewritten once
+                # set. A per-cycle write would add ~1,100 rows/day for a value
+                # that changes once.
+                try:
+                    from db.futures_oi_store import ensure as _oi_ensure
+                    from mios_v5.clock import trading_day as _tday
+                    from mios_v5.futures_oi import read as _oi_read
+                    _day = _tday()
+                    _anchor = _oi_ensure(
+                        db, _fut, _day,
+                        cached=st.session_state.get('_futures_oi_baseline'))
+                    if _anchor.get('baseline'):
+                        st.session_state['_futures_oi_baseline'] = dict(
+                            _anchor['baseline'], trading_day=_day)
+                    st.session_state['_futures_oi_status'] = _anchor.get(
+                        'status')
+                    st.session_state['_futures_oi'] = _oi_read(
+                        _fut, _anchor.get('baseline'))
+                except Exception:
+                    pass
     except Exception:
         pass
     try:
