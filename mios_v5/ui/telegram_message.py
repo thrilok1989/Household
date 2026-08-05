@@ -112,7 +112,76 @@ def _identity(payload: Mapping[str, Any]) -> str:
     return ("<code>" + " · ".join(bits) + "</code>") if bits else ""
 
 
-def entry_message(payload: Optional[Mapping[str, Any]] = None) -> str:
+def market_block(market: Optional[Mapping[str, Any]] = None) -> str:
+    """The market read that goes out WITH the signal.
+
+    Six things, all of which already have an owner elsewhere in MIOS and none
+    of which is computed here:
+
+    * **spot** — the price everything below is relative to
+    * **V5 vs V6 bias** — Stage 27's arbitrated read against Stage 71's, because
+      the interesting moment is when they disagree
+    * **CALL / PUT energy** — Stage 71.7, scored independently and never by
+      subtraction, so both are printed rather than a difference
+    * **CALL / PUT LTP with its own support and resistance** — Stage 71.8's
+      premium structure. These are PREMIUM levels, not spot levels converted:
+      there is no delta-based conversion anywhere in MIOS, and printing a spot
+      level against an option's LTP would mark a price that series never trades
+    * **S/R behaviour per side** — Stage 71.85, what the premium is doing at
+      its own level
+
+    Every one is dropped when its owner did not report, by the same rule as
+    everything else here: absent is a missing row, never a zero.
+    """
+    m = dict(market or {})
+    spot = _num(m.get("spot"), "{:,.1f}")
+    v5, v6 = _v(m.get("v5")), _v(m.get("v6"))
+
+    head = ""
+    if spot:
+        head += f"📍 Spot: <b>{spot}</b>\n"
+    if v5 or v6:
+        # Printed side by side on purpose — one line that agrees is reassuring,
+        # one that disagrees is the reason to look at the chart.
+        both = " · ".join(x for x in (f"V5 {v5}" if v5 else "",
+                                      f"V6 {v6}" if v6 else "") if x)
+        head += f"🧭 Bias: <b>{both}</b>"
+        head += (" ✓\n" if v5 and v6 and v5 == v6 else
+                 " ⚠ diverging\n" if v5 and v6 else "\n")
+
+    legs = ""
+    for side in ("CALL", "PUT"):
+        leg = m.get(side.lower()) or {}
+        if not isinstance(leg, Mapping):
+            continue
+        ltp = _num(leg.get("ltp"))
+        energy = _v(leg.get("energy"))
+        sup = _num(leg.get("support"))
+        res = _num(leg.get("resistance"))
+        beh = _v(leg.get("behaviour"))
+        if not any((ltp, energy, sup, res, beh)):
+            continue
+        emoji = "🟢" if side == "CALL" else "🔴"
+        line = f"{emoji} <b>{side}</b>"
+        if ltp:
+            line += f" ₹{ltp}"
+        if energy:
+            line += f" · energy {energy}"
+        line += "\n"
+        if sup or res:
+            band = " / ".join(x for x in (f"S ₹{sup}" if sup else "",
+                                          f"R ₹{res}" if res else "") if x)
+            line += f"    {band}\n"
+        if beh:
+            line += f"    {beh}\n"
+        legs += line
+
+    block = head + legs
+    return (f"{'─' * 22}\n{block}" if block else "")
+
+
+def entry_message(payload: Optional[Mapping[str, Any]] = None,
+                  market: Optional[Mapping[str, Any]] = None) -> str:
     """The entry signal. `""` when the state is not one worth sending."""
     p = dict(payload or {})
     state = str(p.get("state") or UNKNOWN)
@@ -148,6 +217,7 @@ def entry_message(payload: Optional[Mapping[str, Any]] = None) -> str:
         f"{head}\n"
         f"{'─' * 22}\n"
         f"{body}"
+        + market_block(market)
         + (f"{'─' * 22}\n{why}" if why else "")
         + (warn if warn else "")
         + f"{'─' * 22}\n{_identity(p)}"
@@ -155,7 +225,8 @@ def entry_message(payload: Optional[Mapping[str, Any]] = None) -> str:
 
 
 def exit_message(lifecycle: Optional[Mapping[str, Any]] = None,
-                 entry: Optional[Mapping[str, Any]] = None) -> str:
+                 entry: Optional[Mapping[str, Any]] = None,
+                 market: Optional[Mapping[str, Any]] = None) -> str:
     """The exit / management update, carrying the entry's id so a reader can
     join it to the signal they were sent earlier."""
     lc = dict(lifecycle or {})
@@ -184,6 +255,8 @@ def exit_message(lifecycle: Optional[Mapping[str, Any]] = None,
         # only if that ever changes — it must never be implied.
         + _row("Position", _v(lc.get("position_known")))
     )
+
+    body += market_block(market)
 
     ref = _v((entry or {}).get("id")) or _v(lc.get("decision_id"))
     tail = f"<code>entry {ref[:8]}</code>" if ref else ""

@@ -922,6 +922,55 @@ def send_telegram_alert_bot(message):
     return None
 
 
+def _mios_market_read():
+    """Spot, V5/V6 bias, per-side energy, premium LTP + its own S/R, and the
+    Stage 71.85 behaviour — assembled from what the cycle already published.
+
+    Reads only; computes nothing. Every value has an owner elsewhere, and a
+    key that is missing simply does not reach the message.
+    """
+    out = {}
+    try:
+        out["spot"] = (st.session_state.get("_cached_option_data") or {}).get(
+            "underlying")
+    except Exception:
+        pass
+    # Stage 27's arbitrated read vs Stage 71's — the disagreement is the point.
+    try:
+        from mios_v5.final_read import build_final_read
+        from mios_v5.v6_bias import compare as _cmp
+        _fr = build_final_read(st.session_state.get("_mios_state")) or {}
+        _b = _cmp(_fr) or {}
+        out["v5"] = (_b.get("v5") or {}).get("label")
+        out["v6"] = (_b.get("v6") or {}).get("label")
+    except Exception:
+        pass
+    _energy = (st.session_state.get("_premium_energy") or {}).get(
+        "energy_score") or {}
+    _struct = st.session_state.get("_premium_structures") or {}
+    _ctx = st.session_state.get("_trading_context")
+    for side in ("CALL", "PUT"):
+        leg, sdata = {}, (_struct.get(side) or {})
+        if _energy.get(side) is not None:
+            leg["energy"] = _energy.get(side)
+        for key in ("ltp", "support", "resistance"):
+            if sdata.get(key) is not None:
+                leg[key] = sdata.get(key)
+        # Stage 71.85, through the bridge that already carries it per side.
+        try:
+            if _ctx is not None:
+                _beh = _ctx.value("premium.behaviour")
+                if isinstance(_beh, dict):
+                    _beh = _beh.get(side)
+                if _beh and _beh != "UNKNOWN":
+                    leg["behaviour"] = _beh
+        except Exception:
+            pass
+        if leg:
+            out[side.lower()] = leg
+    return out
+
+
 def mios_v6_transport(payload, edits=None):
     """The injected transport for Stage 72.9 — entry and exit signals.
 
@@ -944,12 +993,13 @@ def mios_v6_transport(payload, edits=None):
         lc = st.session_state.get("_lifecycle_decision")
         lc_d = lc.to_dict() if hasattr(lc, "to_dict") else (lc or {})
 
-        text = entry_message(body)
+        market = _mios_market_read()
+        text = entry_message(body, market)
         # An exit is only a message when Stage 73 asked for one; the dispatcher
         # gates on SENDABLE_ACTIONS, so reaching here with an action means it
         # already agreed.
         if not text:
-            text = exit_message(lc_d, body)
+            text = exit_message(lc_d, body, market)
         if not text:
             return "failed"
         if edits:

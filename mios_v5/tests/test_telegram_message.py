@@ -176,3 +176,92 @@ def test_the_transport_reports_failure_rather_than_assuming_success():
         "def send_telegram_message_sync")]
     assert 'return "failed"' in fn and 'return "ok"' in fn
     assert "except Exception" in fn
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  the market read that travels with the signal
+# ══════════════════════════════════════════════════════════════════════
+
+def _market(**over):
+    m = {"spot": 24512.3, "v5": "BULLISH", "v6": "BULLISH",
+         "call": {"ltp": 182.4, "energy": 78, "support": 175.0,
+                  "resistance": 191.0, "behaviour": "Support Building"},
+         "put": {"ltp": 96.2, "energy": 31, "support": 92.0,
+                 "resistance": 104.0, "behaviour": "Resistance Building"}}
+    m.update(over)
+    return m
+
+
+def test_the_signal_carries_spot_bias_energy_levels_and_behaviour():
+    out = M.entry_message(_entry(), _market())
+    for expected in ("24,512.3", "V5 BULLISH", "V6 BULLISH",
+                     "energy 78", "energy 31",
+                     "₹182.40", "₹96.20",
+                     "S ₹175.00", "R ₹191.00",
+                     "Support Building", "Resistance Building"):
+        assert expected in out, expected
+
+
+def test_both_energies_are_printed_never_a_difference():
+    """Stage 71.7 scores CALL and PUT independently and never by subtraction.
+    A single net number would throw away which side has none."""
+    out = M.entry_message(_entry(), _market())
+    assert "energy 78" in out and "energy 31" in out
+    assert "47" not in out
+
+
+def test_a_bias_disagreement_is_flagged():
+    """Two engines agreeing is reassuring; disagreeing is the reason to look."""
+    assert "diverging" in M.entry_message(_entry(), _market(v6="BEARISH"))
+    assert "diverging" not in M.entry_message(_entry(), _market())
+
+
+def test_the_levels_are_premium_not_spot():
+    """There is no delta-based spot→premium conversion in MIOS. A spot level
+    printed against an option's LTP marks a price that series never trades."""
+    out = M.entry_message(_entry(), _market())
+    # Anchor on the LEG marker: "CALL" also appears in the header
+    # ("MIOS ENTRY — CALL 24,500"), and splitting on the bare word landed in
+    # the strike rather than the leg block.
+    call = out.split("🟢 <b>CALL</b>")[1].split("🔴")[0]
+    assert "175.00" in call and "191.00" in call     # the LEG's own band
+    assert "24,512" not in call                       # not spot
+
+
+def test_a_side_that_reported_nothing_is_omitted():
+    out = M.entry_message(_entry(), _market(put={}))
+    assert "CALL" in out
+    assert "🔴 <b>PUT</b>" not in out
+
+
+def test_the_market_block_is_optional():
+    """The signal must still render when the cycle published nothing."""
+    assert M.entry_message(_entry()) 
+    assert M.market_block(None) == ""
+    assert M.market_block({}) == ""
+
+
+def test_the_exit_carries_the_same_read():
+    out = M.exit_message(_lc(), _entry(), _market())
+    assert "Spot" in out and "energy 78" in out
+
+
+def test_the_market_block_drops_absent_values_rather_than_zeroing():
+    out = M.market_block(_market(spot=None,
+                                 call={"ltp": 182.4, "energy": "UNKNOWN"}))
+    assert "Spot" not in out
+    assert "energy" not in out.split("PUT")[0]
+    assert "₹0" not in out
+
+
+def test_the_transport_assembles_the_read_from_published_state_only():
+    """It reads what the cycle published; it must not compute a level."""
+    import ast
+    src = (ROOT / "vob_minimal.py").read_text()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_mios_market_read")
+    called = {getattr(c.func, "id", "") or getattr(c.func, "attr", "")
+              for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    assert not (called & {"compute_vpfr", "calculate_money_flow_profile",
+                          "analyse", "classify_sr_behavior"})
