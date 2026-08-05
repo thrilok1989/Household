@@ -1020,17 +1020,37 @@ def mios_v6_transport(payload, edits=None):
         lc_d = lc.to_dict() if hasattr(lc, "to_dict") else (lc or {})
 
         market = _mios_market_read()
-        text = entry_message(body, market)
-        # An exit is only a message when Stage 73 asked for one; the dispatcher
-        # gates on SENDABLE_ACTIONS, so reaching here with an action means it
-        # already agreed.
-        if not text:
-            text = exit_message(lc_d, body, market)
-        if not text:
+
+        # Two variants of ONE dispatch. The registry claims on the decision
+        # hash alone, so a second dispatch for the same decision would be a
+        # duplicate by its own definition — the fan-out belongs here, at the
+        # transport, where `send_telegram_message_sync` already mirrors to
+        # Discord. The dispatcher still sees exactly one send.
+        terse = (entry_message(body, market, reasons=False)
+                 or exit_message(lc_d, body, market, reasons=False))
+        full = (entry_message(body, market, reasons=True)
+                or exit_message(lc_d, body, market, reasons=True))
+        if not terse:
             return "failed"
         if edits:
-            text = "🔄 <b>UPDATE</b>\n" + text
-        send_telegram_message_sync(text, force=False)
+            terse = "🔄 <b>UPDATE</b>\n" + terse
+            full = "🔄 <b>UPDATE</b>\n" + full
+
+        # Terse → the main bot. This is the one that must land, so its result
+        # is the transport's result.
+        send_telegram_message_sync(terse, force=False)
+
+        # Reasoned → the second bot. Best-effort and deliberately NOT part of
+        # the return value: the reasoning failing to arrive must never mark the
+        # signal itself as undelivered, or the dispatcher would release the
+        # claim and re-send a signal the trader already has.
+        try:
+            if full and full != terse:
+                send_telegram_alert_bot(full)
+                st.session_state["_mios_full_channel"] = (
+                    "ok" if TELEGRAM_ALERT_CHAT_ID else "unconfigured")
+        except Exception:
+            st.session_state["_mios_full_channel"] = "failed"
         return "ok"
     except Exception:
         return "failed"
@@ -13930,6 +13950,16 @@ def _render_main_analyzer():
         st.session_state["_mios_transport"] = mios_v6_transport
         st.sidebar.caption("🔴 Live — Stage 72.9 will send entry and exit "
                            "signals it judges sendable.")
+        # Two channels: terse on the main bot, the reasoned one on the alert
+        # bot. Say when the second is unconfigured — `send_telegram_alert_bot`
+        # is a silent no-op without it, and a reasoning channel that quietly
+        # never arrives looks exactly like one with nothing to say.
+        if TELEGRAM_ALERT_BOT_TOKEN and TELEGRAM_ALERT_CHAT_ID:
+            st.sidebar.caption("📄 Reasoned copy → alert bot.")
+        else:
+            st.sidebar.caption(
+                "⚠️ Terse only — set TELEGRAM_ALERT_BOT_TOKEN and "
+                "TELEGRAM_ALERT_CHAT_ID for the reasoned copy.")
     else:
         st.session_state.pop("_mios_transport", None)
 

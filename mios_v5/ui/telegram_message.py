@@ -216,8 +216,19 @@ def market_block(market: Optional[Mapping[str, Any]] = None) -> str:
 
 
 def entry_message(payload: Optional[Mapping[str, Any]] = None,
-                  market: Optional[Mapping[str, Any]] = None) -> str:
-    """The entry signal. `""` when the state is not one worth sending."""
+                  market: Optional[Mapping[str, Any]] = None,
+                  reasons: bool = True) -> str:
+    """The entry signal. `""` when the state is not one worth sending.
+
+    `reasons=False` is the **terse** variant: the same decision, the same
+    levels, the same odds — without the ✓ block that explains which components
+    scored. Two channels carry the two variants.
+
+    ⚠️ **Warnings are in BOTH.** They are the half that changes what a trader
+    does: a `SHOCK` or a frozen tape is not detail, and a "terse" message that
+    dropped it would be shorter and more dangerous. Only the explanation of a
+    *good* read is optional.
+    """
     p = dict(payload or {})
     state = str(p.get("state") or UNKNOWN)
     if state not in ENTRY_HEAD:
@@ -246,7 +257,7 @@ def entry_message(payload: Optional[Mapping[str, Any]] = None,
         + _row("Horizon", _v(p.get("horizon")))
     )
 
-    why = _reasons(p)
+    why = _reasons(p) if reasons else ""
     warn = _warnings(p)
     return (
         f"{head}\n"
@@ -261,7 +272,8 @@ def entry_message(payload: Optional[Mapping[str, Any]] = None,
 
 def exit_message(lifecycle: Optional[Mapping[str, Any]] = None,
                  entry: Optional[Mapping[str, Any]] = None,
-                 market: Optional[Mapping[str, Any]] = None) -> str:
+                 market: Optional[Mapping[str, Any]] = None,
+                 reasons: bool = True) -> str:
     """The exit / management update, carrying the entry's id so a reader can
     join it to the signal they were sent earlier."""
     lc = dict(lifecycle or {})
@@ -292,6 +304,9 @@ def exit_message(lifecycle: Optional[Mapping[str, Any]] = None,
     )
 
     body += market_block(market)
+
+    if reasons:
+        body += _reasons(lc)
 
     ref = _v((entry or {}).get("id")) or _v(lc.get("decision_id"))
     tail = f"<code>entry {ref[:8]}</code>" if ref else ""
