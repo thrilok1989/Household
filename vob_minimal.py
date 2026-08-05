@@ -650,6 +650,24 @@ def _msg_entry_tier(message):
 # alert message is withheld — so Stage 40 (bias/outcome validation) keeps its
 # data. Flip to False to restore the legacy entry alerts.
 RETIRE_ENTRY_ALERTS = True
+
+# ── 📨 MIOS V6 signals → Telegram: the DEFAULT for the sidebar toggle ──
+# ⚠️ True means entry and exit signals are LIVE from the moment the app loads,
+#    on every fresh session, without anyone opting in. Set by the owner
+#    deliberately; the sidebar toggle still turns it off for the session.
+#
+# What still protects you with this on, and what does not:
+#   ✅ Stage 72.9's gates all apply — a decision must verify, must not be a
+#      duplicate, must not be superseded, must be under MAX_AGE_SECONDS, and
+#      must be in a sendable state. WAIT is never sent.
+#   ✅ Delivery is market-hours only (08:30-15:45 IST, weekdays).
+#   ✅ Nothing places an order. This is a message, not execution.
+#   ❌ Stage 72.9 is still VALIDATED_SIMULATED — freeze_ready is False in
+#      STAGE72_9_VALIDATION_REPORT.md. Its gates are proven in simulation, not
+#      against five hundred live dispatches.
+#
+# Flip to False to go back to opt-in.
+MIOS_V6_TELEGRAM_DEFAULT = True
 _RETIRED_ALERT_CLASSES = frozenset({
     'leg_entry', 'confirmed_entry', 'entry_result', 'all_aligned_entry',
     'sr_confluence', 'fresh_entry', 'bias_enter',
@@ -13820,16 +13838,15 @@ def _render_main_analyzer():
     st.sidebar.header("Configuration")
 
     # ── 📨 MIOS V6 entry / exit signals to Telegram ────────────────────
-    # OFF by default, and the switch is a human's — the same promotion gate
-    # `db/retention.py` uses for deleting and `auto_option_trader` uses for
-    # placing orders. Stage 72.9's validation report records
-    # `freeze_ready: False`, so this toggle IS the human decision that report
-    # asks for; it does not replace it.
+    # The default lives in `MIOS_V6_TELEGRAM_DEFAULT` (top of file) so it is
+    # one findable line rather than a literal buried in the sidebar. The owner
+    # set it ON: signals are live from load, and this toggle turns them off for
+    # the session rather than on.
     #
-    # While it is off, `_mios_transport` is absent, the dispatcher receives
-    # `None`, and the chain prepares without sending exactly as before.
+    # Whichever way it sits: off → `_mios_transport` is absent, the dispatcher
+    # receives `None`, and the chain prepares without sending.
     _mios_tg = st.sidebar.checkbox(
-        "📨 MIOS V6 signals → Telegram", value=False,
+        "📨 MIOS V6 signals → Telegram", value=MIOS_V6_TELEGRAM_DEFAULT,
         help="Stage 72 entries and Stage 73 exits, sent through Stage 72.9. "
              "Duplicate, supersession and staleness gates are the "
              "dispatcher's and always apply. OFF = prepare only.")
