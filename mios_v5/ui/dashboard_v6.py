@@ -280,6 +280,13 @@ def _trading_screen(st, fr: Dict[str, Any], state) -> None:
     # option.
     _strike_validation(st, fr)
 
+    # ⚙️ Stage 71.90 — futures, above the chart because the roadmap weights
+    # futures above spot and this is the execution screen. Advisory: nothing
+    # scores it yet, but it now crosses the bridge, and Principle 12 says the
+    # trader must be able to see a value before anything weighs it.
+    from .futures_panel import render_futures
+    render_futures(st, st.session_state.get("_futures_oi"))
+
     _terminal_chart(st, fr, call_tag, put_tag, dom)
 
     # ── market facts + the V5 ‖ V6 divergence ──
@@ -652,6 +659,11 @@ def _strike_validation(st, fr: Dict[str, Any]) -> None:
                 validation=data,
                 structure=_structures,
                 behaviour=_behaviour,
+                # Stage 71.90. The roadmap says weight futures above spot;
+                # until this root existed no stage could see them at all —
+                # `get_nifty_futures_data()` published every cycle and its
+                # only reader was a display panel.
+                futures=_futures_reading(st),
                 cycle=st.session_state.get("_render_seq"))
         except Exception as _ctx_err:
             st.session_state["_trading_context"] = None
@@ -1017,6 +1029,25 @@ def _zoom_controls(st) -> Optional[int]:
         f"zooming in keeps live price on screen.</div>",
         unsafe_allow_html=True)
     return cur
+
+
+def _futures_reading(st) -> Optional[Dict[str, Any]]:
+    """Stage 71.90's reading as a plain mapping, for the context's futures root.
+
+    The app publishes the `FuturesOI` object at `_futures_oi`; the bridge wants
+    a mapping, and `to_dict()` is the one already used for storage and replay —
+    so a replayed context reads identically to a live one.
+
+    Returns `None` when nothing has been published, which yields `UNKNOWN`
+    fields rather than a context claiming futures were flat.
+    """
+    reading = st.session_state.get("_futures_oi")
+    if reading is None:
+        return None
+    try:
+        return reading.to_dict() if hasattr(reading, "to_dict") else dict(reading)
+    except Exception:
+        return None
 
 
 def _panel_profile(st, tag, df=None, ready: Optional[Dict[str, Any]] = None):
