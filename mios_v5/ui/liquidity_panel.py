@@ -146,15 +146,31 @@ def _mix(a: str, b: str, t: float) -> str:
 #  the heatmaps
 # ══════════════════════════════════════════════════════════════════════
 
+def _premium_px(v) -> str:
+    """A premium, in rupees and paise.
+
+    Separate from `_px` on purpose. An index bin is `24,650.0` and a premium
+    bin is `₹96.20` — printing a premium with the index's one decimal rounds
+    away the tick a leg actually moves in, and dropping the ₹ invites reading
+    a premium level as a NIFTY level.
+    """
+    n = _num(v)
+    return "—" if n is None else f"₹{n:,.2f}"
+
+
 def heatmap_html(rows: Optional[Sequence[Any]], mode: str = "liquidity",
-                 poc: Any = None) -> str:
+                 poc: Any = None, fmt=None) -> str:
     """One bar per profile bin, highest price at the top — the way a profile is
     read on a chart, not the way the list happens to be ordered.
 
     `mode='liquidity'` colours by `ratio`, `mode='sentiment'` by side and
     conviction. The point of control is marked, because a heatmap without it is
     a gradient nobody can locate.
+
+    `fmt` formats the price label; it defaults to the index style. A premium
+    panel passes `_premium_px` — the bins are rupees, not index points.
     """
+    px = fmt or _px
     bins = [_d(r) for r in _seq(rows)]
     bins = [b for b in bins if b]
     if not bins:
@@ -182,8 +198,8 @@ def heatmap_html(rows: Optional[Sequence[Any]], mode: str = "liquidity",
         out.append(
             f"<div style='display:flex;align-items:center;gap:5px;"
             f"font-size:9px;padding:0.5px 0'>"
-            f"<span style='width:52px;color:{MICRO};text-align:right'>"
-            f"{_px(hi)}</span>"
+            f"<span style='width:62px;color:{MICRO};text-align:right'>"
+            f"{px(hi)}</span>"
             f"<span style='flex:0 0 {width:.0f}%;height:8px;background:{colour};"
             f"border-radius:2px'></span>"
             f"{mark}</div>")
@@ -491,3 +507,111 @@ def render_liquidity(st, ctx: Any = None, profile: Any = None) -> None:
             st.markdown(html, unsafe_allow_html=True)
     except Exception as err:
         st.caption(f"Liquidity Intelligence unavailable: {err}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  the same bars, per option leg
+# ══════════════════════════════════════════════════════════════════════
+#
+# A CALL premium and a PUT premium each trade their own book. Where volume
+# piled up on the CALL is not derivable from where it piled up on NIFTY, and
+# projecting the index profile onto a premium panel would mark a price that
+# series can never trade — audit 71.8 settled that, and `_panel_profile`
+# already builds a native profile per leg for the chart's band overlay. These
+# are the same bins, read as bars instead of bands, so a level can be *read
+# off* rather than eyeballed through a candle.
+#
+# ⚠️ Bars only — NOT a per-leg Liquidity Intelligence context.
+#
+# The full Stage 74 context carries clustered levels, dealer levels (gamma
+# flip, max pain) and liquidity pools. Every one of those is an INDEX fact
+# with no per-leg equivalent: there is no gamma flip for a single option's
+# premium. Rendering a leg panel that looked like the index one would imply
+# six reads where only one exists, so this draws the one thing a leg genuinely
+# owns — its own volume-and-sentiment distribution — and says so in the
+# header.
+
+def leg_heatmap_html(side: str, profile: Any = None, label: str = "",
+                     mode: str = "liquidity") -> str:
+    """One leg's profile as bars. `""` when that leg published nothing."""
+    prof = _d(profile)
+    rows = _seq(prof.get("rows"))
+    if not rows:
+        return ""
+
+    tone = BULL if str(side).upper() == "CALL" else BEAR
+    emoji = "🟢" if str(side).upper() == "CALL" else "🔴"
+    shape = _d(prof.get("shape"))
+    # Stage 71.86's read, when it ran. Absent is absent — no placeholder.
+    shape_bits = []
+    if shape.get("shape") and shape.get("shape") != UNKNOWN:
+        shape_bits.append(str(shape["shape"]))
+    conf = _num(shape.get("confidence"))
+    if conf is not None:
+        shape_bits.append(f"{conf:.0f}%")
+    shape_txt = " · ".join(shape_bits)
+
+    poc = prof.get("poc_price")
+    bars = heatmap_html(rows, mode=mode, poc=poc, fmt=_premium_px)
+    if not bars:
+        return ""
+
+    head = (f"<div style='display:flex;gap:6px;align-items:baseline;"
+            f"flex-wrap:wrap;margin-bottom:3px'>"
+            f"<span style='color:{tone};font-weight:800;font-size:11px'>"
+            f"{emoji} {str(side).upper()}</span>"
+            + (f"<span style='color:{MICRO};font-size:9.5px'>{label}</span>"
+               if label else "")
+            + (f"<span style='color:{MICRO};font-size:9px;margin-left:auto'>"
+               f"{shape_txt}</span>" if shape_txt else "")
+            + "</div>")
+    foot = ""
+    if _num(poc) is not None:
+        foot = (f"<div style='color:{MICRO};font-size:9px;margin-top:3px'>"
+                f"POC {_premium_px(poc)}</div>")
+    return (f"<div style='flex:1 1 220px;min-width:0;background:#0b0f16;"
+            f"border:1px solid #1e2836;border-radius:8px;padding:8px 9px'>"
+            f"{head}{bars}{foot}</div>")
+
+
+def leg_heatmaps_html(call_profile: Any = None, put_profile: Any = None,
+                      call_label: str = "", put_label: str = "",
+                      mode: str = "liquidity") -> str:
+    """Both legs side by side, or `""` when neither reported."""
+    cards = "".join(x for x in (
+        leg_heatmap_html("CALL", call_profile, call_label, mode),
+        leg_heatmap_html("PUT", put_profile, put_label, mode)) if x)
+    if not cards:
+        return ""
+    return (
+        f"<div style='background:#0d1117;border:1px solid #1e2836;"
+        f"border-radius:10px;padding:10px 12px;margin-bottom:8px'>"
+        f"<div style='font-size:11px;letter-spacing:.10em;color:{INK};"
+        f"text-transform:uppercase'>🪣 Premium liquidity "
+        f"<span style='color:{MICRO};letter-spacing:0'>· each leg's own "
+        f"volume &amp; sentiment profile</span></div>"
+        f"<div style='font-size:9.5px;color:{MICRO};margin-top:2px'>"
+        f"Bars only. Clustered levels, dealer levels and liquidity pools are "
+        f"index facts with no per-leg equivalent — there is no gamma flip for "
+        f"one option's premium.</div>"
+        f"<div style='display:flex;gap:8px;flex-wrap:wrap;margin-top:7px'>"
+        f"{cards}</div></div>")
+
+
+def render_leg_heatmaps(st, profiles: Any = None,
+                        mode: str = "liquidity") -> None:
+    """Draw the two leg profiles. Advisory — it may never take the tab down.
+
+    `profiles` is what `_terminal_chart` published: the same objects it just
+    drew as bands, so the bars and the chart cannot disagree.
+    """
+    try:
+        p = _d(profiles)
+        html = leg_heatmaps_html(p.get("CALL"), p.get("PUT"),
+                                 call_label=str(p.get("call_label") or ""),
+                                 put_label=str(p.get("put_label") or ""),
+                                 mode=mode)
+        if html:
+            st.markdown(html, unsafe_allow_html=True)
+    except Exception as err:
+        st.caption(f"Premium liquidity unavailable: {err}")
