@@ -59,7 +59,7 @@ Seven owners. Between them: **48 state names** for what the brief describes as t
 | `0.12%` | % | **29** | `acceptance.py:36` `_AT_PCT` | Stage 42 says TOUCH |
 | `0.12%` | % | **29** | `zone_intel.py:234` `tol_pct` | Zone Intel says beyond |
 | `0.35%` | % | **86** | `zone_intel.py:385`, `vob_minimal.py:6389` | Zone Intel says at_zone |
-| `0.35%` | % | **86** | `vob_minimal.py:10612`, `backfill.py:105` | `near_support` / `near_resistance` |
+| `0.35%` | % | **86** | `vob_minimal.py:10612` (also `backfill.py:105`, since archived) | `near_support` / `near_resistance` |
 
 **Three of these disagree by 3×.** A NIFTY spot 40 points below resistance is
 simultaneously *at* the level (Zone Intel, 86-pt band), *not at* the level (Stage 42,
