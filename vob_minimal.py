@@ -16,6 +16,9 @@ from scipy.stats import norm
 from pytz import timezone
 import io
 import os
+# `Mapping`, not `dict` — every frozen MIOS value is a `MappingProxyType`, and
+# `isinstance(x, dict)` is False for one. See `_mios_market_read`.
+from collections.abc import Mapping
 from db.supabase_client import SupabaseDB
 from db.read_cache import wrap as _cache_reads
 from indicators.money_flow_profile import calculate_money_flow_profile
@@ -990,7 +993,17 @@ def _mios_market_read():
                 if _ctx is None:
                     break
                 _val = _ctx.value(_field)
-                if isinstance(_val, dict):
+                # ⚠️ `Mapping`, not `dict`. TradingContext freezes every
+                # per-side value as a `MappingProxyType`, which is NOT a dict
+                # subclass — so this test never matched and the whole
+                # {'CALL': …, 'PUT': …} dict passed through unresolved. Both
+                # legs then rendered the SAME raw dict into the Telegram
+                # message instead of that leg's own behaviour:
+                #     🟢 CALL
+                #         {'CALL': 'Neutral', 'PUT': 'Neutral'}
+                # Third instance of this exact confusion in the codebase, after
+                # `execution_panel._get` and the panel's metadata block.
+                if isinstance(_val, Mapping):
                     _val = _val.get(side)
                 if _val is not None and _val != "UNKNOWN":
                     leg[_target] = _val

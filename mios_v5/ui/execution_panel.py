@@ -83,6 +83,9 @@ _DISPATCH_COL = {
     "NOT_SENT": MICRO, "BLOCKED": ALERT, "DUPLICATE": MICRO,
     "RATE_LIMIT": WARN, "RETRY": WARN, "DELIVERY_FAILED": ALERT,
     "SUPERSEDED": MICRO, "EXPIRED": MICRO, "WAIT": MUTED, "FAILED": ALERT,
+    # Not an error — the signal was real and was held back because the same one
+    # went out recently. Muted, so it does not read as a fault.
+    "COOLDOWN": MICRO,
 }
 
 #: The eleven weighted inputs, in the trader's words rather than the context's

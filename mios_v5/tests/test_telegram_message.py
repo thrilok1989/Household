@@ -440,3 +440,49 @@ def test_an_unconfigured_second_channel_is_visible():
     src = (ROOT / "vob_minimal.py").read_text()
     assert "TELEGRAM_ALERT_BOT_TOKEN" in src.split("MIOS V6 signals")[-1]
     assert "Terse only" in src
+
+
+def test_a_per_side_context_value_is_resolved_to_that_side():
+    """The bug in the reported message:
+
+        🟢 CALL
+            {'CALL': 'Neutral', 'PUT': 'Neutral'}
+        🔴 PUT
+            {'CALL': 'Neutral', 'PUT': 'Neutral'}
+
+    `_mios_market_read` tested `isinstance(value, dict)` before picking the
+    side out. TradingContext freezes per-side values as `MappingProxyType`,
+    which is NOT a dict subclass, so the test never matched and both legs
+    printed the same raw mapping instead of their own behaviour.
+
+    Asserted on the real frozen type, because a plain dict is exactly what let
+    this pass while the phone showed a Python repr.
+    """
+    from types import MappingProxyType
+    frozen = MappingProxyType({"CALL": "Support Building", "PUT": "Neutral"})
+    assert not isinstance(frozen, dict), "the premise of the bug"
+    from collections.abc import Mapping as _Mapping
+    assert isinstance(frozen, _Mapping)
+    resolved = frozen.get("CALL") if isinstance(frozen, _Mapping) else frozen
+    assert resolved == "Support Building"
+
+    # and the source performs the same widening
+    src = (ROOT / "vob_minimal.py").read_text()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_mios_market_read")
+    checks = {getattr(c.args[1], "id", "") for c in ast.walk(fn)
+              if isinstance(c, ast.Call)
+              and getattr(c.func, "id", "") == "isinstance" and len(c.args) == 2}
+    assert "Mapping" in checks, "the side-resolution still tests for `dict`"
+    assert "dict" not in checks
+
+
+def test_no_message_ever_renders_a_python_repr():
+    """A brace in a signal means a container leaked into the text."""
+    market = {"spot": 24630.3, "v5": "NEUTRAL", "v6": "NEUTRAL",
+              "call": {"ltp": 182.4, "energy": 78, "behaviour": "Neutral"},
+              "put": {"ltp": 96.2, "energy": 31, "behaviour": "Neutral"}}
+    out = M.market_block(market)
+    assert "{" not in out and "}" not in out, out
+    assert "'CALL'" not in out and "'PUT'" not in out
