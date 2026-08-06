@@ -857,6 +857,18 @@ class EntryEngine:
         meta = MappingProxyType({
             "version": VERSION,          # same value as `decision.version`
             "state_reason": why,
+            # ── every hard gate that blocked, not just the first ──────
+            # `state()` puts `blocks[0]` into `state_reason`, so when three
+            # gates fail a trader is told about one and fixes the wrong thing.
+            # Carried here in full.
+            #
+            # This is not a change to the frozen contract: `STAGE72_FROZEN.md`
+            # forbids editing scoring, weights, gates or recommendation logic,
+            # and this touches none of them — the same gates run and reach the
+            # same verdict. `metadata` is also outside `HASH_FIELDS`, so a
+            # stored 72.1 decision hashes identically with or without it.
+            "readiness_blocks": tuple(ready.get("blocks") or ()),
+            "readiness_unknowns": tuple(ready.get("unknowns") or ()),
             "score_reason": scored.get("reason"),
             "zone_reason": zone_read.get("why"),
             "risk_reason": risk.get("why"), "reward_reason": reward.get("why"),
