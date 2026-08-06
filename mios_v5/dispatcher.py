@@ -102,13 +102,50 @@ SUPPORTED_DECISION_VERSIONS: Tuple[str, ...] = ("72.0", "72.1")
 #: A decision older than this describes a market that has moved on.
 MAX_AGE_SECONDS = 300
 
+# ── the signal's identity, which is NOT the decision's identity ───────
+#: `decision.hash` covers `id` and `created_at`, both minted fresh every cycle.
+#: That is correct for what it is — a tamper check identifying *this decision
+#: instance* — but it means two consecutive cycles describing the identical
+#: setup hash differently, so a duplicate check comparing it **can never fire**.
+#: That is exactly what happened: the same signal went out on every refresh.
+#:
+#: These are the fields that make two messages the SAME SIGNAL to a reader. No
+#: id, no timestamp, and deliberately no score or confidence — a setup whose
+#: score ticks 80 → 81 is not news, and including them would restore the bug in
+#: a slower form.
+SIGNATURE_FIELDS: Tuple[str, ...] = ("state", "side", "strike", "entry",
+                                     "stop", "entry_zone")
+
+#: Even a genuinely different signature is not worth repeating immediately.
+#: A level re-tested three minutes later is the same idea arriving twice; this
+#: is the floor between two messages about the same side and strike.
+COOLDOWN_SECONDS = 900
+
 # ── Phase 4 · the states ──────────────────────────────────────────────
 READY, WAIT, BLOCKED = "READY", "WAIT", "BLOCKED"
 SUPERSEDED, DUPLICATE, EXPIRED = "SUPERSEDED", "DUPLICATE", "EXPIRED"
 SENT, FAILED = "SENT", "FAILED"
+COOLDOWN = "COOLDOWN"
 
 DISPATCH_STATES: Tuple[str, ...] = (READY, WAIT, BLOCKED, SUPERSEDED,
-                                    DUPLICATE, EXPIRED, SENT, FAILED, UNKNOWN)
+                                    DUPLICATE, EXPIRED, SENT, FAILED,
+                                    COOLDOWN, UNKNOWN)
+
+
+def decision_signature(decision: Any) -> str:
+    """A stable SHA-256 over what makes a decision the same *signal*.
+
+    Two cycles describing one setup produce one signature, which is the whole
+    point: `decision.hash` cannot do this job because it is unique by design.
+    Rendered through `str` per field so `24650` and `"24650"` cannot diverge.
+    """
+    parts = []
+    for name in SIGNATURE_FIELDS:
+        val = getattr(decision, name, None)
+        if val is None and isinstance(decision, Mapping):
+            val = decision.get(name)
+        parts.append(str(val))
+    return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
 
 # ── Phase 7 · delivery ────────────────────────────────────────────────
 NOT_SENT, DELIVERED = "NOT_SENT", "SENT"
@@ -163,6 +200,9 @@ class DispatchRecord:
     telegram_message_id: Optional[str] = None
     chat_id: Optional[str] = None
     status: str = NOT_SENT
+    #: The SIGNAL's identity — see `decision_signature`. Defaulted so a stored
+    #: row written before this field existed still loads.
+    signature: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {"decision_id": self.decision_id,
@@ -170,7 +210,8 @@ class DispatchRecord:
                 "dispatch_state": self.dispatch_state,
                 "created_at": self.created_at,
                 "telegram_message_id": self.telegram_message_id,
-                "chat_id": self.chat_id, "status": self.status}
+                "chat_id": self.chat_id, "status": self.status,
+                "signature": self.signature}
 
 
 class MemoryRegistry:
@@ -225,6 +266,19 @@ class MemoryRegistry:
     def sent_hashes(self) -> Tuple[str, ...]:
         return tuple(r.decision_hash for r in self._rows
                      if r.status == DELIVERED)
+
+    def sent_signatures(self) -> Tuple[str, ...]:
+        """The SIGNALS already delivered — the check `sent_hashes` cannot do,
+        because a decision hash is unique per cycle by construction."""
+        return tuple(r.signature for r in self._rows
+                     if r.status == DELIVERED and r.signature)
+
+    def last_sent_at(self, signature: str) -> Optional[str]:
+        """When this signal last went out, for the cooldown."""
+        for row in reversed(self._rows):
+            if row.signature == signature and row.status == DELIVERED:
+                return row.created_at
+        return None
 
     # ── Phase 10 · the cache, derived rather than stored twice ────────
     @property
@@ -494,14 +548,68 @@ class Dispatcher:
                 "age": age}
 
     # ── Phase 2 · duplicates ──────────────────────────────────────────
+    @property
+    def signature(self) -> str:
+        """This decision's SIGNAL identity — stable across cycles."""
+        return decision_signature(self.decision) if self.decision else ""
+
+    # ── reading signatures from ANY registry ──────────────────────────
+    # The registry protocol is three methods — `record`, `rows`, `sent_hashes`
+    # — and a Supabase-backed implementation the app injects satisfies exactly
+    # those. `sent_signatures()` is a convenience on `MemoryRegistry`, so it
+    # must never be *required*: deriving from `rows()` keeps every existing
+    # registry working, including one written before signatures existed.
+    def _sent_signatures(self) -> Tuple[str, ...]:
+        got = getattr(self.registry, "sent_signatures", None)
+        if callable(got):
+            try:
+                return tuple(got())
+            except Exception:
+                pass
+        try:
+            return tuple(getattr(r, "signature", "") for r in self.registry.rows()
+                         if getattr(r, "status", None) == DELIVERED
+                         and getattr(r, "signature", ""))
+        except Exception:
+            return ()
+
+    def _last_sent_at(self, signature: str) -> Optional[str]:
+        got = getattr(self.registry, "last_sent_at", None)
+        if callable(got):
+            try:
+                return got(signature)
+            except Exception:
+                pass
+        try:
+            for row in reversed(list(self.registry.rows())):
+                if (getattr(row, "signature", "") == signature
+                        and getattr(row, "status", None) == DELIVERED):
+                    return getattr(row, "created_at", None)
+        except Exception:
+            pass
+        return None
+
     def duplicate(self) -> Dict[str, Any]:
-        """The same hash never goes out twice. `SENT` is terminal."""
+        """The same SIGNAL never goes out twice.
+
+        ⚠️ This used to compare `decision.hash` only, and that check could never
+        fire: the hash covers `id` (a fresh uuid4) and `created_at` (a fresh
+        timestamp), so every cycle produced a brand-new hash for an identical
+        setup. The signature comparison is the one that actually works; the
+        hash checks are kept because they are still correct, just insufficient.
+        """
         d = self.decision
         # `getattr` rather than an isinstance check: a caller handing junk gets
         # BLOCKED from `validate()`, and this must still answer rather than
         # raising out of the metadata block three phases later.
         if getattr(d, "hash", None) is None:
             return {"duplicate": False, "why": "nothing to compare"}
+
+        sig = self.signature
+        if sig and sig in self._sent_signatures():
+            return {"duplicate": True,
+                    "why": "this signal has already been sent — same state, "
+                           "side, strike, entry, stop and zone"}
         if d.hash in self.registry.sent_hashes():
             return {"duplicate": True,
                     "why": "this exact decision has already been dispatched"}
@@ -509,6 +617,31 @@ class Dispatcher:
             return {"duplicate": True,
                     "why": "this decision is the last one dispatched"}
         return {"duplicate": False, "why": "not seen before"}
+
+    # ── Phase 2b · the cooldown ───────────────────────────────────────
+    def cooldown(self) -> Dict[str, Any]:
+        """Not too soon after the last message about this same signal.
+
+        The duplicate gate catches an identical signature. This catches the
+        near-identical one — the same side and strike re-arming a few points
+        away, which reads as the same idea arriving twice.
+        """
+        sig = self.signature
+        if not sig:
+            return {"blocked": False, "why": "no signature to compare"}
+        last = self._last_sent_at(sig)
+        if not last:
+            return {"blocked": False, "why": "this signal has not been sent"}
+        then, mine = _parse_iso(last), _parse_iso(self.now)
+        if then is None or mine is None:
+            return {"blocked": False, "why": "no timestamp to compare"}
+        age = (mine - then).total_seconds()
+        if age < COOLDOWN_SECONDS:
+            return {"blocked": True,
+                    "why": f"the same signal went out {age:.0f}s ago — "
+                           f"cooling down for {COOLDOWN_SECONDS}s"}
+        return {"blocked": False,
+                "why": f"last sent {age:.0f}s ago, past the cooldown"}
 
     # ── Phase 3 · supersession ────────────────────────────────────────
     def superseded(self) -> Dict[str, Any]:
@@ -543,13 +676,24 @@ class Dispatcher:
             return {"state": valid["state"], "why": valid["why"],
                     "duplicate": False}
 
+        # Supersession is checked BEFORE the duplicate gate. Both block, so the
+        # only thing at stake is the reason a reader is given — and "a newer
+        # decision already went out" is strictly more informative than "we have
+        # seen this before". It also matters more often now: an older decision
+        # arriving late usually carries the SAME signature as the newer one that
+        # beat it, so a signature-first order would report every one of them as
+        # a duplicate and hide the fact that the tape had moved.
+        sup = self.superseded()
+        if sup["superseded"]:
+            return {"state": SUPERSEDED, "why": sup["why"], "duplicate": False}
+
         dup = self.duplicate()
         if dup["duplicate"]:
             return {"state": DUPLICATE, "why": dup["why"], "duplicate": True}
 
-        sup = self.superseded()
-        if sup["superseded"]:
-            return {"state": SUPERSEDED, "why": sup["why"], "duplicate": False}
+        cool = self.cooldown()
+        if cool["blocked"]:
+            return {"state": COOLDOWN, "why": cool["why"], "duplicate": False}
 
         d = self.decision
         if d.confidence is UNKNOWN or d.confidence == UNKNOWN:
@@ -654,6 +798,12 @@ class Dispatcher:
 
         decision_id = str(getattr(self.decision, "id", "") or "")
         decision_hash_ = str(getattr(self.decision, "hash", "") or "")
+        # ⚠️ The claim is keyed on the SIGNATURE, not the decision hash.
+        # Keyed on the hash it was decoration: a per-cycle-unique key means
+        # every caller wins its own claim and no two callers ever contend, so
+        # the protocol that exists to stop two instances sending the same
+        # message could not stop anything.
+        claim_key = self.signature or decision_hash_
 
         # An update to a trade already announced EDITS the live message rather
         # than posting a second one that reads like a new signal.
@@ -672,7 +822,7 @@ class Dispatcher:
             # with a gap between them, and two instances starting together both
             # pass the check before either sends. `reserve()` closes the gap;
             # in Supabase it is a unique index doing the work.
-            claimed = self._reserve(decision_hash_)
+            claimed = self._reserve(claim_key)
             if not claimed:
                 state, should_send = DUPLICATE, False
                 gate = {**gate, "duplicate": True,
@@ -684,11 +834,11 @@ class Dispatcher:
                 latency_ms = round((_perf() - started) * 1000.0, 2)
                 if delivery["telegram_state"] == DELIVERED:
                     state = SENT
-                    self._confirm(decision_hash_)
+                    self._confirm(claim_key)
                 else:
                     # A failure must not poison the hash — the message never
                     # went out, so a retry has to remain possible.
-                    self._release(decision_hash_)
+                    self._release(claim_key)
                     if delivery["telegram_state"] in (DELIVERY_FAILED, UNKNOWN):
                         state = FAILED
 
@@ -704,7 +854,8 @@ class Dispatcher:
             dispatch_state=state, created_at=self.now,
             telegram_message_id=delivery["message_id"],
             chat_id=delivery["chat_id"],
-            status=delivery["telegram_state"])
+            status=delivery["telegram_state"],
+            signature=self.signature)
         self.registry.record(record)
 
         meta = MappingProxyType({

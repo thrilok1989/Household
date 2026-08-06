@@ -130,11 +130,45 @@ def test_the_same_decision_twice_sends_once():
     assert len(tx.calls) == 1
 
 
-def test_a_new_decision_sends_once():
+def test_a_genuinely_different_signal_sends():
+    """"Different" now means a different SIGNAL, not a different object.
+
+    This used to vary `stability` only, and passed — because the gate compared
+    `decision.hash`, which is unique every cycle by construction, so *anything*
+    counted as new. That is the bug that put the same message on the phone on
+    every refresh. Changing the side is what a reader would call a new signal;
+    a stability field moving underneath an identical ticket is not.
+    """
     reg, tx = DP.MemoryRegistry(), _Transport()
+    other = _validation()
+    other["selected"] = {"CALL": 24300.0, "PUT": 24300.0}
+    other["bridge"]["selected_strike"] = {"CALL": 24300.0, "PUT": 24300.0}
     _dispatch(_entry(), tx, reg)
-    _dispatch(_entry(fr=_fr(stability="RECOVERY")), tx, reg)
+    _dispatch(_entry(validation=other), tx, reg)
     assert len(tx.calls) == 2
+
+
+def test_the_same_setup_does_not_resend_every_cycle():
+    """⭐ The reported bug, as a test.
+
+    Stage 72 re-runs each cycle and mints a fresh `id` and `created_at` every
+    time, so `decision.hash` differs even when nothing about the trade does.
+    Ten cycles over one unchanged setup must produce exactly one message."""
+    reg, tx = DP.MemoryRegistry(), _Transport()
+    states = [_dispatch(_entry(), tx, reg).dispatch_state for _ in range(10)]
+    assert len(tx.calls) == 1, f"sent {len(tx.calls)} times: {states}"
+    assert states[0] == DP.SENT
+    assert set(states[1:]) <= {DP.DUPLICATE, DP.COOLDOWN, DP.SUPERSEDED}
+
+
+def test_the_signature_ignores_the_fields_that_change_every_cycle():
+    """It must not cover `id`, `created_at`, or a score that ticks 80 → 81 —
+    each of those would restore the bug, the last one just more slowly."""
+    a, b = _entry(), _entry()
+    assert a.hash != b.hash, "the premise: the decision hash is per-cycle"
+    assert DP.decision_signature(a) == DP.decision_signature(b)
+    for field in ("id", "created_at", "score", "confidence"):
+        assert field not in DP.SIGNATURE_FIELDS
 
 
 def test_sent_is_terminal_for_a_hash():

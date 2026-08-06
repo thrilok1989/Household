@@ -75,9 +75,18 @@ def _decision(idx: int, when: datetime, state: str = "ENTER"):
     from .entry_engine import EntryDecision, decision_hash
     created = when.replace(microsecond=0).isoformat()
     did = f"decision-{idx:06d}"
+    # ⚠️ `idx` must vary a field the SIGNATURE covers, not just the id.
+    #
+    # This used to differ by `id` alone, and the volume scenario passed —
+    # because the duplicate gate compared `decision.hash`, which covers the id,
+    # so 600 identical tickets counted as 600 distinct signals. That is the
+    # production bug in miniature: the harness modelled "distinct" as "a new
+    # object" rather than "a different trade", and therefore could never have
+    # caught it. A distinct signal means a distinct strike.
+    strike = 24250.0 + idx * 50.0
     base = EntryDecision(
         state=state, confidence=70, quality="A", entry_type="Breakout",
-        side="CALL", strike=24250.0, horizon="intraday", timing="NOW",
+        side="CALL", strike=strike, horizon="intraday", timing="NOW",
         risk="Medium", reward="Good", entry_zone="Optimal", stop=112.0,
         targets={"target1": 138.0}, lifetime="today", readiness="READY",
         score=83, entry=118.0, risk_reward=3.3, reason_codes=(),
