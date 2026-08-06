@@ -532,8 +532,22 @@ def render_liquidity(st, ctx: Any = None, profile: Any = None) -> None:
 # header.
 
 def leg_heatmap_html(side: str, profile: Any = None, label: str = "",
-                     mode: str = "liquidity") -> str:
-    """One leg's profile as bars. `""` when that leg published nothing."""
+                     mode: str = "both") -> str:
+    """One leg's profile as bars. `""` when that leg published nothing.
+
+    ⚠️ `mode` defaults to **both**, and it has to.
+
+    The first cut rendered `liquidity` only while the header said "volume &
+    sentiment profile" — the panel promised a read it did not draw, which is
+    the same defect class as a delivery banner that reports a send that never
+    happened. The index panel has always drawn both, for the reason its own
+    docstring gives: rendering one forces a trader to choose between "where is
+    the volume" and "who owns it", and the interesting bins are exactly the
+    ones where those two disagree.
+
+    `'liquidity'` or `'sentiment'` still render a single column, so a caller
+    that wants one can ask; nothing defaults to a partial view.
+    """
     prof = _d(profile)
     rows = _seq(prof.get("rows"))
     if not rows:
@@ -552,9 +566,24 @@ def leg_heatmap_html(side: str, profile: Any = None, label: str = "",
     shape_txt = " · ".join(shape_bits)
 
     poc = prof.get("poc_price")
-    bars = heatmap_html(rows, mode=mode, poc=poc, fmt=_premium_px)
-    if not bars:
+    wanted = (("liquidity", "sentiment") if str(mode) == "both"
+              else (str(mode),))
+    cols = []
+    for m in wanted:
+        bars = heatmap_html(rows, mode=m, poc=poc, fmt=_premium_px)
+        if not bars:
+            continue
+        cols.append(
+            f"<div style='flex:1;min-width:0'>"
+            f"<div style='font-size:8px;letter-spacing:.08em;color:{MICRO};"
+            f"text-transform:uppercase;margin-bottom:2px'>"
+            + ("Liquidity — how much" if m == "liquidity"
+               else "Sentiment — who") +
+            f"</div>{bars}</div>")
+    if not cols:
         return ""
+    bars = (f"<div style='display:flex;gap:8px;flex-wrap:wrap'>"
+            f"{''.join(cols)}</div>")
 
     head = (f"<div style='display:flex;gap:6px;align-items:baseline;"
             f"flex-wrap:wrap;margin-bottom:3px'>"
@@ -569,14 +598,14 @@ def leg_heatmap_html(side: str, profile: Any = None, label: str = "",
     if _num(poc) is not None:
         foot = (f"<div style='color:{MICRO};font-size:9px;margin-top:3px'>"
                 f"POC {_premium_px(poc)}</div>")
-    return (f"<div style='flex:1 1 220px;min-width:0;background:#0b0f16;"
+    return (f"<div style='flex:1 1 340px;min-width:0;background:#0b0f16;"
             f"border:1px solid #1e2836;border-radius:8px;padding:8px 9px'>"
             f"{head}{bars}{foot}</div>")
 
 
 def leg_heatmaps_html(call_profile: Any = None, put_profile: Any = None,
                       call_label: str = "", put_label: str = "",
-                      mode: str = "liquidity") -> str:
+                      mode: str = "both") -> str:
     """Both legs side by side, or `""` when neither reported."""
     cards = "".join(x for x in (
         leg_heatmap_html("CALL", call_profile, call_label, mode),
@@ -599,7 +628,7 @@ def leg_heatmaps_html(call_profile: Any = None, put_profile: Any = None,
 
 
 def render_leg_heatmaps(st, profiles: Any = None,
-                        mode: str = "liquidity") -> None:
+                        mode: str = "both") -> None:
     """Draw the two leg profiles. Advisory — it may never take the tab down.
 
     `profiles` is what `_terminal_chart` published: the same objects it just

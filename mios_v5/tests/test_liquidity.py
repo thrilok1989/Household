@@ -1050,6 +1050,42 @@ def _put_prof():
     return {"rows": _leg_rows(6, 170.0), "poc_price": 182.45}
 
 
+def test_each_leg_draws_BOTH_reads_because_the_header_promises_both():
+    """⭐ The header says "volume & sentiment profile". The first cut drew the
+    volume bars only, so the panel promised a read it did not render — the same
+    defect class as a delivery banner reporting a send that never happened.
+
+    The index panel has always drawn both, for the reason its own docstring
+    gives: showing one forces a trader to choose between "where is the volume"
+    and "who owns it", and the interesting bins are exactly the ones where the
+    two disagree.
+    """
+    from mios_v5.ui import liquidity_panel as P
+    html = P.leg_heatmaps_html(_call_prof(), _put_prof())
+    assert "Liquidity — how much" in html
+    assert "Sentiment — who" in html
+    # one of each PER LEG, not one shared pair
+    assert html.count("Liquidity — how much") == 2
+    assert html.count("Sentiment — who") == 2
+    # whatever the header claims must actually be drawn
+    assert "sentiment" in html.lower()
+
+
+def test_a_caller_can_still_ask_for_one_read():
+    from mios_v5.ui import liquidity_panel as P
+    only = P.leg_heatmap_html("CALL", _call_prof(), mode="liquidity")
+    assert "Liquidity — how much" in only and "Sentiment — who" not in only
+
+
+def test_nothing_defaults_to_a_partial_view():
+    """Every entry point defaults to both. A default of `liquidity` is what
+    produced a panel whose header over-promised."""
+    import inspect
+    from mios_v5.ui import liquidity_panel as P
+    for fn in (P.leg_heatmap_html, P.leg_heatmaps_html, P.render_leg_heatmaps):
+        assert inspect.signature(fn).parameters["mode"].default == "both", fn
+
+
 def test_each_leg_draws_its_own_bars():
     from mios_v5.ui import liquidity_panel as P
     html = P.leg_heatmaps_html(_call_prof(), _put_prof(),
