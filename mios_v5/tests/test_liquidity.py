@@ -1020,3 +1020,138 @@ def test_the_frozen_contract_is_written_down():
     # the calibration must be recorded where a future reader will find it
     for anchor in ("45", "82", "97"):
         assert anchor in doc
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  the same bars, per option leg
+# ══════════════════════════════════════════════════════════════════════
+
+def _leg_rows(n=6, base=90.0):
+    """A PREMIUM profile — rupees, not index points."""
+    out = []
+    for i in range(n):
+        bull, bear = (900 - i * 120), (200 + i * 120)
+        out.append({"bin_low": base + i * 2, "bin_high": base + 2 + i * 2,
+                    "total_volume": bull + bear, "bull_volume": bull,
+                    "bear_volume": bear, "delta": bull - bear,
+                    "ratio": max(0.08, 1.0 - abs(i - 3) * 0.22),
+                    "node_type": "High" if i == 3 else "Average",
+                    "sentiment": "Bullish" if bull > bear else "Bearish",
+                    "sentiment_strength": abs(bull - bear) / (bull + bear) * 100})
+    return out
+
+
+def _call_prof():
+    return {"rows": _leg_rows(6, 90.0), "poc_price": 96.2,
+            "shape": {"shape": "P Shape", "confidence": 71}}
+
+
+def _put_prof():
+    return {"rows": _leg_rows(6, 170.0), "poc_price": 182.45}
+
+
+def test_each_leg_draws_its_own_bars():
+    from mios_v5.ui import liquidity_panel as P
+    html = P.leg_heatmaps_html(_call_prof(), _put_prof(),
+                               call_label="NIFTY24650CE",
+                               put_label="NIFTY24650PE")
+    assert "🟢 CALL" in html and "🔴 PUT" in html
+    assert "NIFTY24650CE" in html and "NIFTY24650PE" in html
+
+
+def test_a_premium_bin_renders_in_rupees_not_index_points():
+    """`_px` prints 24,650.0. A premium printed that way rounds away the tick a
+    leg actually moves in, and without the ₹ a premium level reads as a NIFTY
+    level."""
+    from mios_v5.ui import liquidity_panel as P
+    html = P.leg_heatmap_html("CALL", _call_prof())
+    assert "₹" in html
+    assert "₹96.20" in html, "the POC must carry paise"
+    # the index heatmap is untouched by the new formatter
+    assert "₹" not in P.heatmap_html(_heat_rows(), "liquidity")
+
+
+def test_a_leg_that_reported_nothing_draws_nothing():
+    """No placeholder bars. An empty profile is not a flat one."""
+    from mios_v5.ui import liquidity_panel as P
+    assert P.leg_heatmap_html("CALL", {"rows": []}) == ""
+    assert P.leg_heatmap_html("CALL", None) == ""
+    assert P.leg_heatmaps_html(None, None) == ""
+    # …and one leg reporting does not suppress the other
+    only_call = P.leg_heatmaps_html(_call_prof(), None)
+    assert "🟢 CALL" in only_call and "🔴 PUT" not in only_call
+
+
+def test_it_does_not_claim_a_per_leg_liquidity_context():
+    """⚠️ The guard that matters.
+
+    Stage 74's context carries clustered levels, dealer levels (gamma flip,
+    max pain) and liquidity pools. Every one is an INDEX fact with no per-leg
+    equivalent — there is no gamma flip for one option's premium. A leg panel
+    that looked like the index panel would imply six reads where one exists.
+    """
+    from mios_v5.ui import liquidity_panel as P
+    html = P.leg_heatmaps_html(_call_prof(), _put_prof())
+    assert "gamma flip" in html, "the limit must be stated, not assumed"
+    for absent in ("Max pain", "Sweep", "Absorption", "Dealer", "Pools"):
+        assert absent not in html, f"{absent} has no per-leg producer"
+
+
+def test_stage_71_86s_shape_travels_when_it_ran_and_is_silent_when_it_did_not():
+    from mios_v5.ui import liquidity_panel as P
+    assert "P Shape" in P.leg_heatmap_html("CALL", _call_prof())
+    quiet = P.leg_heatmap_html("PUT", _put_prof())
+    assert "Shape" not in quiet and "UNKNOWN" not in quiet
+
+
+def test_the_leg_bars_never_raise():
+    from mios_v5.ui import liquidity_panel as P
+    for junk in (None, {}, "a string", 42, [], {"rows": "x"},
+                 {"rows": [None, 3, {}]}):
+        P.leg_heatmap_html("CALL", junk)
+        P.leg_heatmaps_html(junk, junk)
+
+
+def test_the_profiles_are_built_once_and_read_twice():
+    """The chart's bands and these bars must be the SAME objects, or the two
+    views of one leg can disagree. `_terminal_chart` builds each profile once
+    and publishes it; nothing rebuilds one for the panel."""
+    from mios_v5.ui import liquidity_panel as P
+    src = (ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_terminal_chart")
+    builds = [c for c in ast.walk(fn) if isinstance(c, ast.Call)
+              and getattr(c.func, "id", "") == "_panel_profile"]
+    assert len(builds) == 3, "one profile per panel, built once each"
+    # …and the panel builds nothing of its own. AST, not a text scan: the
+    # panel's own comments explain WHY it defers to `_panel_profile`, and a
+    # substring search matches that prose rather than any call — the same trap
+    # this repo has now hit eight times.
+    ptree = ast.parse((ROOT / "mios_v5" / "ui" / "liquidity_panel.py").read_text())
+    called = {getattr(c.func, "id", "") or getattr(c.func, "attr", "")
+              for c in ast.walk(ptree) if isinstance(c, ast.Call)}
+    assert not (called & {"_panel_profile", "calculate_money_flow_profile"})
+    imported = set()
+    for n in ast.walk(ptree):
+        if isinstance(n, ast.ImportFrom):
+            imported |= {a.name for a in n.names}
+    assert "calculate_money_flow_profile" not in imported
+
+
+def test_the_bars_are_not_nested_inside_the_charts_try():
+    """`_terminal_chart` owns a Plotly figure and its own failure mode. Putting
+    this panel inside that `try` would hide it whenever the chart failed —
+    the nesting that made the execution chain invisible."""
+    from mios_v5.ui import liquidity_panel as P
+    tree = ast.parse((ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text())
+    holders = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", "") == "render_leg_heatmaps"):
+                holders.add(fn.name)
+    assert holders, "the leg bars are never rendered"
+    assert "_terminal_chart" not in holders

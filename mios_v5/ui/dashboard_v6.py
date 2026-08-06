@@ -340,6 +340,22 @@ def _trading_screen(st, fr: Dict[str, Any], state) -> None:
 
     _terminal_chart(st, fr, call_tag, put_tag, dom)
 
+    # ── the same liquidity bars, per leg, directly under the charts ────
+    # The chart draws each leg's profile as a translucent band behind the
+    # candles, which shows WHERE the volume sits but cannot be read off. These
+    # are the identical bins as bars, so a level can be measured rather than
+    # eyeballed through a candle.
+    #
+    # Called out here rather than inside `_terminal_chart` on purpose: that
+    # function owns a Plotly figure and its own failure mode, and nesting this
+    # inside it would put a second panel behind the chart's `try`. That is
+    # exactly the nesting that made the execution chain invisible.
+    try:
+        from .liquidity_panel import render_leg_heatmaps
+        render_leg_heatmaps(st, st.session_state.get("_leg_profiles"))
+    except Exception as err:
+        st.caption(f"Premium liquidity unavailable: {err}")
+
     # ── market facts + the V5 ‖ V6 divergence ──
     # The slim Trade Card: ONLY what this tab does not already own. Bias,
     # quality and timing belong to the Opportunity Matrix (per horizon, which
@@ -1187,6 +1203,19 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
 
     window = _zoom_controls(st)
 
+    # Built once, used twice — by the chart's band overlay and by the liquidity
+    # bars rendered underneath it. Building them here rather than again in the
+    # panel is the same rule Stage 71.8 settled for the leg reads: one profile
+    # per leg, one owner, two readers.
+    _nifty_prof = _panel_profile(st, "NIFTY", nifty, mf)
+    _call_prof = _panel_profile(st, ce, call_df)
+    _put_prof = _panel_profile(st, pe, put_df)
+    # Published for the bars below. Same cycle, so no lag — the panel reads what
+    # this chart just drew, not last pass's copy.
+    st.session_state["_leg_profiles"] = {
+        "NIFTY": _nifty_prof, "CALL": _call_prof, "PUT": _put_prof,
+        "call_label": ce, "put_label": pe}
+
     try:
         fig, notes = terminal_chart(
             nifty, call_df, put_df, levels, htf_levels=htf,
@@ -1196,9 +1225,9 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
             call_levels=_leg_levels(st, ce), put_levels=_leg_levels(st, pe),
             call_zones=_leg_store(st, "_atm_leg_vob_volume", ce),
             put_zones=_leg_store(st, "_atm_leg_vob_volume", pe),
-            nifty_profile=_panel_profile(st, "NIFTY", nifty, mf),
-            call_profile=_panel_profile(st, ce, call_df),
-            put_profile=_panel_profile(st, pe, put_df))
+            nifty_profile=_nifty_prof,
+            call_profile=_call_prof,
+            put_profile=_put_prof)
         # scrollZoom off: the wheel zoomed the chart out from under anyone
         # scrolling the page past it. Zoom is on the buttons, where it is
         # deliberate and the current level is visible.
