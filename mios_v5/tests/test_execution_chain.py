@@ -199,13 +199,23 @@ def test_the_dashboard_never_imports_a_network_client():
     assert not (imported & {"requests", "httpx", "urllib3", "telegram"})
 
 
-def test_the_panel_says_nothing_was_sent_on_every_render():
-    """In the card, not a footnote — a dispatch state that reads like a
-    delivery is the one misreading that would cost money."""
+def test_the_delivery_banner_tracks_the_dispatch_state():
+    """It used to assert "Nothing is sent" unconditionally. That was true while
+    the dispatcher ran with no transport and became a lie the moment the
+    sidebar toggle started passing one in — a panel swearing nothing was sent
+    while the message lands on the phone is worse than no panel. So it is
+    derived, and `freeze_ready: False` is stated either way."""
     from mios_v5.ui.execution_panel import execution_html
-    html = execution_html(*_chain())
-    assert "Nothing is sent" in html
+    decision, lifecycle, dispatch = _chain()
+    html = execution_html(decision, lifecycle, dispatch)
+    assert "Not sent this cycle" in html
     assert "freeze_ready: False" in html
+
+    sent = dict(dispatch.to_dict(), telegram_state="SENT")
+    html_sent = execution_html(decision, lifecycle, sent)
+    assert "Not sent this cycle" not in html_sent
+    assert "Sent." in html_sent
+    assert "freeze_ready: False" in html_sent
 
 
 def test_delivered_is_not_coloured_as_success():
@@ -279,9 +289,146 @@ def test_the_chain_survives_a_thin_context():
 
 def test_the_panel_never_raises():
     from mios_v5.ui.execution_panel import execution_html
-    assert execution_html(None) == ""
     for junk in ("a string", 42, {}, []):
         execution_html(junk, junk, junk)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ⭐ silence and WAIT are not the same reading
+# ══════════════════════════════════════════════════════════════════════
+
+def test_no_decision_renders_did_not_run_rather_than_nothing():
+    """The panel used to return "" here, and a chain that never ran looked
+    exactly like a chain that decided not to trade. They mean opposite things:
+    one is the system declining, the other is the system absent."""
+    from mios_v5.ui.execution_panel import execution_html
+    html = execution_html(None)
+    assert html, "a blank panel is indistinguishable from 'no trade'"
+    assert "did not run" in html
+    assert "not</b> a decision to wait" in html
+
+
+def test_the_not_run_card_carries_the_reason_it_was_given():
+    from mios_v5.ui.execution_panel import execution_html
+    html = execution_html(None, not_run_reason="the option chain is empty")
+    assert "the option chain is empty" in html
+
+
+def test_a_wait_decision_says_why_no_signal():
+    """The question a blank panel never answered."""
+    from mios_v5.ui.execution_panel import execution_html
+    decision, lifecycle, dispatch = _chain(TC.build())
+    html = execution_html(decision, lifecycle, dispatch)
+    assert "Why no signal?" in html
+    assert dict(decision.metadata)["state_reason"] in html
+
+
+def test_every_hard_gate_is_shown_not_only_the_first():
+    """`state()` puts blocks[0] into state_reason, so three failing gates used
+    to surface as one — and a trader fixes the wrong thing."""
+    decision = EE.run(_ctx())
+    meta = dict(decision.metadata)
+    assert "readiness_blocks" in meta
+    assert isinstance(meta["readiness_blocks"], tuple)
+
+
+def test_the_gate_block_separates_gates_from_weights():
+    """A component scoring 30 has not failed a gate — it voted low and was
+    outvoted. Rendering the two as one list would misstate the engine."""
+    from mios_v5.ui.execution_panel import execution_html
+    html = execution_html(*_chain())
+    assert "Hard gates" in html
+    assert "Weighted inputs" in html
+    assert "not gates" in html
+
+
+def test_an_input_that_did_not_report_says_so_rather_than_scoring_zero():
+    """Unknown-excluded scoring, made visible: a score over four inputs and a
+    score over eleven must never look the same."""
+    from mios_v5.ui.execution_panel import execution_html
+    html = execution_html(*_chain(TC.build()))
+    assert "not reported" in html
+
+
+def test_frozen_metadata_is_readable_by_the_panel():
+    """`MappingProxyType` is NOT a `dict` subclass, and the panel's accessor
+    tested `isinstance(obj, dict)` — so every metadata field it read fell
+    through to the default. `state_reason`, the single line explaining a WAIT,
+    rendered blank from the day the panel was written.
+
+    Asserted on the real frozen type rather than a plain dict, because a plain
+    dict is exactly what made this pass while the app showed nothing."""
+    from types import MappingProxyType
+    from mios_v5.ui.execution_panel import _get
+    frozen = MappingProxyType({"state_reason": "score 41 is below the entry "
+                                               "threshold"})
+    assert not isinstance(frozen, dict), "the premise of the bug"
+    assert _get(frozen, "state_reason") == ("score 41 is below the entry "
+                                            "threshold")
+    # …and end to end, through a real decision
+    decision = EE.run(_ctx())
+    from mios_v5.ui.execution_panel import execution_html
+    assert dict(decision.metadata)["state_reason"] in execution_html(decision)
+
+
+def test_the_chain_is_not_nested_inside_the_strike_picker():
+    """Its old home was `_strike_validation`, which returns early when the ATM
+    ladder is unpublished and wraps ~145 lines in one `except`. Either firing
+    meant Stage 72 never ran and the only trace was a caption about the strike
+    picker. The call must sit at the top level so a strike-picker problem
+    cannot take the trade verdict down with it.
+
+    AST, not a text scan: the source explains this rule in a comment naming
+    both functions, and a substring search matches the prose describing the
+    rule rather than the code obeying it — the failure mode this repo has hit
+    seven times."""
+    tree = ast.parse(DASH.read_text())
+    holders = set()
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", "") == "_run_execution_chain"):
+                holders.add(fn.name)
+    assert holders, "the execution chain is never called"
+    assert "_strike_validation" not in holders, (
+        "the chain is nested inside the strike picker again — its early return "
+        "and shared `except` will hide Stage 72")
+
+
+def test_every_failure_path_renders_the_panel_rather_than_a_caption():
+    """Three paths could fail to produce a decision, and all three used to end
+    in `return` or a bare caption. Each must now reach the panel, because a
+    caption reading "Strike Validation unavailable" while the real casualty was
+    Stage 72 is how this stayed invisible."""
+    tree = ast.parse(DASH.read_text())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_run_execution_chain")
+    called = {getattr(c.func, "id", "") or getattr(c.func, "attr", "")
+              for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    assert "_render_chain_panel" in called
+    # the ctx-is-None branch and the except branch both render, so more than
+    # one call site — a single one would mean a path still returns silently
+    sites = sum(1 for c in ast.walk(fn) if isinstance(c, ast.Call)
+                and getattr(c.func, "id", "") == "_render_chain_panel")
+    assert sites >= 2, "a failure path still returns without rendering"
+
+
+def test_the_last_valid_signal_survives_a_quiet_cycle():
+    """A blank panel in a slow market is what makes a working system feel
+    broken, so the morning's signal stays on screen."""
+    from mios_v5.ui.execution_panel import execution_html, remember_signal
+    last = {"state": "ENTER", "side": "CALL", "strike": 24500,
+            "entry": 182.4, "stop": 160.0, "score": 81, "at": "10:42"}
+    html = execution_html(None, last_signal=last)
+    assert "Last valid signal" in html and "10:42" in html
+    # …and a WAIT never overwrites it
+    assert remember_signal({"state": "WAIT", "side": "CALL"}) is None
+    assert remember_signal(None) is None
+    kept = remember_signal({"state": "ENTER", "side": "PUT", "strike": 24400,
+                            "created_at": "2026-08-06T10:42:00+00:00"})
+    assert kept and kept["side"] == "PUT" and kept["at"] == "10:42"
 
 
 def test_the_panel_renders_a_stored_decision_like_a_live_one():

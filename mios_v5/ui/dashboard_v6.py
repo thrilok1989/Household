@@ -89,7 +89,7 @@ def render_dashboard_v6(state=None, db=None) -> None:
 
 
 # ── 1 · DECISION ────────────────────────────────────────────────────────
-def _run_execution_chain(st, db=None) -> None:
+def _run_execution_chain(st) -> None:
     """Stages 72 → 73 → 72.9, run once per cycle from the assembled context.
 
     Each stage takes the previous one's output and adds one thing:
@@ -125,6 +125,15 @@ def _run_execution_chain(st, db=None) -> None:
     """
     ctx = st.session_state.get("_trading_context")
     if ctx is None:
+        # ⚠️ This used to `return` silently, and it was one of FOUR ways the
+        # execution chain could fail to run without saying so. The trader saw
+        # an empty space, which reads exactly like "no trade" — the one
+        # misreading that makes a working system look broken. Say it instead.
+        st.session_state["_entry_decision"] = None
+        _render_chain_panel(
+            st, "Stage 71.95 did not publish a trading context this cycle, so "
+                "Stage 72 had nothing to read. Common causes: the option chain "
+                "has not arrived yet, or the strike picker found no ATM ladder.")
         return
     try:
         from ..dispatcher import MemoryRegistry
@@ -150,16 +159,37 @@ def _run_execution_chain(st, db=None) -> None:
         st.session_state["_dispatch_decision"] = _dispatch(
             decision, ctx, lifecycle=lifecycle, registry=registry,
             transport=transport)
+        # The last decision worth keeping on screen while the current read is
+        # WAIT. Written only when there IS one, so a quiet cycle cannot erase
+        # the morning's signal — a blank panel in a slow market is precisely
+        # what makes a working system feel broken.
+        from .execution_panel import remember_signal
+        _last = remember_signal(decision)
+        if _last:
+            st.session_state["_last_valid_signal"] = _last
     except Exception as err:
         st.session_state["_entry_decision"] = None
-        st.caption(f"Execution chain unavailable: {err}")
+        _render_chain_panel(st, f"The chain raised on this cycle: {err}")
         return
 
+    _render_chain_panel(st)
+
+
+def _render_chain_panel(st, not_run_reason: str = "") -> None:
+    """Draw the execution panel from whatever session state holds.
+
+    Split out so the three failure paths above render the SAME panel the happy
+    path does, rather than a bare caption. A caption reading "Strike Validation
+    unavailable" while the real casualty was Stage 72 is how this stayed
+    invisible.
+    """
     try:
         from .execution_panel import render_execution
         render_execution(st, st.session_state.get("_entry_decision"),
                          st.session_state.get("_lifecycle_decision"),
-                         st.session_state.get("_dispatch_decision"))
+                         st.session_state.get("_dispatch_decision"),
+                         last_signal=st.session_state.get("_last_valid_signal"),
+                         not_run_reason=not_run_reason)
     except Exception as err:
         st.caption(f"Execution panel unavailable: {err}")
 
@@ -289,6 +319,24 @@ def _trading_screen(st, fr: Dict[str, Any], state) -> None:
     # strike grade is how a correct direction gets traded through an illiquid
     # option.
     _strike_validation(st, fr)
+
+    # ── the execution chain · Stages 72 → 73 → 72.9 ────────────────────
+    # Called HERE, at the top level, not from inside `_strike_validation`.
+    #
+    # It used to live in that function's body, and that placement is what made
+    # the whole chain invisible. `_strike_validation` returns early when the ATM
+    # ladder has not been published, and it wraps ~145 lines in a single
+    # `except` — so whenever either fired, Stage 72 never ran, `_entry_decision`
+    # was never written, the panel rendered `""`, and the only thing on screen
+    # was a caption about the strike picker. Three unrelated failures all
+    # presenting as "no signal", none of them saying the execution chain had not
+    # run.
+    #
+    # It reads `_trading_context` out of session state, which `_strike_validation`
+    # publishes before it returns, so nothing about the data flow depends on the
+    # nesting — only the failure behaviour did. Out here, a strike-picker
+    # problem can no longer take the trade verdict down with it.
+    _run_execution_chain(st)
 
     _terminal_chart(st, fr, call_tag, put_tag, dom)
 
@@ -677,20 +725,6 @@ def _strike_validation(st, fr: Dict[str, Any]) -> None:
         # must be inspectable somewhere.
         from .premium_behaviour_panel import render_premium_behaviour
         render_premium_behaviour(st, _behaviour)
-
-        # ── the execution chain · Stages 72 → 73 → 72.9 ────────────────
-        # Built, frozen and tested earlier this session, and until now NOTHING
-        # CALLED THEM. That is the regression this repo has already suffered
-        # twice — a reader kept while its writer went, a stage that exists and
-        # never runs — so it is wired here, at the one point where the context
-        # they all consume has just been assembled.
-        #
-        # ⚠️ It prepares; it does not send. Stage 72.9 is VALIDATED_SIMULATED
-        # and `STAGE72_9_VALIDATION_REPORT.md` records `freeze_ready: False`,
-        # so the transport is deliberately absent: the dispatcher builds the
-        # payload, decides whether it WOULD send, and reports NOT_SENT. Passing
-        # a live transport here is a separate, human decision.
-        _run_execution_chain(st, db)
 
         # ── Stage 74 — Liquidity Intelligence ──────────────────────────
         # Principle 12 again, and pre-emptively: Stage 74 publishes eight facts
