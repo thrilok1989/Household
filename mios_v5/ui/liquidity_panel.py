@@ -158,8 +158,77 @@ def _premium_px(v) -> str:
     return "—" if n is None else f"₹{n:,.2f}"
 
 
+#: How many bars a heatmap draws.
+#:
+#: ⚠️ Display only. The PROFILE keeps its full resolution — `num_rows=25` — and
+#: nothing about what the engines read changes. That is not a detail: the NIFTY
+#: profile's bins feed `compute_major_sr_zones`, the POC, the value area, Stage
+#: 74's clustering and Stage 71.86's shape, so re-binning the stored profile
+#: would move S/R levels to make a chart tidier. Twenty-five thin bars are hard
+#: to read; twenty-five bins are what the levels were computed from. Both are
+#: true, and only one of them is a rendering problem.
+MAX_BARS = 10
+
+
+def _rebin(bins: List[Dict[str, Any]], n: int = MAX_BARS) -> List[Dict[str, Any]]:
+    """Merge adjacent price bins into at most `n`, for display.
+
+    Adjacent, never "the biggest `n`" — a profile is a price ladder, and
+    dropping the quiet bins would leave gaps at prices that did trade and put
+    two non-touching bars next to each other as though they were neighbours.
+
+    Volume adds. Sentiment is re-derived from the summed bull/bear volume, not
+    averaged from the constituent labels: three thin bullish bins merged with
+    one heavy bearish bin is a **bearish** group, and a majority vote would call
+    it bullish. Where bull/bear volumes were not published, the vote falls back
+    to volume-weighting the labels, which is the best available answer rather
+    than a guess dressed as arithmetic.
+    """
+    if n < 1 or len(bins) <= n:
+        return bins
+    ordered = sorted(bins, key=lambda r: _num(r.get("bin_low")) or 0.0)
+    out: List[Dict[str, Any]] = []
+    total = len(ordered)
+    for i in range(n):
+        group = ordered[(i * total) // n:((i + 1) * total) // n]
+        if not group:
+            continue
+        vol = sum(_num(b.get("total_volume")) or 0.0 for b in group)
+        bull = sum(_num(b.get("bull_volume")) or 0.0 for b in group)
+        bear = sum(_num(b.get("bear_volume")) or 0.0 for b in group)
+        if bull or bear:
+            delta = bull - bear
+            strength = (abs(delta) / (bull + bear) * 100.0) if (bull + bear) else 0.0
+        else:
+            # no per-side volume published — weight the labels by volume
+            score = 0.0
+            for b in group:
+                w = _num(b.get("total_volume")) or 1.0
+                s = str(b.get("sentiment") or "")
+                score += w if s == "Bullish" else -w if s == "Bearish" else 0.0
+            delta = score
+            denom = sum(_num(b.get("total_volume")) or 1.0 for b in group)
+            strength = (abs(score) / denom * 100.0) if denom else 0.0
+        out.append({
+            "bin_low": _num(group[0].get("bin_low")),
+            "bin_high": _num(group[-1].get("bin_high")),
+            "total_volume": vol, "bull_volume": bull, "bear_volume": bear,
+            "delta": delta,
+            "sentiment": ("Bullish" if delta > 0 else
+                          "Bearish" if delta < 0 else "Neutral"),
+            "sentiment_strength": strength,
+        })
+    # `ratio` is a share of the busiest bar, so it is recomputed against the
+    # MERGED maximum. Carrying the old ratios forward would leave every bar
+    # under-full, because no merged bar is the old busiest one.
+    top = max((b["total_volume"] for b in out), default=0.0)
+    for b in out:
+        b["ratio"] = (b["total_volume"] / top) if top > 0 else 0.0
+    return out
+
+
 def heatmap_html(rows: Optional[Sequence[Any]], mode: str = "liquidity",
-                 poc: Any = None, fmt=None) -> str:
+                 poc: Any = None, fmt=None, bars: int = MAX_BARS) -> str:
     """One bar per profile bin, highest price at the top — the way a profile is
     read on a chart, not the way the list happens to be ordered.
 
@@ -169,12 +238,16 @@ def heatmap_html(rows: Optional[Sequence[Any]], mode: str = "liquidity",
 
     `fmt` formats the price label; it defaults to the index style. A premium
     panel passes `_premium_px` — the bins are rupees, not index points.
+
+    `bars` caps how many bars are DRAWN by merging adjacent bins. The profile
+    itself is untouched — see `MAX_BARS`.
     """
     px = fmt or _px
     bins = [_d(r) for r in _seq(rows)]
     bins = [b for b in bins if b]
     if not bins:
         return ""
+    bins = _rebin(bins, bars)
 
     poc_px = _num(poc)
     out = []

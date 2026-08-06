@@ -1191,3 +1191,91 @@ def test_the_bars_are_not_nested_inside_the_charts_try():
                 holders.add(fn.name)
     assert holders, "the leg bars are never rendered"
     assert "_terminal_chart" not in holders
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ten bars, and only on screen
+# ══════════════════════════════════════════════════════════════════════
+
+def _bar_count(html):
+    return html.count("<div style='display:flex;align-items:center")
+
+
+def test_a_heatmap_draws_at_most_ten_bars():
+    from mios_v5.ui import liquidity_panel as P
+    assert P.MAX_BARS == 10
+    assert _bar_count(P.heatmap_html(_heat_rows(25), "liquidity")) == 10
+    assert _bar_count(P.heatmap_html(_heat_rows(25), "sentiment")) == 10
+    # legs too — they render through the same function
+    fat_call = {"rows": _leg_rows(25, 90.0), "poc_price": 96.2}
+    fat_put = {"rows": _leg_rows(25, 170.0), "poc_price": 182.45}
+    assert _bar_count(P.leg_heatmaps_html(fat_call, fat_put)) == 4 * 10, \
+        "2 legs x 2 reads x 10 bars"
+
+
+def test_a_profile_already_short_enough_is_untouched():
+    from mios_v5.ui import liquidity_panel as P
+    assert _bar_count(P.heatmap_html(_heat_rows(6), "liquidity")) == 6
+
+
+def test_the_stored_profile_keeps_its_full_resolution():
+    """⚠️ Display only.
+
+    The NIFTY profile's bins feed `compute_major_sr_zones`, the POC, the value
+    area, Stage 74's clustering and Stage 71.86's shape. Re-binning the STORED
+    profile would move S/R levels to make a chart tidier. The rows handed in
+    must come back unchanged.
+    """
+    from mios_v5.ui import liquidity_panel as P
+    rows = _heat_rows(25)
+    before = [dict(r) for r in rows]
+    P.heatmap_html(rows, "liquidity")
+    assert rows == before, "the panel mutated the profile it was given"
+    assert len(rows) == 25
+
+
+def test_merging_takes_adjacent_bins_not_the_biggest_ones():
+    """A profile is a price ladder. Keeping the ten busiest bins would leave
+    gaps at prices that did trade, and put two non-touching bars next to each
+    other as though they were neighbours."""
+    from mios_v5.ui import liquidity_panel as P
+    rows = _heat_rows(25)
+    merged = P._rebin([dict(r) for r in rows], 10)
+    assert len(merged) == 10
+    for a, b in zip(merged, merged[1:]):
+        assert a["bin_high"] == pytest.approx(b["bin_low"]), "gap in the ladder"
+    assert merged[0]["bin_low"] == pytest.approx(min(r["bin_low"] for r in rows))
+    assert merged[-1]["bin_high"] == pytest.approx(max(r["bin_high"] for r in rows))
+    assert (sum(m["total_volume"] for m in merged)
+            == pytest.approx(sum(r["total_volume"] for r in rows)))
+
+
+def test_a_merged_bar_takes_its_side_from_volume_not_a_head_count():
+    """Three thin bullish bins merged with one heavy bearish bin is a BEARISH
+    group. A majority vote over the labels would call it bullish."""
+    from mios_v5.ui import liquidity_panel as P
+    thin = [{"bin_low": 100.0 + i, "bin_high": 101.0 + i, "total_volume": 10,
+             "bull_volume": 10, "bear_volume": 0, "sentiment": "Bullish"}
+            for i in range(3)]
+    heavy = [{"bin_low": 103.0, "bin_high": 104.0, "total_volume": 500,
+              "bull_volume": 0, "bear_volume": 500, "sentiment": "Bearish"}]
+    merged = P._rebin(thin + heavy, 1)
+    assert len(merged) == 1
+    assert merged[0]["sentiment"] == "Bearish"
+
+
+def test_the_busiest_merged_bar_is_full_width():
+    """`ratio` is a share of the busiest bar, so it is recomputed against the
+    MERGED maximum. Carrying the old ratios forward leaves every bar
+    under-full, because no merged bar is the old busiest one."""
+    from mios_v5.ui import liquidity_panel as P
+    merged = P._rebin(_heat_rows(25), 10)
+    assert max(m["ratio"] for m in merged) == pytest.approx(1.0)
+    assert all(0.0 <= m["ratio"] <= 1.0 for m in merged)
+
+
+def test_rebinning_never_raises_on_junk():
+    from mios_v5.ui import liquidity_panel as P
+    assert P._rebin([], 10) == []
+    P._rebin([{"bin_low": None, "bin_high": None}], 1)
+    P._rebin([{} for _ in range(20)], 10)
