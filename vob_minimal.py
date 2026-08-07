@@ -14608,7 +14608,7 @@ def _render_main_analyzer():
         pytz.timezone('Asia/Kolkata')).strftime("%Y-%m-%d %H:%M:%S IST"))
 
 
-def _render_app_chrome(slot):
+def _render_app_chrome(slot, foot):
     """Fill the header slot, set the browser tab, and close with the footer.
 
     Runs AFTER the cycle so the strip carries this cycle's spot rather than the
@@ -14660,15 +14660,72 @@ def _render_app_chrome(slot):
     # not reported. One glyph fits; showing both would need two and read as a
     # disagreement nobody can act on from a background tab.
     render_tab_title(st, spot=spot, bias=v6 or v5)
-    render_footer(st, updated=updated, market=clock, version=CHROME_VERSION)
+    render_footer(st, foot, updated=updated, market=clock,
+                  version=CHROME_VERSION)
+
+    # Kept so the NEXT rerun can paint the strips immediately — see
+    # `_prime_app_chrome`. Stored with the timestamp these values were read at,
+    # never a fresh one: a stale price under a live clock is the misreading the
+    # late fill was avoiding in the first place.
+    st.session_state['_chrome_last'] = {
+        'spot': spot, 'prev_close': prev_close, 'v5': v5, 'v6': v6,
+        'market': clock, 'updated': updated}
+
+
+def _prime_app_chrome(slot, foot):
+    """Paint the strips from the last cycle's values, immediately.
+
+    ⚠️ This is the fix for "the header and footer sometimes vanish".
+
+    They are filled at the END of the cycle so they carry that cycle's spot.
+    But `st_autorefresh` reruns the whole script every twenty seconds, and a
+    rerun rebuilds the page from the top — so the placeholders start EMPTY and
+    stay empty for the entire render, network fetches included. The strips were
+    not vanishing at random; they were absent for most of every refresh and
+    present only in the gap between one cycle finishing and the next starting.
+
+    So the slot is primed with what was true a moment ago and overwritten with
+    what is true now. The timestamp is the stored one, not `now`: the strip
+    reads `15:22:04 IST` until the new cycle lands, which is the honest label
+    for a price from 15:22:04. The original objection to filling early —
+    *the previous cycle's price under a live timestamp* — was right about the
+    live timestamp and wrong about the price.
+
+    Nothing is primed on the first run of a session, because there is nothing
+    to prime from. One blank cycle at startup is unavoidable and is not what
+    was reported.
+    """
+    last = st.session_state.get('_chrome_last')
+    if not last:
+        return
+    try:
+        from mios_v5.ui.app_chrome import render_footer, render_header
+        render_header(st, slot, spot=last.get('spot'),
+                      prev_close=last.get('prev_close'), v5=last.get('v5'),
+                      v6=last.get('v6'), market=last.get('market') or "",
+                      updated=last.get('updated') or "")
+        render_footer(st, foot, updated=last.get('updated') or "",
+                      market=last.get('market') or "",
+                      version=CHROME_VERSION_FALLBACK)
+    except Exception:
+        pass
+
+
+#: Used only by the priming render, where importing the module for one constant
+#: would be the third import of it in a cycle.
+CHROME_VERSION_FALLBACK = "chrome.2"
 
 
 def main():
-    # A placeholder, not a title: the header belongs at the TOP of the page and
-    # its values arrive at the BOTTOM of the cycle. Writing it now would print
-    # the previous cycle's price under a live timestamp, which is worse than a
-    # blank strip for the second it takes to fill.
+    # Placeholders, not a title. Both strips are FILLED at the end of the cycle
+    # so they carry this cycle's values — but a rerun rebuilds the page from the
+    # top, so an unprimed placeholder is empty for the whole render. That is
+    # what "the header sometimes vanishes" was: absent for most of every
+    # refresh. `_prime_app_chrome` paints last cycle's values into them now,
+    # each under its OWN timestamp, and the end of the cycle overwrites both.
     _chrome_slot = st.empty()
+    _chrome_foot = st.empty()
+    _prime_app_chrome(_chrome_slot, _chrome_foot)
 
     # ── hot-path measurement · OFF unless MIOS_PROFILE=1 ──────────────
     # The duplication survey counted 11 call sites for
@@ -14691,7 +14748,7 @@ def main():
     # either: a swallowed failure here looks exactly like the feature was never
     # built, which is precisely the report that sent me looking for this.
     try:
-        _render_app_chrome(_chrome_slot)
+        _render_app_chrome(_chrome_slot, _chrome_foot)
     except Exception as err:
         st.warning(f"App header/footer failed to render: {err}")
 

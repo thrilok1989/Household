@@ -255,12 +255,19 @@ def footer_html(updated: str = "", market: str = "",
         + "</div>")
 
 
-def render_footer(st, updated: str = "", market: str = "",
+def render_footer(st, slot: Any = None, updated: str = "", market: str = "",
                   version: str = "", notes: Any = None) -> None:
-    """Draw it. Never raises — a footer may not take the app down."""
+    """Draw it into `slot`, or inline when there is none.
+
+    A slot for the same reason the header has one: the footer is written at the
+    end of the cycle, and a rerun rebuilds the page from the top, so without a
+    placeholder to reserve its position it is simply absent for the whole
+    render. Never raises — a footer may not take the app down.
+    """
     try:
-        st.markdown(footer_html(updated, market, version, notes),
-                    unsafe_allow_html=True)
+        target = slot if slot is not None else st
+        target.markdown(footer_html(updated, market, version, notes),
+                        unsafe_allow_html=True)
     except Exception:
         pass
 
