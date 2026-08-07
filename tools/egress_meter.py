@@ -221,6 +221,26 @@ def _patch(cls: Any) -> None:
     cls.execute = execute
 
 
+def cache_stats() -> Dict[str, int]:
+    """Hits and misses from the read cache, if it is loaded.
+
+    The other half of the picture. This module measures what *reached*
+    PostgREST; a cache hit by definition leaves no trace here, so counting the
+    bytes alone cannot distinguish "the cache is working" from "nothing asked".
+    `read_cache` already tracks calls and fetches — `calls - fetches` is the
+    saving — so it is read rather than re-counted.
+    """
+    try:
+        from db import read_cache as _rc
+        s = _rc.stats()
+        calls, fetches = int(s.get("calls", 0)), int(s.get("fetches", 0))
+        return {"calls": calls, "fetches": fetches,
+                "hits": max(0, calls - fetches),
+                "hit_pct": round((calls - fetches) / calls * 100) if calls else 0}
+    except Exception:
+        return {}
+
+
 def report() -> Dict[str, Any]:
     """Per table and op, biggest first."""
     rows: List[Dict[str, Any]] = []
@@ -237,6 +257,7 @@ def report() -> Dict[str, Any]:
     rows.sort(key=lambda r: -r["bytes"])
     echoing = [r for r in rows if r["echoing"]]
     return {"total_bytes": int(total), "calls": sum(r["calls"] for r in rows),
+            "cache": cache_stats(),
             # Writes still returning their row. Should be empty except for
             # `auto_trades`, which reads the generated id — anything else here
             # is a write that slipped past the fix.
@@ -274,6 +295,10 @@ def summary_line(data: Dict[str, Any]) -> str:
                      for r in rows[:3])
     line = (f"📉 egress this cycle: {_human(data['total_bytes'])} over "
             f"{data['calls']} calls — {top}  (parsed size, pre-gzip)")
+    c = data.get("cache") or {}
+    if c.get("calls"):
+        line += (f" | cache {c['hit_pct']}% hit "
+                 f"({c['hits']}/{c['calls']} served without a request)")
     echo = data.get("still_echoing") or []
     if echo:
         line += (f"  ⚠️ still echoing: {', '.join(echo[:4])}"
