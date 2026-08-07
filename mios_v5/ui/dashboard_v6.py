@@ -583,6 +583,13 @@ def _leg_frame(st, tag):
         frame = dfs.get(key)
         if frame is not None and not getattr(frame, "empty", True):
             return frame
+    # `_atm_leg_dfs` is keyed by the offset form only, so a caller holding just
+    # side and strike reaches it here or not at all — and without the frame
+    # there is no LTP, no candles, and therefore no RVOL, no profile, no POC
+    # and no break/fakeout probability.
+    frame = _leg_suffix_match(dfs, tag)
+    if frame is not None and not getattr(frame, "empty", True):
+        return frame
     return None
 
 
@@ -911,16 +918,18 @@ def _spot_now(st, fr: Optional[Dict[str, Any]] = None) -> Optional[float]:
 def _leg_key_variants(st, tag) -> List[str]:
     """Every key the same leg is stored under.
 
-    The app writes its per-leg caches under three different names and this cost
-    the terminal its VOB read entirely:
+    The app writes its per-leg caches under two forms:
 
-      * `_atm_leg_dfs`         → "ATM CE 24250"   (with the ATM offset tag)
-      * `_atm_leg_vob_volume`  → "CE 24250"       (`leg_name`, no tag)
-      * every store, also      → "sid_65806"
+      * `"ATM CE 24550"` / `"ATM-1 PE 24500"` — the offset tag plus side and
+        strike, which is what `atm_legs()` hands back
+      * `"sid_65806"` — the security id, written alongside by most stores
 
-    `atm_legs()` hands back the first form, so `vob.get(tag)` looked up a key
-    that store never contains. It matched nothing on every cycle, which is why
-    VOB and Money Flow read "—" no matter what the market did.
+    A caller holding the long form finds the short one by dropping the prefix.
+    A caller holding only side and strike — which is all
+    `_leg_reads_for` has, because it is given a strike, not a leg — cannot go
+    the other way by rebuilding the name, because the prefix depends on where
+    the strike sits relative to the ATM and the caller does not know that.
+    `_leg_suffix_match` closes that direction.
     """
     if not tag:
         return []
@@ -938,6 +947,51 @@ def _leg_key_variants(st, tag) -> List[str]:
     return out
 
 
+def _leg_suffix_match(store: Any, tag) -> Any:
+    """The stored leg whose key **ends** with this `SIDE STRIKE`.
+
+    ⚠️ The half of the lookup that was missing, and it emptied the whole of
+    Premium Structure.
+
+    Every per-leg store is written under the offset form — `"ATM CE 24550"`.
+    `_leg_reads_for` builds its tag from the selected strike alone, so it asks
+    for `"CE 24550"`: two tokens, no prefix to drop, and `_atm_leg_sids` is
+    keyed by the long form so the `sid_` variant misses too. Every lookup
+    returned `None`, so `analyse()` was handed no S/R, no VOB, no VIDYA, no
+    flow and no frame — and reported `UNKNOWN` with every field `—` while the
+    engines behind it were all producing normally.
+
+    Matching on the last two tokens rather than rebuilding the name is what
+    makes this robust: `"ATM"`, `"ATM-3"`, or any prefix a later layout
+    introduces resolves without this function knowing the offset scheme. Side
+    and strike together identify one contract, so at most one key can match.
+    """
+    if not tag or not store:
+        return None
+    parts = str(tag).split()
+    if len(parts) < 2:
+        return None
+    want = tuple(parts[-2:])
+    try:
+        items = list(store.items())
+    except Exception:
+        return None
+    for key, val in items:
+        got = str(key).split()
+        if len(got) < 2 or tuple(got[-2:]) != want:
+            continue
+        # ⚠️ `if not val` would raise here. `_atm_leg_dfs` holds DataFrames, and
+        # a DataFrame refuses to answer `bool()` — "The truth value of a
+        # DataFrame is ambiguous". Emptiness is asked for by name instead, the
+        # same way `_leg_frame` already asks it.
+        if val is None or getattr(val, "empty", False):
+            continue
+        if not hasattr(val, "empty") and not val:
+            continue
+        return val
+    return None
+
+
 def _leg_store(st, name: str, tag) -> Any:
     """A per-leg cache entry, found under whichever key it was written with."""
     store = st.session_state.get(name) or {}
@@ -945,7 +999,7 @@ def _leg_store(st, name: str, tag) -> Any:
         val = store.get(key)
         if val:
             return val
-    return None
+    return _leg_suffix_match(store, tag)
 
 
 def _leg_levels(st, tag) -> Dict[str, Any]:
