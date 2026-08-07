@@ -130,18 +130,55 @@ Recorded so the next round does not re-audit it:
 
 ---
 
-## 6 · What still needs measuring, not guessing
+## 6 · Measuring, not guessing — `tools/egress_meter.py`
 
-The write-echo estimate is derived from row shapes. To confirm it and rank
-what is left:
+The write-echo estimate is derived from row shapes. Step 1 below is now built.
 
-1. **Instrument the client** — record response bytes per method per cycle, the
-   same shape as `tools/hotpath_profiler.py`. That turns "probably the chain
-   writes" into a number.
-2. **Read Supabase's own per-day egress breakdown by type** (Database vs
-   Storage vs Auth). If a material share is Storage or Realtime, none of this
-   audit touches it.
-3. **Then** narrow the `select('*')` list, worst first.
+```bash
+MIOS_EGRESS=1 streamlit run vob_minimal.py
+```
+
+One caption line per cycle, and the full ranking in `egress_report.json`:
+
+```
+📉 egress this cycle: 112.9 KB over 3 calls —
+   session_log.select 107.4 KB · option_chain_data.upsert 5.5 KB   (parsed size, pre-gzip)
+```
+
+It hooks `execute()` on the PostgREST builder classes and attributes every call
+to a **table** and an **operation**, reading both off the composed request —
+guessing from the class name is impossible because PostgREST reuses builders
+across verbs, and `insert` and `upsert` are both POST, told apart only by the
+`prefer` header.
+
+It installs on `db.client`, **inside** the cache wrapper: a read served from
+`st.cache_data` never reaches PostgREST and must not be counted as though it
+had.
+
+### It also verifies §2's fix in flight
+
+`prefer: return=representation` means a write is still echoing. The report lists
+any that are under `still_echoing`, so the fix is confirmed against the running
+process rather than against the source. `auto_trades` is the one expected entry.
+
+### ⚠️ What the number is not
+
+`len(json.dumps(response.data))` — the parsed payload. **Not** the billed wire
+size: no headers, and no gzip, which Supabase applies and which compresses
+repetitive JSON heavily. It is a **ranking signal and a before/after ratio**,
+not a figure to reconcile against the invoice. The ordering is what survives
+compression, and the ordering is what decides the next fix.
+
+It cannot see egress that is not Database (Storage, Realtime, Auth, Edge
+Functions), and it cannot see `ws_worker.py`, which is a different process.
+
+### Still to do
+
+2. **Read Supabase's own per-day egress breakdown by type.** If a material share
+   is Storage or Realtime, none of this audit touches it — and the 1.20 GB
+   should not be attributed to PostgREST until that is checked.
+3. **Then** narrow the `select('*')` list, worst first, one at a time, each with
+   a test asserting the fields its consumers actually read.
 
 Until (1) exists, the honest statement is: the writes were provably paying for
 an echo nobody read, that echo was proportional to the largest and most frequent
