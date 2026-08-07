@@ -108,3 +108,43 @@ def test_the_card_renders_the_short_form_from_the_final_read():
     tree = ast.parse(src)
     names = {getattr(n, "id", "") for n in ast.walk(tree) if isinstance(n, ast.Name)}
     assert "_mios_fr" in names
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  the header form
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_header_form_carries_the_level_and_the_odds():
+    """⭐ The first version dropped both, on the reasoning that "the level is
+    already on the S/R chips beside it". A live reading disproves it:
+
+        S/R chip   🛡 24,558  brk 44 · rej 56
+        war zone   ⚔️ 24,561  bounce 35 · breakdown 65
+
+    Different level, different odds. Stage 42's battle zone is not the ranked
+    S/R level next to it, and its probabilities are a separate read — so a
+    header showing only the winner asked the trader to infer two numbers from a
+    neighbouring chip that does not hold them.
+    """
+    line = W.micro(_fr(battle_zone={"type": "SUPPORT", "price": 24561}))
+    assert "24,561" in line
+    assert "bounce 35" in line and "breakdown 65" in line
+    assert "Sellers" in line
+
+
+def test_the_header_form_keeps_what_it_has_when_a_part_is_missing():
+    assert W.micro({"battle_zone": {"price": 24561}}) == "⚔️ ₹24,561"
+    only_winner = W.micro({"battle_zone": {"type": "SUPPORT"},
+                           "expected_winner": "Contested"})
+    assert only_winner == "⚔️ Contested"
+
+
+def test_the_header_form_is_plain_text():
+    """The header owns its styling; this owns the wording."""
+    line = W.micro(_fr())
+    assert "<" not in line and "style=" not in line
+
+
+def test_no_fight_says_nothing_in_the_header_either():
+    for empty in ({}, None, {"battle_zone": None}, {"battle_zone": "x"}):
+        assert W.micro(empty) == ""

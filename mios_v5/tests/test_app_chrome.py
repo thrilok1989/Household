@@ -70,14 +70,44 @@ def test_the_header_carries_price_change_and_both_biases():
     assert "Market open" in html and "15:22:04 IST" in html
 
 
-def test_the_price_is_coloured_by_the_move_and_the_bias_by_its_own_read():
-    """They are different facts. A bullish read on a down day is exactly the
-    disagreement worth seeing, so one colour may not stand in for the other."""
-    up = C.header_html(24650.0, 24580.0, "BEARISH")
-    assert T.BULL in up, "an up move is green even under a bearish read"
-    assert T.BEAR in up, "…and the bearish chip is still red"
+def _colour_of(html, needle):
+    """The colour on the span that renders `needle`."""
+    i = html.index(needle)
+    window = html[max(0, i - 120):i]
+    return window.rsplit("color:", 1)[-1].split(";")[0].split("'")[0].strip()
+
+
+def test_the_price_takes_the_bias_colour_and_the_change_takes_the_moves():
+    """⭐ The owner asked for this, and it is a real trade.
+
+    Both used to follow the move, so a down day painted the number red however
+    bullish the engines were. The price now follows the bias — the reading a
+    glance off a frozen strip is for.
+
+    The change keeps the MOVE's colour on purpose. Colouring both by bias would
+    leave a bullish read with nothing on the strip saying price is falling, and
+    green on a −80 is a contradiction a trader should see rather than one the
+    strip quietly resolves.
+    """
+    html = C.header_html(24500.0, 24580.0, "BULLISH", "BULLISH")
+    assert _colour_of(html, "24,500.00") == T.BULL, "price follows the bias"
+    assert _colour_of(html, "-80.00") == T.BEAR, "change still follows the move"
+
+
+def test_a_missing_bias_leaves_the_price_on_the_move():
+    """Never uncoloured: with nothing to take a side from, the move is the only
+    honest thing left to colour by."""
     down = C.header_html(24500.0, 24580.0)
-    assert T.BEAR in down and T.BULL not in down
+    assert _colour_of(down, "24,500.00") == T.BEAR
+    up = C.header_html(24650.0, 24580.0)
+    assert _colour_of(up, "24,650.00") == T.BULL
+
+
+def test_v6_wins_the_price_colour_and_v5_stands_in_when_it_is_silent():
+    both = C.header_html(24650.0, 24580.0, "BEARISH", "BULLISH")
+    assert _colour_of(both, "24,650.00") == T.BULL, "V6 is the newer engine"
+    only_v5 = C.header_html(24650.0, 24580.0, "BEARISH", None)
+    assert _colour_of(only_v5, "24,650.00") == T.BEAR
 
 
 def test_no_previous_close_means_no_change_rather_than_a_flat_one():
@@ -431,3 +461,108 @@ def test_the_footer_renders_into_a_slot_when_given_one():
     C.render_footer(Page(), Slot(), updated="15:22")
     C.render_footer(Page(), None, updated="15:22")
     assert [w for w, _ in drawn] == ["slot", "page"]
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  the second row
+# ══════════════════════════════════════════════════════════════════════
+
+_EXTRAS = ["🛡 24,558 brk 44 · rej 56", "🧱 24,608 brk 49 · rej 51",
+           "⚔️ ₹24,561 · Sellers · bounce 35 · breakdown 65",
+           "⚡ C46 P41 · spk C65 P61"]
+
+
+def test_the_extras_row_carries_every_reading_it_was_given():
+    html = C.header_html(24650.3, 24580.0, extras=_EXTRAS)
+    for probe in ("24,558", "rej 56", "24,608", "24,561", "Sellers",
+                  "breakdown 65", "C46 P41", "spk C65 P61"):
+        assert probe in html, probe
+
+
+def test_no_extras_draws_no_row():
+    """The strip is frozen at the top, so a row it grows costs that space on
+    every screen for the session. An empty one earns nothing."""
+    assert "flex-basis" not in C.header_html(24650.3, 24580.0)
+    assert "flex-basis" not in C.header_html(24650.3, 24580.0, extras=[])
+
+
+def test_a_blank_reading_is_dropped_rather_than_drawn_hollow():
+    assert "flex-basis" not in C.header_html(
+        24650.3, 24580.0, extras=["", "  ", None, "UNKNOWN"])
+
+
+def test_the_extras_are_escaped():
+    html = C.header_html(24650.3, 24580.0, extras=["<script>x</script>"])
+    assert "<script>" not in html and "&lt;script&gt;" in html
+
+
+def test_the_readings_are_worded_by_the_panels_that_own_them():
+    """The header collects; it does not phrase. Otherwise the strip and the
+    panel further down the page can describe one fact two ways."""
+    from mios_v5.ui.premium_energy_panel import micro as pe_micro
+    from mios_v5.ui.war_zone import micro as wz_micro
+    from mios_v5.ui.zone_card import zone_micro
+
+    assert zone_micro({"side": "SUPPORT", "price": 24558,
+                       "probabilities": {"break": 44, "rejection": 56}}) \
+        == "🛡 24,558 brk 44 · rej 56"
+    assert wz_micro({"battle_zone": {"type": "SUPPORT", "price": 24561},
+                     "expected_winner": "Contested"}) \
+        == "⚔️ ₹24,561 · Contested"
+    assert pe_micro({"ready": True, "call": {"energy": 46, "spike": 65},
+                     "put": {"energy": 41, "spike": 61}}) \
+        == "⚡ C46 P41 · spk C65 P61"
+
+
+def test_both_odds_travel_on_the_level_chip():
+    """`brk 44 · rej 56` are complements, and printing one is the edit that
+    lets a reader supply the other from a wrong prior."""
+    from mios_v5.ui.zone_card import zone_micro
+    line = zone_micro({"side": "SUPPORT", "price": 24558,
+                       "probabilities": {"break": 44, "rejection": 56}})
+    assert "brk 44" in line and "rej 56" in line
+
+
+def test_both_energy_rows_survive_the_shortest_form():
+    """Participation and expansion routinely point opposite ways, so the
+    second one is not the thing to cut when space runs out."""
+    from mios_v5.ui.premium_energy_panel import micro
+    line = micro({"ready": True, "call": {"energy": 46, "spike": 65},
+                  "put": {"energy": 41, "spike": 61}})
+    assert "C46 P41" in line and "C65 P61" in line
+
+
+def test_a_source_that_reported_nothing_contributes_nothing():
+    from mios_v5.ui.premium_energy_panel import micro as pe_micro
+    from mios_v5.ui.war_zone import micro as wz_micro
+    from mios_v5.ui.zone_card import zone_micro
+    assert zone_micro(None) == "" and zone_micro({"side": "SUPPORT"}) == ""
+    assert wz_micro({}) == "" and wz_micro(None) == ""
+    assert pe_micro({"ready": False}) == "" and pe_micro(None) == ""
+
+
+def test_the_extras_are_collected_not_phrased_by_the_app():
+    """`_chrome_extras` calls each owner's `micro`; it builds no strings of its
+    own beyond joining them."""
+    tree = ast.parse((ROOT / "vob_minimal.py").read_text())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_chrome_extras")
+    called = {getattr(c.func, "id", "") or getattr(c.func, "attr", "")
+              for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    assert {"zone_micro"} <= called
+    assert any("micro" in c for c in called)
+    # no f-string assembling a reading here
+    assert not [n for n in ast.walk(fn) if isinstance(n, ast.JoinedStr)]
+
+
+def test_the_extras_survive_the_priming_render():
+    """Primed from `_chrome_last`, so the second row does not blink out on
+    every refresh either."""
+    src = (ROOT / "vob_minimal.py").read_text()
+    tree = ast.parse(src)
+    for name in ("_render_app_chrome", "_prime_app_chrome"):
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                  and n.name == name)
+        literals = {n.value for n in ast.walk(fn)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        assert "extras" in literals, name
