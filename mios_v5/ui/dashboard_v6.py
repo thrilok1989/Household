@@ -1018,6 +1018,30 @@ def _leg_levels(st, tag) -> Dict[str, Any]:
     return out
 
 
+def _leg_projected(st, tag, nifty_df, spot_levels) -> Dict[str, Any]:
+    """NIFTY's levels read off this leg's own axis — the ⇢ lines.
+
+    The war zone, the gamma flip and the liquidity pool exist only in index
+    points, so the terminal has never drawn them on a premium panel and was
+    right not to: 24,558 on an axis running ₹60–₹180 is a line at a price the
+    series can never trade.
+
+    The question behind the request is still a fair one — *what was this leg
+    worth the last time NIFTY was at the war zone?* — and it has a measured
+    answer, because all three panels share one timeline. `leg_projection`
+    reads it off today's bars. Nothing is priced; a level the session has not
+    reached returns nothing and draws nothing.
+    """
+    if not tag or nifty_df is None or not spot_levels:
+        return {}
+    try:
+        from .leg_projection import project_levels
+        leg = (st.session_state.get("_atm_leg_dfs") or {}).get(tag)
+        return project_levels(nifty_df, leg, spot_levels)
+    except Exception:
+        return {}
+
+
 def _leg_money_flow(st, tag, row: Dict[str, Any]) -> Dict[str, Any]:
     """The leg's money flow, read from what the app already computed.
 
@@ -1226,13 +1250,25 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
         "NIFTY": _nifty_prof, "CALL": _call_prof, "PUT": _put_prof,
         "call_label": ce, "put_label": pe}
 
+    # ── ⇢ the index's levels, read off each leg's own axis ──
+    # Requested so the LTP panels carry the same picture as NIFTY. They are not
+    # copied across — a spot number on a premium axis is meaningless — but
+    # measured: what the leg actually traded at the last few times NIFTY was
+    # near each level. Levels the session has not reached simply do not appear.
+    _call_levels = _leg_levels(st, ce)
+    _put_levels = _leg_levels(st, pe)
+    _call_proj = _leg_projected(st, ce, nifty, levels)
+    _put_proj = _leg_projected(st, pe, nifty, levels)
+    _call_levels.update(_call_proj)
+    _put_levels.update(_put_proj)
+
     try:
         fig, notes = terminal_chart(
             nifty, call_df, put_df, levels, htf_levels=htf,
             call_label=ce or "ATM Call", put_label=pe or "ATM Put",
             tint=dom.get("tint"), dominance=dom.get("side", "neutral"),
             signal=dec, window_minutes=window,
-            call_levels=_leg_levels(st, ce), put_levels=_leg_levels(st, pe),
+            call_levels=_call_levels, put_levels=_put_levels,
             call_zones=_leg_store(st, "_atm_leg_vob_volume", ce),
             put_zones=_leg_store(st, "_atm_leg_vob_volume", pe),
             nifty_profile=_nifty_prof,
@@ -1265,6 +1301,16 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
             "buyers are still adding, falling means they have stopped. Its "
             "shape is the signal; it is scaled into the panel, so its height "
             "carries no price meaning.")
+        # Principle 12: a line a trader reads the panel by has to say where its
+        # number came from. Silent when nothing projected — a legend for lines
+        # that are not on the chart is noise.
+        try:
+            from .leg_projection import caption as _proj_caption
+            _line = _proj_caption({**_call_proj, **_put_proj})
+            if _line:
+                st.caption(_line)
+        except Exception:
+            pass
     except Exception as err:
         st.caption(f"Terminal chart unavailable: {err}")
 
