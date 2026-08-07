@@ -156,3 +156,34 @@ def test_it_meters_the_raw_client_not_the_cached_wrapper():
     arg = installs[0].args[0]
     assert getattr(arg, "attr", "") == "client", (
         "meter the raw PostgREST client, not the cache-wrapped object")
+
+
+def test_the_report_carries_the_cache_hit_rate():
+    """The other half of the picture.
+
+    A cache hit by definition leaves no trace in this meter — the request never
+    reaches PostgREST — so bytes alone cannot tell "the cache is working" from
+    "nothing asked". The hit rate comes from `read_cache`'s own counters rather
+    than being re-counted here.
+    """
+    E.record("t", "select", [{"a": 1}])
+    rep = E.report()
+    assert "cache" in rep
+    assert set(rep["cache"]) >= {"calls", "fetches", "hits", "hit_pct"}
+
+
+def test_the_summary_reports_the_hit_rate_when_there_were_calls(monkeypatch):
+    monkeypatch.setattr(E, "cache_stats", lambda: {
+        "calls": 100, "fetches": 7, "hits": 93, "hit_pct": 93})
+    E.record("t", "select", [{"a": 1}])
+    line = E.summary_line(E.report())
+    assert "cache 93% hit" in line
+    assert "93/100 served without a request" in line
+
+
+def test_no_cache_activity_says_nothing_rather_than_zero_percent():
+    """0% hit with zero calls would read as a broken cache, not an idle one."""
+    E.record("t", "select", [{"a": 1}])
+    rep = E.report()
+    rep["cache"] = {"calls": 0, "fetches": 0, "hits": 0, "hit_pct": 0}
+    assert "cache" not in E.summary_line(rep)
