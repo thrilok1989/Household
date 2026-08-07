@@ -187,8 +187,20 @@ def draw(fig, row: int, col: int,
          rows: Optional[Sequence[Mapping[str, Any]]] = None,
          profile: Optional[Mapping[str, Any]] = None,
          shape: Optional[Any] = None,
-         max_opacity: float = MAX_OPACITY) -> Dict[str, int]:
+         max_opacity: float = MAX_OPACITY,
+         labels_inside: bool = False) -> Dict[str, int]:
     """Add the profile to one panel. Returns what was drawn.
+
+    `labels_inside` turns the POC/VAH/VAL text back into the panel instead of
+    letting it run off the right-hand edge.
+
+    ⚠️ It exists because Plotly's `annotation_position="right"` means *outside*:
+    it resolves to `x=1, xanchor="left"`, so the label starts at the right edge
+    and continues past it. On the index panel that overhang lands in the gap
+    between columns and reads fine. On the two option panels — the rightmost
+    column, against an 8px figure margin — it was being **cut off**, so those
+    charts have been drawing a POC line whose label the reader could not see.
+    Callers pass True for any panel with nothing to its right.
 
     Advisory in the strongest sense: it is wrapped so a malformed profile can
     never take the chart down. A terminal that fails to render because one
@@ -210,6 +222,8 @@ def draw(fig, row: int, col: int,
                           line_color=lv["colour"],
                           annotation_text=lv["label"],
                           annotation_position="right",
+                          annotation=(dict(xanchor="right") if labels_inside
+                                      else None),
                           annotation_font=dict(size=8, color=lv["colour"]))
             drawn["levels"] += 1
 
