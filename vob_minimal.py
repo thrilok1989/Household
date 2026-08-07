@@ -14568,8 +14568,42 @@ def _render_main_analyzer():
         pytz.timezone('Asia/Kolkata')).strftime("%Y-%m-%d %H:%M:%S IST"))
 
 
+def _render_app_chrome(slot):
+    """Fill the header slot, set the browser tab, and close with the footer.
+
+    Runs AFTER the cycle so the strip carries this cycle's spot rather than the
+    previous one's under a live timestamp. Every value is read from a producer
+    that already owns it — `_mios_market_read` for spot and the two biases,
+    `_gap_today` for the previous close, `_is_market_open` for the clock. This
+    computes none of them.
+    """
+    try:
+        from mios_v5.ui.app_chrome import (CHROME_VERSION, render_footer,
+                                           render_header, render_tab_title)
+    except Exception:
+        return
+    market = _mios_market_read() or {}
+    spot = market.get("spot")
+    v5, v6 = market.get("v5"), market.get("v6")
+    prev_close = (st.session_state.get('_gap_today') or {}).get('prev_close')
+    clock = "🟢 Market open" if _is_market_open else "⚪ Market closed"
+    updated = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S IST")
+
+    render_header(st, slot, spot=spot, prev_close=prev_close, v5=v5, v6=v6,
+                  market=clock, updated=updated)
+    # The tab carries V6 — the newer engine — and falls back to V5 when V6 has
+    # not reported. One glyph fits; showing both would need two and read as a
+    # disagreement nobody can act on from a background tab.
+    render_tab_title(st, spot=spot, bias=v6 or v5)
+    render_footer(st, updated=updated, market=clock, version=CHROME_VERSION)
+
+
 def main():
-    st.title("📈 Nifty Trading & Options Analyzer")
+    # A placeholder, not a title: the header belongs at the TOP of the page and
+    # its values arrive at the BOTTOM of the cycle. Writing it now would print
+    # the previous cycle's price under a live timestamp, which is worse than a
+    # blank strip for the second it takes to fill.
+    _chrome_slot = st.empty()
 
     # ── hot-path measurement · OFF unless MIOS_PROFILE=1 ──────────────
     # The duplication survey counted 11 call sites for
@@ -14586,6 +14620,13 @@ def main():
         _prof = None
 
     _render_main_analyzer()
+
+    # Header, tab title and footer — after the cycle, so they carry its values.
+    # Guarded: chrome may never take the app down with it.
+    try:
+        _render_app_chrome(_chrome_slot)
+    except Exception:
+        pass
 
     # Flushed per rerun, not per session: the question is what ONE cycle
     # costs, and a running total answers something else.

@@ -87,3 +87,41 @@ def test_the_semantic_accents_are_unchanged():
 def test_no_shared_map_uses_a_retired_grey():
     assert not (set(T.BIAS_TONE.values()) & set(T.RETIRED))
     assert not (set(T.GRADE_TONE.values()) & set(T.RETIRED))
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  the vocabulary the engines actually publish
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_labels_the_engines_really_emit_get_a_colour():
+    """⭐ Exact lookup silently broke the colour code.
+
+    Stage 27 and Stage 71 publish `BULLISH`, `STRONG BULLISH`, `BEARISH` — the
+    wording that reaches the header and the Telegram message. The maps are
+    keyed `BULL`/`BEAR`/`NEUTRAL`, so every real label fell through to the
+    default: white text and a ⚪ on a strongly bullish read.
+    """
+    for label in ("BULLISH", "STRONG BULLISH", "Bullish", "bullish"):
+        assert T.bias_tone(label) == T.BULL, label
+        assert T.bias_emoji(label) == "🟢", label
+    for label in ("BEARISH", "STRONG BEARISH", "Bearish"):
+        assert T.bias_tone(label) == T.BEAR, label
+        assert T.bias_emoji(label) == "🔴", label
+
+
+def test_the_short_vocabulary_still_resolves():
+    assert T.bias_tone("BULL") == T.BULL and T.bias_tone("BEAR") == T.BEAR
+    assert T.bias_tone("NEUTRAL") == T.WARN
+
+
+def test_a_word_that_is_not_a_bias_still_takes_the_default():
+    """Widening the match must not turn every string into a direction."""
+    for junk in ("SIDEWAYS", "CHOP", "UNKNOWN", "", None, "  "):
+        assert T.bias_tone(junk, default=T.MUTED) == T.MUTED, junk
+        assert T.bias_emoji(junk) == "⚪", junk
+
+
+def test_the_match_order_is_fixed_not_dict_order():
+    """A colour that depends on insertion order is a bug waiting for an
+    alphabetised refactor."""
+    assert T._BIAS_KEYS == ("NEUTRAL", "BEAR", "BULL")
