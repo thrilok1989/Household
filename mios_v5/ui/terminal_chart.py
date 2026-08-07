@@ -16,9 +16,17 @@ the requested proportions **and** real synchronised zoom, pan and crosshair.
 `matches="x"` rather than `shared_xaxes=True`: the latter only links subplots
 within a column, and NIFTY is in a different column from the option legs.
 
-Levels are drawn on the NIFTY panel only. Overlaying a spot-derived stop on an
-option's price series would put a line at a price that series can never trade —
-authoritative-looking and meaningless.
+Each panel's levels belong to its own axis. Overlaying a spot-derived stop on
+an option's price series would put a line at a price that series can never
+trade — authoritative-looking and meaningless. So the option panels draw the
+legs' own levels, from the legs' own engines, in premium.
+
+The one exception is `⇢` projected levels, and it is an exception only in
+appearance: `leg_projection` reports what a leg **actually traded at** the last
+few times NIFTY was near the level. That number is measured off the shared
+timeline, not converted from index points, so it belongs to the premium axis
+like every other line on the panel. It is drawn `longdashdot` and labelled with
+an arrow so it is never mistaken for the leg's own structure.
 
 Tinting is applied as a below-layer rectangle rather than a plot background so
 the candles keep their own colours. A chart whose body colour competes with its
@@ -60,6 +68,23 @@ LEVELS = {
     # at, and drawing them at equal weight buries the POC among its own bins.
     "hvn":         ("#d9c15a", "dot",     1.0),
     "lvn":         ("#6b7a8f", "dot",     1.0),
+    # ── ⇢ projected: a NIFTY level read off the premium axis ──
+    # These are the ONLY spot-derived levels allowed on a premium panel, and
+    # they are allowed because they are not spot-derived by the time they get
+    # here: `leg_projection` reports what the leg actually traded at the last
+    # few times NIFTY was near the level. Measured, not modelled.
+    #
+    # Every one is `longdashdot` — a dash pattern used by nothing else — so
+    # "this line came from the other chart" is legible without reading the
+    # label. Each keeps its family's colour so it still reads as a war zone or
+    # a gamma flip.
+    "proj_war_zone":   ("#ffcc33", "longdashdot", 1.2),
+    "proj_gamma_flip": ("#a78bfa", "longdashdot", 1.2),
+    "proj_liquidity":  ("#4da6ff", "longdashdot", 1.1),
+    "proj_support":    ("#17c98b", "longdashdot", 1.1),
+    "proj_resistance": ("#ff8c8c", "longdashdot", 1.1),
+    "proj_poc":        ("#ffe066", "longdashdot", 1.1),
+    "proj_vwap":       ("#c9b6ec", "longdashdot", 1.1),
 }
 
 LEVEL_LABEL = {
@@ -69,6 +94,13 @@ LEVEL_LABEL = {
     "val": "VAL", "gamma_flip": "Gamma Flip", "dealer_wall": "Dealer Wall",
     "charm_pin": "Charm Pin", "reaction": "Reaction",
     "hvn": "HVN", "lvn": "LVN",
+    # ⇢ marks a level measured off the index panel rather than computed from
+    # this leg's own structure. The arrow is the whole disclosure: a trader
+    # must never have to remember which of two lines is the borrowed one.
+    "proj_war_zone": "⇢ War Zone", "proj_gamma_flip": "⇢ Gamma Flip",
+    "proj_liquidity": "⇢ Liquidity", "proj_support": "⇢ Support",
+    "proj_resistance": "⇢ Resistance", "proj_poc": "⇢ POC",
+    "proj_vwap": "⇢ VWAP",
 }
 
 #: higher-timeframe POCs get their own dimmer treatment so they never compete
