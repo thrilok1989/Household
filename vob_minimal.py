@@ -14577,12 +14577,29 @@ def _render_app_chrome(slot):
     `_gap_today` for the previous close, `_is_market_open` for the clock. This
     computes none of them.
     """
+    # ⚠️ Loud, not silent.
+    #
+    # Every step below used to sit under one `except Exception: pass`, so a
+    # missing import or a market read that raised produced NOTHING — no header,
+    # no footer, no message — which is indistinguishable from the feature never
+    # having shipped. That is the exact failure this session has been removing
+    # everywhere else, and I reintroduced it here.
     try:
         from mios_v5.ui.app_chrome import (CHROME_VERSION, render_footer,
                                            render_header, render_tab_title)
-    except Exception:
+    except Exception as err:
+        st.warning(f"App header unavailable — `mios_v5.ui.app_chrome` did not "
+                   f"import: {err}")
         return
-    market = _mios_market_read() or {}
+
+    # The market read is best-effort: the header's job is to exist. A cycle
+    # that could not report a price still gets a strip, with dashes and the
+    # reason, rather than a blank page that looks like nothing was built.
+    market, read_err = {}, None
+    try:
+        market = _mios_market_read() or {}
+    except Exception as err:
+        read_err = err
     spot = market.get("spot")
     v5, v6 = market.get("v5"), market.get("v6")
     prev_close = (st.session_state.get('_gap_today') or {}).get('prev_close')
@@ -14591,6 +14608,8 @@ def _render_app_chrome(slot):
 
     render_header(st, slot, spot=spot, prev_close=prev_close, v5=v5, v6=v6,
                   market=clock, updated=updated)
+    if read_err is not None:
+        st.caption(f"Header values unavailable this cycle: {read_err}")
     # The tab carries V6 — the newer engine — and falls back to V5 when V6 has
     # not reported. One glyph fits; showing both would need two and read as a
     # disagreement nobody can act on from a background tab.
@@ -14622,11 +14641,13 @@ def main():
     _render_main_analyzer()
 
     # Header, tab title and footer — after the cycle, so they carry its values.
-    # Guarded: chrome may never take the app down with it.
+    # The chrome may never take the app down, but it may not vanish quietly
+    # either: a swallowed failure here looks exactly like the feature was never
+    # built, which is precisely the report that sent me looking for this.
     try:
         _render_app_chrome(_chrome_slot)
-    except Exception:
-        pass
+    except Exception as err:
+        st.warning(f"App header/footer failed to render: {err}")
 
     # Flushed per rerun, not per session: the question is what ONE cycle
     # costs, and a running total answers something else.
