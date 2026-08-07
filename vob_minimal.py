@@ -13480,6 +13480,20 @@ def render_clean_card(spot_price, option_data=None):
         except Exception:
             _pe_html = ""
 
+        # ── The war zone, in one line ──────────────────────────────────
+        # Same three published fields the V6 dashboard's strip reads —
+        # `battle_zone`, `expected_winner`, `probabilities` — through the panel
+        # that now owns both renderings. The compact form drops the wrapper
+        # words ("War zone", "expected winner"), never a number: bounce and
+        # breakdown are one reading, and showing only the winning side is the
+        # edit that turns "likely to give, but close" into "gives".
+        _wz_html = ""
+        try:
+            from mios_v5.ui.war_zone import compact_html as _wzhtml
+            _wz_html = _wzhtml(_mios_fr)
+        except Exception:
+            _wz_html = ""
+
         # ── MIOS V5 read (Analysis & Audit) — direction + Trade Quality.
         # DIRECTION comes from the SAME authoritative source as the MIOS
         # dashboard: the Conflict-Engine arbitrated preferred_bias in the final
@@ -13694,7 +13708,7 @@ def render_clean_card(spot_price, option_data=None):
                    f"{_sr_intel_html}</div>" if _sr_intel_html else
                    f"<div style='text-align:center;font-size:16px;margin-top:4px;"
                    f"font-weight:800;'>{_sr_line}</div>")
-                + _pe_html + _charm_html + _fs_html + _zh_html),
+                + _wz_html + _pe_html + _charm_html + _fs_html + _zh_html),
                 unsafe_allow_html=True)
 
         # ── 4 · DECISIONS — the three action verdicts, side by side. The Entry

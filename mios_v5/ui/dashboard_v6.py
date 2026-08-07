@@ -1260,20 +1260,15 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
 
 
 def _war_zone(st, fr: Dict[str, Any]) -> None:
-    bz = fr.get("battle_zone")
-    if not bz:
-        return
-    probs = fr.get("probabilities") or {}
-    st.markdown(
-        f"<div style='{_CARD};border-left:3px solid #ffcc33'>"
-        f"<span style='font-size:15px;font-weight:800;color:#ffcc33'>"
-        f"⚔️ War zone — {bz.get('type')} {_fmt(bz.get('price'))}</span>"
-        f"<span style='font-size:13px;color:#edf3f9'> → expected winner "
-        f"<b>{fr.get('expected_winner', '—')}</b></span>"
-        + ("".join(f"<span style='font-size:12px;color:#cfd9e6;margin-left:10px'>"
-                   f"{k} {_num(v):.0f}%</span>" for k, v in probs.items())
-           if probs else "")
-        + "</div>", unsafe_allow_html=True)
+    """Delegated to `war_zone.py`.
+
+    The markup used to live here, and the observational card above the app
+    needs the same fight in one line. Copying it would have given one fight two
+    wordings that drift apart; lifting it out gives both renderings one owner
+    and one source for `battle_zone`, `expected_winner` and `probabilities`.
+    """
+    from .war_zone import render as _render
+    _render(st, fr)
 
 
 def _price_map(st, fr: Dict[str, Any]) -> None:
