@@ -201,3 +201,69 @@ def test_the_old_static_title_is_gone():
     titles = [c for c in ast.walk(fn) if isinstance(c, ast.Call)
               and getattr(c.func, "attr", "") == "title"]
     assert not titles
+
+
+def test_the_tab_title_uses_the_api_that_can_actually_run_a_script():
+    """⚠️ Streamlit's own deprecation warning is misleading.
+
+    `st.components.v1.html` is deprecated with a removal date already past, and
+    the warning says to use `st.iframe`. But `st.iframe` takes a `src` URL and
+    cannot render markup at all — following the warning literally makes the tab
+    title silently stop working. The real replacement is `st.html` with
+    `unsafe_allow_javascript=True`, which is the only one of the three that
+    both accepts markup and lets a script run.
+    """
+    import inspect
+    import streamlit as st
+    assert "src" in inspect.signature(st.iframe).parameters, (
+        "st.iframe still takes a URL — it is not a markup renderer")
+    assert "unsafe_allow_javascript" in inspect.signature(st.html).parameters
+
+    src = SRC.read_text()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "render_tab_title")
+    body = "\n".join(src.splitlines()[fn.lineno - 1:(fn.end_lineno or fn.lineno)])
+    assert "unsafe_allow_javascript" in body
+    assert '"iframe"' not in body and "'iframe'" not in body
+
+
+def test_the_chrome_failure_is_loud_rather_than_swallowed():
+    """A swallowed failure here looks exactly like the feature was never built
+    — which is what it looked like, and why this test exists.
+
+    Scoped to the handlers that guard the CHROME. `main` also has a legitimate
+    silent handler: a disabled hot-path profiler sets `_prof = None` and has
+    nothing to announce, and asserting over every handler in the function
+    flagged that as a bug.
+    """
+    tree = ast.parse((ROOT / "vob_minimal.py").read_text())
+
+    def _guards(fn_name, needle):
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                  and n.name == fn_name)
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Try):
+                continue
+            calls = {getattr(c.func, "id", "") or getattr(c.func, "attr", "")
+                     for c in ast.walk(node) if isinstance(c, ast.Call)}
+            if needle in calls:
+                yield node
+
+    # the call site: a chrome that raises must say so
+    for node in _guards("main", "_render_app_chrome"):
+        spoken = {getattr(c.func, "attr", "") for h in node.handlers
+                  for c in ast.walk(h) if isinstance(c, ast.Call)}
+        assert spoken & {"warning", "error", "caption"}, (
+            "main swallows a chrome failure silently")
+
+    # …and the import guard inside, which used to `return` with no message
+    for node in _guards("_render_app_chrome", "render_header"):
+        pass
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_render_app_chrome")
+    silent = [h for t in ast.walk(fn) if isinstance(t, ast.Try)
+              for h in t.handlers
+              if not [c for c in ast.walk(h) if isinstance(c, ast.Call)]
+              and any(isinstance(x, ast.Return) for x in ast.walk(h))]
+    assert not silent, "_render_app_chrome returns silently on failure"

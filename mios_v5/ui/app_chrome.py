@@ -106,10 +106,30 @@ def tab_title_script(title: str) -> str:
 
 def render_tab_title(st, spot: Any = None, bias: Any = None,
                      name: str = APP_NAME) -> None:
-    """Set the tab title for this cycle. Never raises."""
+    """Set the tab title for this cycle. Never raises.
+
+    ⚠️ `st.components.v1.html` is deprecated with a stated removal date of
+    2026-06-01, already past; Streamlit 1.60.0 still ships it but prints a
+    deprecation line on every rerun.
+
+    The replacement is **`st.html(..., unsafe_allow_javascript=True)`**, not
+    `st.iframe` — Streamlit's own warning points at `st.iframe`, but that takes
+    a `src` URL and cannot render markup at all, so following the warning
+    literally silently does nothing. `st.html` is preferred here and the
+    deprecated component is the fallback, for a Streamlit old enough to lack
+    the flag.
+    """
+    markup = tab_title_script(tab_title(spot, bias, name))
+    render = getattr(st, "html", None)
+    if callable(render):
+        try:
+            render(markup, unsafe_allow_javascript=True)
+            return
+        except Exception:
+            pass
     try:
         from streamlit.components.v1 import html as _component
-        _component(tab_title_script(tab_title(spot, bias, name)), height=0)
+        _component(markup, height=0)
     except Exception:
         pass
 
