@@ -30,19 +30,37 @@ an hour bought nothing and cost the egress bill.
 So no call site changes. Wrap the object once where it is built and every
 consumer, panel and dashboard is cached at the same moment.
 
-## Three lifetimes, because "until reset" is wrong for some of it
+## Why there is no five-minute bucket any more
 
-The default is `STATIC` — cached until the app restarts, exactly as asked. Two
-carve-outs, and both are about not lying to a trader:
+There used to be an `INTRADAY` lifetime — five minutes, for "tables that grow
+*during* the session". Fourteen reads sat in it, and a fourteen-read set
+re-fetched every five minutes is **78 refetches each per trading day** whether
+or not a single row changed. `get_session_log` alone was asked at two different
+limits, 4,000 and 8,000 rows, 78 times a day: about 187 MB from one method.
+That treadmill was the bulk of a **1 GB day**.
 
-* **`LIVE`** (one refresh cycle) — *is there an open position right now?* A
-  frozen answer to that question is worse than a slow one. The TTL still caps
-  it at one fetch per cycle, so it is never worse than the old behaviour.
-* **`INTRADAY`** (five minutes) — tables that grow *during* the session. A
-  session log frozen at 09:20 would render an empty afternoon all day.
+It was also unnecessary, and an audit of every read against every write proves
+it: **every table this app reads, this app also writes.** Not one of them is
+filled by an outside process — `ws_worker.py` writes only `dhan_ticks` and
+`dhan_sweeps`, which nothing here reads. So a timer was being used to discover
+changes the app had made itself and already knew about.
 
-Everything else — the learning and history analytics, which is where the volume
-actually was — is `STATIC`.
+The replacement is exact rather than periodic:
+
+* `_INVALIDATES` maps **every** writer to the reads its table feeds, derived
+  from `supabase_client.py` and pinned by a test that re-derives it. A write
+  marks its reads stale.
+* A stale read is re-fetched on its next call — so rows this app just wrote
+  appear immediately, which a five-minute timer could not promise either.
+* `REFRESH_FLOOR` bounds the opposite failure: a table written *every cycle*
+  (`leg_flow_snapshots`, `nifty_spot_data`, `candles_data`) would otherwise
+  refetch 1,125 times a day, which is worse than the timer ever was.
+
+The result is that a quiet table is fetched **once per app lifetime**, exactly
+as asked, and a busy one is fetched at most once per floor.
+
+`LIVE` survives, for the handful of decision-critical "right now" reads. A
+frozen answer to *is there an open position?* is worse than a slow one.
 
 ## Empty results are held briefly, not discarded
 
@@ -75,11 +93,21 @@ import streamlit as st
 #: fetch per rerun without ever showing a stale position.
 LIVE_TTL = 20
 
-#: Five minutes. Long enough to remove ~93% of the fetches, short enough that
-#: a table growing during the session still appears while the session is on.
-INTRADAY_TTL = 300
+STATIC, LIVE = "static", "live"
 
-STATIC, INTRADAY, LIVE = "static", "intraday", "live"
+#: How often a written table may actually be re-read, in seconds.
+#:
+#: ⚠️ This is the guard that stops write-invalidation being *worse* than the
+#: five-minute timer it replaced. Most writes here are rare — a session log
+#: row, a graded trade — and for those the floor never binds: the read is stale,
+#: nothing has refreshed it yet, and the next call re-fetches at once.
+#:
+#: But three tables are written on **every** 20-second cycle —
+#: `leg_flow_snapshots`, `nifty_spot_data`, `candles_data`. Invalidating those
+#: on each write would re-read an all-day, still-growing table 1,125 times a
+#: day. The floor turns that back into 78, which is what the old timer cost,
+#: while leaving every quiet table at one fetch per app lifetime.
+REFRESH_FLOOR = 300
 
 #: How long an EMPTY result is trusted before the table is asked again.
 #:
@@ -130,8 +158,15 @@ _LIVE_READS: Tuple[str, ...] = (
     "count_trade_signals_today",
 )
 
-#: Tables that grow during the trading session.
-_INTRADAY_READS: Tuple[str, ...] = (
+#: Every read on `SupabaseDB`. Anything here that is not LIVE is STATIC —
+#: fetched once, then served from cache until this app writes its table or
+#: resets. That is the rule as asked for: *use Supabase only if the data is not
+#: available in the Streamlit cache, or when the app gets reset.*
+#:
+#: A method absent from this tuple is **not cached at all** and goes straight
+#: through, which is the safe direction for a read this file has never seen.
+_READS: Tuple[str, ...] = _LIVE_READS + (
+    # ── written during the session; a timer used to re-ask these 78×/day ──
     "get_trade_signals", "get_mios_decisions", "get_engine_state",
     "get_session_log", "get_session_recommendations", "get_session_validation",
     "get_day_type_log", "get_alerts_history", "get_alert_side_counts",
@@ -143,14 +178,6 @@ _INTRADAY_READS: Tuple[str, ...] = (
     "get_option_chain", "get_atm_strike_data", "get_orderbook",
     "get_pcr_history", "get_gex_history", "get_bid_ask_history",
     "get_volume_delta_history", "get_max_pain_history",
-)
-
-#: Every read on `SupabaseDB`. Anything here that is not LIVE or INTRADAY is
-#: STATIC — fetched once, then served from cache until the app resets.
-#:
-#: A method absent from this tuple is **not cached at all** and goes straight
-#: through, which is the safe direction for a read this file has never seen.
-_READS: Tuple[str, ...] = _LIVE_READS + _INTRADAY_READS + (
     # ── the learning / history analytics: where the 30,800 rows lived ──
     "get_engine_attribution", "get_trade_attribution", "get_trade_events",
     "get_trade_results", "get_learning_snapshots",
@@ -161,67 +188,178 @@ _READS: Tuple[str, ...] = _LIVE_READS + _INTRADAY_READS + (
     # ── candle history: append-only, and the source of a full-table scan ──
     "get_available_candle_series", "get_candle_trading_days",
     "get_candles_for_day", "get_backfill_progress",
+    "latest_candle_day_before",
     # ── the rest ──
-    # Stage 74 calibration evidence — a week of samples, read to render a
-    # distribution. It grows by one row a minute, so INTRADAY would refetch
-    # thousands of rows to gain sixty; STATIC plus the write-invalidation below
-    # is the right trade.
     "get_liquidity_telemetry",
     "get_option_chain_history", "get_atm_iv_history", "get_market_analytics",
     "get_user_preferences", "get_leg_flow_days", "get_trade_history",
     "count_rows", "fetch_all_rows",
 )
 
-#: Which cached reads a write makes stale. A write that is not listed clears
-#: nothing — it is better to leave a cache alone than to guess wrong and
-#: re-fetch eight thousand rows because an unrelated row was inserted.
+#: Which cached reads a write makes stale — **every** writer, not a hand-picked
+#: few, because the timer that used to cover the gaps is gone.
+#:
+#: ⚠️ Derived from `db/supabase_client.py` by matching each writer's table
+#: against each reader's, and re-derived by
+#: `test_read_cache.test_every_writer_marks_every_read_of_its_table`. A new
+#: read/write pair added to the client without a line here fails that test,
+#: which is the only thing standing between "cached until reset" and "stale
+#: until restart".
 _INVALIDATES: Dict[str, Tuple[str, ...]] = {
-    "insert_trade_signal": ("get_trade_signals", "count_trade_signals_today"),
-    "update_trade_signal": ("get_trade_signals", "get_active_trade_signal"),
+    "insert_alert_log": ("get_alert_side_counts",),
+    "insert_bias_prediction": ("get_bias_predictions",
+                               "get_open_bias_predictions"),
+    "insert_day_type": ("get_day_type_log",),
     "insert_engine_attribution": ("get_engine_attribution",),
-    "insert_trade_attribution": ("get_trade_attribution",),
-    "insert_trade_event": ("get_trade_events",),
-    "insert_trade_result": ("get_trade_results",),
+    "insert_engine_error": ("get_engine_errors",),
+    "insert_engine_state": ("get_engine_state",),
+    "insert_entry_gate_signal": ("get_entry_gate_signals", "get_layer_outcomes",
+                                 "get_resolved_entry_gate_signals"),
     "insert_learning_snapshot": ("get_learning_snapshots",),
+    "insert_leg_entry_signal": ("get_leg_entry_signals",),
+    "insert_leg_flow_snapshot": ("get_leg_flow_days", "get_leg_flow_snapshots"),
+    "insert_liquidity_telemetry": ("get_liquidity_telemetry",),
+    "insert_market_event": ("get_market_events",),
+    "insert_market_story": ("get_market_stories",),
+    "insert_mios_decision": ("get_mios_decisions",),
     "insert_session_log": ("get_session_log",),
     "insert_session_recommendations": ("get_session_recommendations",),
     "insert_session_validation": ("get_session_validation",),
-    "insert_day_type": ("get_day_type_log",),
-    "insert_engine_state": ("get_engine_state",),
-    "insert_market_event": ("get_market_events",),
-    "insert_market_story": ("get_market_stories",),
+    "insert_signal_outcome": ("get_signal_outcomes",),
     "insert_story_validation": ("get_story_validations",),
-    "upsert_story_stats": ("get_story_stats",),
-    "upsert_my_analysis": ("get_my_analysis",),
-    "insert_engine_error": ("get_engine_errors",),
-    "insert_entry_gate_signal": ("get_entry_gate_signals",),
-    "update_entry_gate_signal": ("get_entry_gate_signals",
-                                 "get_resolved_entry_gate_signals",
-                                 "get_layer_outcomes"),
-    "insert_bias_prediction": ("get_bias_predictions",
-                               "get_open_bias_predictions"),
+    "insert_trade_attribution": ("get_trade_attribution",),
+    "insert_trade_event": ("get_trade_events",),
+    "insert_trade_result": ("get_trade_results",),
+    "insert_trade_signal": ("count_trade_signals_today",
+                            "get_active_trade_signal", "get_trade_signals"),
+    "save_market_analytics": ("get_market_analytics",),
+    "save_trade_config": ("get_trade_config",),
+    "save_user_preferences": ("get_user_preferences",),
     "update_bias_prediction": ("get_bias_predictions",
                                "get_open_bias_predictions"),
-    "insert_leg_flow_snapshot": ("get_leg_flow_snapshots", "get_leg_flow_days"),
-    "insert_leg_entry_signal": ("get_leg_entry_signals",),
-    "insert_signal_outcome": ("get_signal_outcomes",),
+    "update_entry_gate_signal": ("get_entry_gate_signals", "get_layer_outcomes",
+                                 "get_resolved_entry_gate_signals"),
     "update_signal_outcome": ("get_signal_outcomes",),
-    "insert_mios_decision": ("get_mios_decisions",),
+    "update_trade_signal": ("count_trade_signals_today",
+                            "get_active_trade_signal", "get_trade_signals"),
+    "upsert_alert": ("get_alerts_history",),
+    "upsert_atm_strike_data": ("get_atm_strike_data",),
+    "upsert_auto_trade": ("get_active_trade", "get_trade_history"),
     "upsert_backfill_progress": ("get_backfill_progress",),
-    "save_trade_config": ("get_trade_config",),
-    "insert_liquidity_telemetry": ("get_liquidity_telemetry",),
-    "save_user_preferences": ("get_user_preferences",),
+    "upsert_bid_ask_history": ("get_bid_ask_history",),
+    "upsert_candles": ("get_available_candle_series", "get_candle_trading_days",
+                       "get_candles", "get_candles_for_day",
+                       "latest_candle_day_before"),
+    "upsert_daily_atm_iv": ("get_atm_iv_history",),
+    "upsert_detected_patterns": ("get_detected_patterns",),
+    "upsert_event_impact": ("get_event_impact_log",),
+    "upsert_gex_history": ("get_gex_history",),
+    "upsert_master_signal": ("get_master_signals",),
+    "upsert_max_pain": ("get_max_pain_history",),
+    "upsert_my_analysis": ("get_my_analysis",),
+    "upsert_oc_signal": ("get_oc_signals",),
+    "upsert_opening_auction": ("get_opening_auction_log",),
+    "upsert_option_chain": ("get_option_chain", "get_option_chain_history"),
+    "upsert_orderbook": ("get_orderbook",),
+    "upsert_pcr_history": ("get_pcr_history",),
+    "upsert_spot_data": ("get_day_open_spot", "get_latest_spot",
+                         "get_spot_history"),
+    "upsert_story_stats": ("get_story_stats",),
+    "upsert_volume_delta_history": ("get_volume_delta_history",),
 }
 
 _STATS_KEY = "_db_cache_stats"
 
 
 def _bucket(method: str) -> str:
-    if method in _LIVE_READS:
-        return LIVE
-    if method in _INTRADAY_READS:
-        return INTRADAY
-    return STATIC
+    return LIVE if method in _LIVE_READS else STATIC
+
+
+#: method → the cache keys currently believed to hold a value.
+#:
+#: ⚠️ Module-level, not `session_state`, because `st.cache_data` is **global to
+#: the server process** — an entry cached by one browser tab is served to the
+#: next. Tracking live keys per session would leave another session's entry
+#: uncleared after a write, which is exactly the stale read this file must not
+#: produce.
+#:
+#: It exists so a write can clear *its own* read. Streamlit clears by argument,
+#: and without a record of which arguments are live the only available action
+#: was `fetch.clear()` — the whole bucket. That is how invalidating one small
+#: table used to dump `get_engine_attribution`'s 8,000 rows along with it.
+_LIVE_KEYS: Dict[str, set] = {}
+
+#: method → when a write last marked it stale, and when a refresh last ran.
+_STALE: Dict[str, float] = {}
+_REFRESHED: Dict[str, float] = {}
+
+
+def _remember(method: str, signature: Tuple[Any, ...]) -> None:
+    """Record a key so a later write can clear precisely this entry."""
+    keys = _LIVE_KEYS.setdefault(method, set())
+    if len(keys) < _KEYS_CAP:
+        keys.add(signature)
+
+
+def _clear_entries(method: str) -> None:
+    """Drop the cached entries for one method, and nothing else.
+
+    Falls back to clearing the whole bucket only when the key record is
+    unusable — absent, or capped and therefore incomplete. Coarse and correct
+    beats precise and wrong: a missed entry is a stale read, and this file has
+    no way to detect one.
+    """
+    fetch = _FETCHERS[_bucket(method)]
+    keys = _LIVE_KEYS.get(method)
+    if not keys or len(keys) >= _KEYS_CAP:
+        try:
+            fetch.clear()
+        except Exception:
+            pass
+        return
+    for signature in tuple(keys):
+        try:
+            # `_db`, `_args` and `_kwargs` are excluded from the hash, so
+            # placeholders address the same entry the real call created.
+            fetch.clear(None, method, signature, None, None)
+        except Exception:
+            pass
+    keys.clear()
+
+
+def mark_stale(*methods: str) -> None:
+    """A write happened. Note it; the refetch is decided at the next read.
+
+    Deliberately not an immediate clear. A table written every 20-second cycle
+    would otherwise be re-read 1,125 times a day — worse than the five-minute
+    timer this replaced. `_refresh_if_stale` applies `REFRESH_FLOOR`.
+    """
+    now = _time.time()
+    for method in methods:
+        _STALE[method] = now
+
+
+def _refresh_if_stale(method: str) -> None:
+    """Re-ask a written table, at most once per `REFRESH_FLOOR`.
+
+    The floor does not bind on the first write after a fetch — `_REFRESHED` is
+    unset, so the very next read goes to Supabase. That is what keeps the
+    promise a timer never made: **rows this app just wrote are visible on the
+    next call.** It binds only on the second and later writes inside the
+    window, which is the per-cycle case it exists for.
+
+    LIVE reads have no floor. They are single rows, and a frozen answer to *is
+    there an open position?* is the one staleness that is never acceptable.
+    """
+    if method not in _STALE:
+        return
+    floor = 0 if method in _LIVE_READS else REFRESH_FLOOR
+    now = _time.time()
+    if now - _REFRESHED.get(method, 0.0) < floor:
+        return
+    _STALE.pop(method, None)
+    _REFRESHED[method] = now
+    _clear_entries(method)
 
 
 #: `inspect.signature` per method, computed once. Binding on every call would
@@ -405,25 +543,21 @@ def _fetch_static(_db, method, signature, _args, _kwargs):
     return _invoke(_db, method, signature, _args, _kwargs)
 
 
-@st.cache_data(ttl=INTRADAY_TTL, show_spinner=False)
-def _fetch_intraday(_db, method, signature, _args, _kwargs):
-    return _invoke(_db, method, signature, _args, _kwargs)
-
-
 @st.cache_data(ttl=LIVE_TTL, show_spinner=False)
 def _fetch_live(_db, method, signature, _args, _kwargs):
     return _invoke(_db, method, signature, _args, _kwargs)
 
 
-_FETCHERS = {STATIC: _fetch_static, INTRADAY: _fetch_intraday, LIVE: _fetch_live}
+_FETCHERS = {STATIC: _fetch_static, LIVE: _fetch_live}
 
 
 def invalidate(*methods: str) -> None:
-    """Drop cached reads. No arguments clears every bucket.
+    """Drop cached reads **now**, unconditionally. No arguments clears all.
 
-    Called after a write, and by the sidebar's Refresh button — the manual
-    equivalent of an app reset, for when a trader wants the analytics re-read
-    without restarting.
+    The manual escape hatch — the sidebar's Refresh button, and the equivalent
+    of an app reset for a trader who wants the analytics re-read without
+    restarting. The write path uses `mark_stale` instead, which respects
+    `REFRESH_FLOOR`.
     """
     if not methods:
         for fetch in _FETCHERS.values():
@@ -431,15 +565,14 @@ def invalidate(*methods: str) -> None:
                 fetch.clear()
             except Exception:
                 pass
+        _LIVE_KEYS.clear()
+        _STALE.clear()
+        _REFRESHED.clear()
         return
-    # Streamlit clears per-entry by argument, and this layer does not track
-    # which argument combinations are live — so a targeted invalidation clears
-    # the whole bucket that method belongs to. Coarse, and correct.
     for method in methods:
-        try:
-            _FETCHERS[_bucket(method)].clear()
-        except Exception:
-            pass
+        _STALE.pop(method, None)
+        _REFRESHED.pop(method, None)
+        _clear_entries(method)
 
 
 def stats() -> Dict[str, int]:
@@ -504,6 +637,11 @@ class CachedDB:
             _bump("calls")
             signature = _canonical(target, method, args, kwargs)
             _note_key(method, signature)
+            _remember(method, signature)
+            # A write since the last read gets honoured here rather than at
+            # write time, so a per-cycle writer cannot turn every rerun into a
+            # refetch of an all-day table.
+            _refresh_if_stale(method)
             fetch = _FETCHERS[_bucket(method)]
             result = fetch(self._db, method, signature, args, kwargs)
             if _empty(result):
@@ -534,7 +672,7 @@ class CachedDB:
     def _writing(self, method: str, target: Callable) -> Callable[..., Any]:
         def call(*args, **kwargs):
             result = target(*args, **kwargs)
-            invalidate(*_INVALIDATES[method])
+            mark_stale(*_INVALIDATES[method])
             return result
         call.__name__ = method
         return call

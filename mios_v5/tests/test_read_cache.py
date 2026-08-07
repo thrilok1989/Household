@@ -156,12 +156,12 @@ def test_an_omitted_default_matches_the_same_value_passed_explicitly(pair):
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  the three lifetimes
+#  the two lifetimes
 # ══════════════════════════════════════════════════════════════════════
 
 def test_the_buckets_are_what_the_module_says_they_are():
     assert RC._bucket("get_engine_attribution") == RC.STATIC
-    assert RC._bucket("get_session_log") == RC.INTRADAY
+    assert RC._bucket("get_session_log") == RC.STATIC
     assert RC._bucket("get_active_trade") == RC.LIVE
     assert RC._bucket("anything_unlisted") == RC.STATIC
 
@@ -174,9 +174,23 @@ def test_a_live_read_is_never_frozen_until_restart():
         assert RC._bucket(name) == RC.LIVE
 
 
-def test_intraday_reads_expire_while_the_session_is_still_running():
-    """A session log frozen at 09:20 would render an empty afternoon all day."""
-    assert 0 < RC.INTRADAY_TTL <= 600
+def test_nothing_is_re_read_on_a_timer_any_more():
+    """⭐ The 1 GB day.
+
+    Fourteen reads used to sit in a five-minute bucket, so a trading day cost
+    78 refetches of each whether or not a row had changed — `get_session_log`
+    alone, asked at two limits, was about 187 MB. Every one of those tables is
+    written by this app, so the timer was discovering changes the app had made
+    itself.
+
+    Only LIVE may carry a TTL now. Everything else is fetched once and then
+    only when a write says otherwise.
+    """
+    assert set(RC._FETCHERS) == {RC.STATIC, RC.LIVE}
+    for name in RC._READS:
+        assert RC._bucket(name) in (RC.STATIC, RC.LIVE)
+        if name not in RC._LIVE_READS:
+            assert RC._bucket(name) == RC.STATIC, f"{name} is on a timer"
 
 
 def test_the_heavy_analytics_are_the_ones_held_until_reset():
@@ -301,7 +315,56 @@ def test_every_invalidation_target_is_a_read_this_layer_caches():
 
 def test_no_read_is_classified_twice():
     assert len(RC._READS) == len(set(RC._READS))
-    assert not set(RC._LIVE_READS) & set(RC._INTRADAY_READS)
+
+
+def test_every_writer_marks_every_read_of_its_table():
+    """⭐ The test the whole scheme rests on.
+
+    With the five-minute timer gone, a read is refreshed *only* when a write
+    says so. A writer missing from `_INVALIDATES` no longer means "refreshed a
+    bit later" — it means **stale until the app restarts**.
+
+    So the map is not trusted as written: it is re-derived from
+    `db/supabase_client.py` by matching each writer's table against each
+    reader's, and every derived pair must be present. Adding a read/write pair
+    to the client without a line in `_INVALIDATES` fails here.
+    """
+    import re
+
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "db" / "supabase_client.py").read_text()
+    parts = re.split(r"\n    def (\w+)\(", src)
+    bodies = {parts[i]: parts[i + 1].split("\n    def ")[0]
+              for i in range(1, len(parts), 2)}
+
+    def tables(body):
+        found = set(re.findall(r"table\(['\"](\w+)['\"]", body))
+        found |= set(re.findall(r"_safe_(?:upsert|query)\(\s*['\"](\w+)['\"]",
+                                body))
+        return found
+
+    reads, writes = {}, {}
+    for name, body in bodies.items():
+        if name.startswith("_"):
+            continue
+        used = tables(body)
+        if not used:
+            continue
+        if ".select(" in body:
+            reads[name] = used
+        if any(k in body for k in (".insert(", ".upsert(", ".update(",
+                                   "_safe_upsert(")):
+            writes[name] = used
+
+    missing = []
+    for writer, written in writes.items():
+        for reader, got in reads.items():
+            if not (written & got) or reader not in RC._READS:
+                continue
+            if reader not in RC._INVALIDATES.get(writer, ()):
+                missing.append(f"{writer} writes {sorted(written & got)} "
+                               f"but does not mark {reader} stale")
+    assert not missing, "\n".join(missing)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -367,8 +430,16 @@ def test_invalidate_forces_a_refetch(pair):
     assert raw.hits["get_engine_attribution"] == 2
 
 
-def test_invalidating_one_bucket_leaves_the_others_alone(pair):
+def test_invalidating_one_read_leaves_its_neighbours_alone(pair):
+    """⭐ Why `_LIVE_KEYS` exists.
+
+    Both of these now live in the same STATIC bucket, so `fetch.clear()` would
+    take out `get_engine_attribution`'s 8,000 rows every time a session-log row
+    landed — a "reduction" that made egress worse, and the reason an earlier
+    attempt at this was reverted rather than shipped. Clearing is per entry.
+    """
     raw, db = pair
+    assert RC._bucket("get_engine_attribution") == RC._bucket("get_session_log")
     db.get_engine_attribution(limit=8000)
     db.get_session_log(limit=4000)
     RC.invalidate("get_session_log")
@@ -376,6 +447,90 @@ def test_invalidating_one_bucket_leaves_the_others_alone(pair):
     db.get_session_log(limit=4000)
     assert raw.hits["get_engine_attribution"] == 1
     assert raw.hits["get_session_log"] == 2
+
+
+def test_one_limit_of_a_read_does_not_evict_another(pair):
+    """`get_session_log` is asked at 4,000 and at 8,000 by two panels. Clearing
+    one entry must not cost the other its cached rows."""
+    raw, db = pair
+    db.get_session_log(limit=4000)
+    db.get_session_log(limit=8000)
+    assert raw.hits["get_session_log"] == 2
+    RC._clear_entries("get_session_log")
+    db.get_session_log(limit=4000)
+    db.get_session_log(limit=8000)
+    assert raw.hits["get_session_log"] == 4
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  write-invalidation, and the floor that keeps it cheaper than a timer
+# ══════════════════════════════════════════════════════════════════════
+
+def test_a_write_is_visible_on_the_very_next_read(pair):
+    """The promise the timer could not make. A rare write — a session log row,
+    a graded trade — refreshes at once, not up to five minutes later."""
+    raw, db = pair
+    assert db.get_session_log(limit=4000) == [{"session": "morning"}]
+    raw.get_session_log = lambda trading_day=None, limit=2000: [{"session": "noon"}]
+    db.insert_session_log({"session": "noon"})
+    assert db.get_session_log(limit=4000) == [{"session": "noon"}]
+
+
+def test_a_per_cycle_writer_does_not_refetch_on_every_cycle(pair):
+    """⭐ The failure mode that made the first version of this worse.
+
+    `leg_flow_snapshots`, `nifty_spot_data` and `candles_data` are written on
+    every 20-second cycle. Clearing their reads on each write would re-read an
+    all-day, still-growing table 1,125 times a day — a bigger bill than the
+    five-minute timer this replaced.
+
+    One refresh is allowed straight away (nothing has refreshed yet); the rest
+    of the window is served from cache.
+    """
+    raw, db = pair
+    db.get_session_log(limit=4000)
+    for _ in range(200):                       # a morning of reruns
+        db.insert_session_log({"row": 1})
+        db.get_session_log(limit=4000)
+    assert raw.hits["get_session_log"] == 2
+    assert raw.hits["insert_session_log"] == 200
+
+
+def test_the_floor_lets_go_once_the_window_passes(pair, monkeypatch):
+    """It is a floor, not a freeze — the next write after the window refreshes."""
+    raw, db = pair
+    db.get_session_log(limit=4000)
+    db.insert_session_log({"row": 1})
+    db.get_session_log(limit=4000)             # refresh 1, sets the floor
+    db.insert_session_log({"row": 2})
+    db.get_session_log(limit=4000)             # inside the window — held
+    assert raw.hits["get_session_log"] == 2
+
+    real = RC._time.time
+    monkeypatch.setattr(RC._time, "time",
+                        lambda: real() + RC.REFRESH_FLOOR + 1)
+    db.insert_session_log({"row": 3})
+    db.get_session_log(limit=4000)
+    assert raw.hits["get_session_log"] == 3
+
+
+def test_an_unwritten_table_is_fetched_once_for_the_whole_day(pair):
+    """The headline. 1,125 reruns, no write to this table, one round-trip —
+    where the old bucket would have made 78."""
+    raw, db = pair
+    for _ in range(1125):
+        db.get_engine_attribution(limit=8000)
+    assert raw.hits["get_engine_attribution"] == 1
+
+
+def test_a_write_marks_stale_rather_than_clearing_immediately(pair):
+    """The write path must not touch the cache itself — the floor is applied at
+    read time, and a write that cleared directly would bypass it."""
+    raw, db = pair
+    db.get_session_log(limit=4000)
+    db.insert_session_log({"row": 1})
+    assert "get_session_log" in RC._STALE
+    assert RC._LIVE_KEYS.get("get_session_log")
 
 
 def test_the_counters_report_round_trips_not_calls(pair):

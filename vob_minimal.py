@@ -12990,16 +12990,16 @@ def compute_prev_day_value(db):
     if cache.get('for_day') == today:
         return cache
     try:
-        series = db.get_available_candle_series() if db else []
-        if not series:
+        if db is None:
             return None
-        sym, exch, tf = next((s for s in series if s[0] == 'NIFTY50' and s[1] == 'IDX_I'),
-                             series[0])
-        days = db.get_candle_trading_days(sym, exch, tf) or []
-        prev_days = [d for d in days if d < today]
-        if not prev_days:
+        # One row, filtered in the database. This used to be two unbounded
+        # scans of `candles_data` — every row in the table to list the series,
+        # then every row of that series to list its days — and both results
+        # were discarded except for a single date.
+        sym, exch = 'NIFTY50', 'IDX_I'
+        pday, tf = db.latest_candle_day_before(sym, exch, today)
+        if not pday or not tf:
             return None
-        pday = prev_days[-1]
         pdf = db.get_candles_for_day(sym, exch, tf, pday)
         if pdf is None or getattr(pdf, 'empty', True) or len(pdf) < 5:
             return None
@@ -14162,8 +14162,10 @@ def _render_main_analyzer():
                     f"{_per_key:.2f} calls per distinct key — a cache only "
                     f"saves repeats. Most distinct questions: {_churn}.")
             st.caption(
-                "Analytics and history are held until the app resets; live "
-                "reads (open position, spot, config) refresh every cycle.")
+                "Every read is held until this app writes its table or "
+                "resets — nothing is re-asked on a timer. A table written "
+                "every cycle is re-read at most once every 5 min; live reads "
+                "(open position, spot, config) refresh every cycle.")
             if st.button("Refresh from Supabase"):
                 _db_cache_clear()
                 st.rerun()

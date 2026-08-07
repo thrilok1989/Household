@@ -35,6 +35,16 @@ from ..thesis import build_thesis, market_controller, recent_changes
 _TABS = ["🎯 Decision", "📈 Trading", "🧭 Intelligence",
          "📒 History", "🎓 Learning", "⏪ Replay"]
 
+#: One limit per table, shared by every panel that reads it.
+#:
+#: ⚠️ The read cache keys on the arguments, so `get_session_log(4000)` and
+#: `get_session_log(8000)` were two entries and two round-trips for the same
+#: rows — and Streamlit runs every tab body on every rerun, so both panels
+#: asked whether or not anyone opened them. A panel that wants fewer rows
+#: slices the shared result; it must not ask a different question.
+SESSION_LOG_LIMIT = 8000
+TRADE_SIGNAL_LIMIT = 300
+
 _CARD = ("background:#0d1117;border:1px solid #1e2836;border-radius:10px;"
          "padding:10px 12px;margin-bottom:8px")
 
@@ -1594,7 +1604,7 @@ def _history(st, db) -> None:
         st.caption("No database connection.")
         return
     try:
-        df = db.get_trade_signals(limit=300)
+        df = db.get_trade_signals(limit=TRADE_SIGNAL_LIMIT)
     except Exception:
         df = None
     if df is None or getattr(df, "empty", True):
@@ -1826,7 +1836,7 @@ def _replay(st, db) -> None:
 
     try:
         rows = db.get_engine_state(limit=800) if hasattr(db, "get_engine_state") else None
-        signals = db.get_trade_signals(limit=100)
+        signals = db.get_trade_signals(limit=TRADE_SIGNAL_LIMIT)
         signals = (signals.to_dict("records")
                    if hasattr(signals, "to_dict") else list(signals or []))
     except Exception:
@@ -2054,7 +2064,7 @@ def _performance_by_session(st, db, results) -> None:
     if db is None or not hasattr(db, "get_session_log"):
         return
     try:
-        log = db.get_session_log(limit=4000)
+        log = db.get_session_log(limit=SESSION_LOG_LIMIT)
     except Exception:
         log = None
     if not log:
@@ -2078,7 +2088,7 @@ def _session_validation(st, db, results, trades) -> None:
     if db is None or not hasattr(db, "get_session_log"):
         return
     try:
-        log = db.get_session_log(limit=8000)
+        log = db.get_session_log(limit=SESSION_LOG_LIMIT)
         recs = (db.get_session_recommendations(limit=500)
                 if hasattr(db, "get_session_recommendations") else [])
     except Exception:
