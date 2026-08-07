@@ -14145,6 +14145,22 @@ def _render_main_analyzer():
                 st.caption(
                     f"{_cs['empty']:,} of those came back **empty** — held for "
                     f"5 min each rather than re-asked every cycle.")
+            # ⚠️ The line that says WHOSE fault a low hit rate is.
+            #
+            # A cache cannot serve a repeat that never comes. When calls and
+            # fetches are nearly equal, the reads are each being asked once —
+            # and that is a caller problem, not a cache problem. Naming the
+            # methods with the most distinct keys points at the caller.
+            try:
+                from db.read_cache import churn_line as _db_churn
+                _churn = _db_churn()
+            except Exception:
+                _churn = ""
+            _per_key = (_cs['calls'] / _cs['fetches']) if _cs['fetches'] else 0
+            if _churn:
+                st.caption(
+                    f"{_per_key:.2f} calls per distinct key — a cache only "
+                    f"saves repeats. Most distinct questions: {_churn}.")
             st.caption(
                 "Analytics and history are held until the app resets; live "
                 "reads (open position, spot, config) refresh every cycle.")
