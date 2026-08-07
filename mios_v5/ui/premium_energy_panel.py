@@ -322,3 +322,77 @@ def render_premium_energy(st, data: Optional[Dict[str, Any]] = None) -> None:
             st.markdown(html, unsafe_allow_html=True)
     except Exception as err:
         st.caption(f"Premium Energy unavailable: {err}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  the compact form, for the MIOS V6 trade card
+# ══════════════════════════════════════════════════════════════════════
+
+def compact_html(data: Optional[Dict[str, Any]]) -> str:
+    """Stage 71.7 in three lines, for the observational card above the app.
+
+    Same data, same colours, same owner — `premium_energy_html` draws the full
+    section further down the page and this is the glance version. Nothing is
+    recomputed and no number appears here that is not already in that section,
+    so the two can never disagree.
+
+    ## Both rows, always
+
+    Energy and Spike answer different questions — *who is participating* versus
+    *what could expand* — and they routinely point opposite ways. A live read of
+    CALL 27 / PUT 46 energy against CALL 39 / PUT 34 spike is exactly that: the
+    side with the participation is not the side with the expansion odds.
+
+    A compact view is where that gets quietly dropped, because showing one row
+    is half the space. Both are here for the same reason the full panel draws
+    them the same size: choosing one for the trader is not this panel's call.
+
+    ⚠️ The disagreement is *shown*, never *scored*. Deriving an "energy vs spike
+    conflict" verdict would be new computation in a presentation file, and Stage
+    71.7 has not published one.
+    """
+    d = data or {}
+    if not d.get("ready"):
+        return ""
+
+    call, put = d.get("call") or {}, d.get("put") or {}
+
+    def _pair(key: str) -> str:
+        c, p = _pct(call.get(key)), _pct(put.get(key))
+        c_txt = "—" if c is None else f"{c:.0f}%"
+        p_txt = "—" if p is None else f"{p:.0f}%"
+        return (f"<span style='color:{_CALL_COL};font-weight:800'>C {c_txt}</span>"
+                f"<span style='color:{MICRO}'> · </span>"
+                f"<span style='color:{_PUT_COL};font-weight:800'>P {p_txt}</span>")
+
+    if all(_pct(x.get(k)) is None for x in (call, put) for k in ("energy", "spike")):
+        return ""
+
+    dom = d.get("dominance")
+    dom_col = (_CALL_COL if dom == "CALL Dominant" else
+               _PUT_COL if dom == "PUT Dominant" else
+               FAINT if dom == "No Energy" else MUTED)
+
+    pref = (d.get("preferred") or {}).get("label") or d.get("preferred_label")
+    grade = (d.get("confidence") or {}).get("grade") if isinstance(
+        d.get("confidence"), dict) else d.get("confidence")
+
+    # Absent is absent: a missing preference draws no chip rather than "—".
+    tail = " · ".join(x for x in (
+        str(pref) if pref else "",
+        f"conf {grade}" if grade else "",
+        str(dom) if dom else "") if x)
+
+    return (
+        f"<div style='margin-top:5px;padding:6px 9px;background:#0b0f16;"
+        f"border:1px solid #1e2836;border-radius:8px;text-align:center'>"
+        f"<div style='font-size:9px;letter-spacing:.09em;color:{MICRO};"
+        f"text-transform:uppercase'>⚡ Premium energy · 71.7</div>"
+        f"<div style='font-size:12.5px;margin-top:2px'>"
+        f"<span style='color:{MICRO};font-size:10px'>energy </span>{_pair('energy')}"
+        f"<span style='color:{MICRO}'>&nbsp;&nbsp;|&nbsp;&nbsp;</span>"
+        f"<span style='color:{MICRO};font-size:10px'>spike </span>{_pair('spike')}"
+        f"</div>"
+        + (f"<div style='font-size:11px;margin-top:1px;color:{dom_col};"
+           f"font-weight:700'>{tail}</div>" if tail else "")
+        + "</div>")
