@@ -142,3 +142,17 @@ def render(st, fr: Optional[Mapping[str, Any]] = None) -> None:
             st.markdown(html, unsafe_allow_html=True)
     except Exception as err:
         st.caption(f"War zone unavailable: {err}")
+
+
+def micro(fr: Optional[Mapping[str, Any]] = None) -> str:
+    """The fight as PLAIN TEXT for the sticky app header.
+
+    Shorter than `compact_html` again: the level is already on the S/R chips
+    beside it, so this carries the one thing they do not — who is expected to
+    win. `""` when there is no fight.
+    """
+    f = fr if isinstance(fr, Mapping) else {}
+    if not _zone(f):
+        return ""
+    winner = str(f.get("expected_winner") or "").strip()
+    return f"⚔️ {winner}" if winner else ""

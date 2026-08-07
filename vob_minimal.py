@@ -14652,8 +14652,9 @@ def _render_app_chrome(slot, foot):
     clock = "🟢 Market open" if _is_market_open else "⚪ Market closed"
     updated = datetime.now(pytz.timezone('Asia/Kolkata')).strftime("%H:%M:%S IST")
 
+    extras = _chrome_extras()
     render_header(st, slot, spot=spot, prev_close=prev_close, v5=v5, v6=v6,
-                  market=clock, updated=updated)
+                  market=clock, updated=updated, extras=extras)
     if read_err is not None:
         st.caption(f"Header values unavailable this cycle: {read_err}")
     # The tab carries V6 — the newer engine — and falls back to V5 when V6 has
@@ -14669,7 +14670,54 @@ def _render_app_chrome(slot, foot):
     # late fill was avoiding in the first place.
     st.session_state['_chrome_last'] = {
         'spot': spot, 'prev_close': prev_close, 'v5': v5, 'v6': v6,
-        'market': clock, 'updated': updated}
+        'market': clock, 'updated': updated, 'extras': list(extras or ())}
+
+
+def _chrome_extras():
+    """The short readings for the header's second row, as plain text.
+
+    Each string is worded by the panel that owns that fact — `zone_micro` for
+    the S/R odds, `war_zone.micro` for the expected winner, `premium_energy`'s
+    `micro` for participation and expansion. This function only collects them,
+    so the header cannot end up phrasing a reading differently from the panel
+    that publishes it further down the page.
+
+    Every source is already-published session state: `_reaction_sr` carries the
+    zone cards `enrich_zone_intel` attached, `_premium_energy` is Stage 71.7's
+    own output, and the final read is rebuilt through `build_final_read` — the
+    same call `_mios_market_read` uses. Nothing here computes.
+
+    A source that is absent contributes nothing rather than a placeholder: the
+    strip is frozen at the top of the page, and a row of `—` chips would cost
+    that space permanently to say nothing.
+    """
+    out = []
+    try:
+        from mios_v5.ui.zone_card import zone_micro
+        _rsr = st.session_state.get('_reaction_sr') or {}
+        for _side in ('support', 'resistance'):
+            _z = _rsr.get(_side) or {}
+            _line = zone_micro((_z or {}).get('intel'))
+            if _line:
+                out.append(_line)
+    except Exception:
+        pass
+    try:
+        from mios_v5.final_read import build_final_read
+        from mios_v5.ui.war_zone import micro as _wz_micro
+        _line = _wz_micro(build_final_read(st.session_state.get('_mios_state')))
+        if _line:
+            out.append(_line)
+    except Exception:
+        pass
+    try:
+        from mios_v5.ui.premium_energy_panel import micro as _pe_micro
+        _line = _pe_micro(st.session_state.get('_premium_energy'))
+        if _line:
+            out.append(_line)
+    except Exception:
+        pass
+    return out
 
 
 def _prime_app_chrome(slot, foot):
@@ -14703,7 +14751,8 @@ def _prime_app_chrome(slot, foot):
         render_header(st, slot, spot=last.get('spot'),
                       prev_close=last.get('prev_close'), v5=last.get('v5'),
                       v6=last.get('v6'), market=last.get('market') or "",
-                      updated=last.get('updated') or "")
+                      updated=last.get('updated') or "",
+                      extras=last.get('extras') or ())
         render_footer(st, foot, updated=last.get('updated') or "",
                       market=last.get('market') or "",
                       version=CHROME_VERSION_FALLBACK)

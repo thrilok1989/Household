@@ -396,3 +396,34 @@ def compact_html(data: Optional[Dict[str, Any]]) -> str:
         + (f"<div style='font-size:11px;margin-top:1px;color:{dom_col};"
            f"font-weight:700'>{tail}</div>" if tail else "")
         + "</div>")
+
+
+def micro(data: Optional[Dict[str, Any]]) -> str:
+    """Stage 71.7 as PLAIN TEXT for the sticky app header.
+
+    Both rows still, in the tightest form that keeps them apart — `C46 P41`
+    for participation and `spk C65 P61` for expansion. They routinely point
+    opposite ways, which is exactly why the second one is not the thing to cut
+    when space runs out.
+
+    `""` when the stage is not ready or reported no numbers.
+    """
+    d = data or {}
+    if not d.get("ready"):
+        return ""
+    call, put = d.get("call") or {}, d.get("put") or {}
+
+    def _two(key: str) -> str:
+        c, p = _pct(call.get(key)), _pct(put.get(key))
+        if c is None and p is None:
+            return ""
+        c_txt = "—" if c is None else f"{c:.0f}"
+        p_txt = "—" if p is None else f"{p:.0f}"
+        return f"C{c_txt} P{p_txt}"
+
+    energy, spike = _two("energy"), _two("spike")
+    if not energy and not spike:
+        return ""
+    bits = [x for x in (f"⚡ {energy}" if energy else "",
+                        f"spk {spike}" if spike else "") if x]
+    return " · ".join(bits)

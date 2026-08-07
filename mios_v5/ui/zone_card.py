@@ -246,3 +246,34 @@ def reaction_line(reaction: Optional[Dict[str, Any]]) -> str:
     return (f"<div style='text-align:center;font-size:15px;margin-top:5px;"
             f"font-weight:800;color:{col}'>{reaction.get('label', st)} "
             f"{int(reaction.get('confidence') or 0)}%{act}</div>")
+
+
+def zone_micro(card: Optional[Dict[str, Any]]) -> str:
+    """The S/R level as PLAIN TEXT for the sticky app header.
+
+    A third form, and the shortest: `zone_card_line` already trims the full
+    card to one row, and the header has room for a chip. Stars, lifecycle and
+    the battle percentage go — the price and the odds are what a glance off a
+    frozen strip is for.
+
+    Plain text, not markup: the header owns its own styling, this owns the
+    wording. Returns `""` when there is no card.
+
+    ⚠️ Both odds travel. `brk 44 · rej 56` are complements, and printing one is
+    the edit that lets a reader supply the other from a wrong prior.
+    """
+    if not card:
+        return ""
+    side = str(card.get("side") or "")
+    price = card.get("price")
+    try:
+        px = f"{float(price):,.0f}"
+    except (TypeError, ValueError):
+        return ""
+    probs = card.get("probabilities") or {}
+    brk, rej = probs.get("break"), probs.get("rejection")
+    emoji = "🛡" if side == "SUPPORT" else "🧱"
+    odds = ""
+    if brk is not None and rej is not None:
+        odds = f" brk {brk:.0f} · rej {rej:.0f}"
+    return f"{emoji} {px}{odds}"
