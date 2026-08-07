@@ -245,7 +245,7 @@ def _insert_sweep(seg, scrip, direction, magnitude, detail):
             "magnitude": magnitude,
             "detail": detail,
             "fired_at": datetime.now(IST).isoformat(),
-        }).execute()
+        }, returning="minimal").execute()
     except Exception as e:
         print(f"dhan_sweeps insert error: {e}")
 
@@ -347,7 +347,12 @@ async def _flush_state_to_db():
     if not rows:
         return
     try:
-        sb.table("dhan_ticks").upsert(rows).execute()
+        # `returning="minimal"`: PostgREST echoes every upserted row back by
+        # default and Supabase bills it as egress. This fires every 1.5s for
+        # as long as ticks arrive, once per watched instrument, and nothing
+        # here reads the response — so the echo was pure cost that scaled with
+        # WATCH_INSTRUMENTS.
+        sb.table("dhan_ticks").upsert(rows, returning="minimal").execute()
     except Exception as e:
         print(f"[{datetime.now(IST):%H:%M:%S}] Supabase upsert error: {e}")
 
