@@ -100,6 +100,27 @@ EMPTY_TTL = 300
 #: `(method, signature)` → when it last came back empty.
 _EMPTY_KEY = "_db_cache_empty_since"
 
+#: method → the distinct cache keys it has asked for this session.
+#:
+#: ⚠️ The measurement that separates the two reasons a hit rate can be low, and
+#: they have opposite fixes.
+#:
+#: A live session measured 253 calls against 229 fetches — at most **1.10 calls
+#: per distinct key**. A cache cannot serve a repeat that never comes, so that
+#: is not a broken cache: it is reads that are each asked once. The fix for
+#: that is upstream (fewer distinct questions), not here.
+#:
+#: The other cause looks identical in the totals — keys that DO repeat but never
+#: match, because an argument moves every call. Only a per-method distinct count
+#: tells them apart: `calls ≈ distinct` is churn, `calls >> distinct` is a cache
+#: that should be hitting and is not.
+_KEYS_KEY = "_db_cache_keys"
+
+#: Distinct keys remembered per method. A read parameterised by strike or by
+#: day can legitimately have many, and this is a diagnostic, not a ledger — the
+#: ratio is what matters and it survives a cap.
+_KEYS_CAP = 400
+
 #: Decision-critical "right now" reads. Never frozen.
 _LIVE_READS: Tuple[str, ...] = (
     "get_active_trade_signal",
@@ -309,6 +330,50 @@ def _forget_empty(method: str, signature: Tuple[Any, ...]) -> None:
         pass
 
 
+def _note_key(method: str, signature: Tuple[Any, ...]) -> None:
+    """Remember that this method was asked this exact question."""
+    try:
+        seen = st.session_state.setdefault(_KEYS_KEY, {})
+    except Exception:
+        return
+    keys = seen.setdefault(method, set())
+    if len(keys) < _KEYS_CAP:
+        keys.add(signature)
+
+
+def key_churn() -> Dict[str, Dict[str, int]]:
+    """Per method: how many times it was asked, and how many DISTINCT questions.
+
+    `calls ≈ distinct` means the method asks a different question every time, so
+    nothing it does can be cached — look at the caller. `calls >> distinct` with
+    a low hit rate means the cache is failing to match keys it should.
+    """
+    try:
+        seen = dict(st.session_state.get(_KEYS_KEY) or {})
+    except Exception:
+        return {}
+    out: Dict[str, Dict[str, int]] = {}
+    for method, keys in seen.items():
+        out[method] = {"distinct": len(keys)}
+    return out
+
+
+def churn_line(limit: int = 4) -> str:
+    """The methods asking the most DISTINCT questions, worst first.
+
+    Empty when nothing has been read. This is the line that says whether a low
+    hit rate is the cache's fault or the caller's: a method with 40 distinct
+    keys is asking 40 different questions, and no cache can collapse those.
+    """
+    churn = key_churn()
+    if not churn:
+        return ""
+    top = sorted(churn.items(), key=lambda kv: -kv[1]["distinct"])[:limit]
+    if not top or top[0][1]["distinct"] <= 1:
+        return ""
+    return " · ".join(f"{m} {v['distinct']}" for m, v in top)
+
+
 def _rows(result: Any) -> int:
     try:
         return int(len(result))
@@ -396,6 +461,7 @@ def reset_stats() -> None:
     try:
         st.session_state[_STATS_KEY] = {"calls": 0, "fetches": 0, "rows": 0,
                                         "empty": 0}
+        st.session_state[_KEYS_KEY] = {}
     except Exception:
         pass
 
@@ -437,6 +503,7 @@ class CachedDB:
         def call(*args, **kwargs):
             _bump("calls")
             signature = _canonical(target, method, args, kwargs)
+            _note_key(method, signature)
             fetch = _FETCHERS[_bucket(method)]
             result = fetch(self._db, method, signature, args, kwargs)
             if _empty(result):

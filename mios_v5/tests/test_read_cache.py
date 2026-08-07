@@ -408,3 +408,70 @@ def test_the_key_survives_an_unhashable_argument():
 def test_emptiness_is_judged_the_way_every_reader_returns_it(value, empty):
     """`0` from `count_rows` is a real answer, not an absence."""
     assert RC._empty(value) is empty
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ⭐ whose fault is a low hit rate
+# ══════════════════════════════════════════════════════════════════════
+
+def test_distinct_keys_are_counted_per_method(pair):
+    """A live session read 253 times against 229 fetches — at most 1.10 calls
+    per distinct key. A cache cannot serve a repeat that never comes, so that
+    is not a broken cache; it is reads each asked once, and the fix is
+    upstream.
+
+    The other cause looks identical in the totals: keys that DO repeat but
+    never match because an argument moves. Only a per-method distinct count
+    tells them apart.
+    """
+    _raw, db = pair
+    RC.reset_stats()
+    db.get_trade_results(limit=10)
+    db.get_trade_results(limit=10)          # same question
+    db.get_trade_results(limit=20)          # a different one
+    churn = RC.key_churn()
+    assert churn["get_trade_results"]["distinct"] == 2, "three calls, two keys"
+
+
+def test_a_repeated_question_does_not_add_a_key(pair):
+    _raw, db = pair
+    RC.reset_stats()
+    for _ in range(5):
+        db.get_trade_results(limit=10)
+    assert RC.key_churn()["get_trade_results"]["distinct"] == 1
+
+
+def test_the_churn_line_names_the_worst_offenders(pair):
+    _raw, db = pair
+    RC.reset_stats()
+    for n in range(6):
+        db.get_trade_results(limit=n)
+    db.get_session_log(limit=1)
+    line = RC.churn_line()
+    assert "get_trade_results 6" in line
+    assert line.index("get_trade_results") == 0, "worst first"
+
+
+def test_the_churn_line_is_silent_when_nothing_repeats_badly(pair):
+    _raw, db = pair
+    RC.reset_stats()
+    db.get_trade_results(limit=10)
+    assert RC.churn_line() == "", "one key each is nothing to report"
+
+
+def test_resetting_the_stats_forgets_the_keys(pair):
+    _raw, db = pair
+    db.get_trade_results(limit=10)
+    RC.reset_stats()
+    assert RC.key_churn() == {}
+
+
+def test_the_key_memory_is_capped(pair):
+    """A read parameterised by strike can legitimately have many keys. This is
+    a diagnostic, not a ledger — the ratio survives a cap."""
+    _raw, db = pair
+    RC.reset_stats()
+    assert RC._KEYS_CAP > 0
+    for n in range(RC._KEYS_CAP + 25):
+        db.get_trade_results(limit=n)
+    assert RC.key_churn()["get_trade_results"]["distinct"] == RC._KEYS_CAP
