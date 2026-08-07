@@ -14611,12 +14611,18 @@ def _render_app_chrome(slot):
     # having shipped. That is the exact failure this session has been removing
     # everywhere else, and I reintroduced it here.
     try:
-        from mios_v5.ui.app_chrome import (CHROME_VERSION, render_footer,
-                                           render_header, render_tab_title)
+        from mios_v5.ui.app_chrome import (CHROME_VERSION, render_chrome_css,
+                                           render_footer, render_header,
+                                           render_tab_title)
     except Exception as err:
         st.warning(f"App header unavailable — `mios_v5.ui.app_chrome` did not "
                    f"import: {err}")
         return
+
+    # The rules that freeze both strips in place. Injected before they are
+    # drawn, and once per rerun — a `<style>` block is idempotent, so a repeat
+    # costs nothing and a missing one silently un-freezes the page.
+    render_chrome_css(st)
 
     # The market read is best-effort: the header's job is to exist. A cycle
     # that could not report a price still gets a strip, with dashes and the
