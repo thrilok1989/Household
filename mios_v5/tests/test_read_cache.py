@@ -191,21 +191,58 @@ def test_the_heavy_analytics_are_the_ones_held_until_reset():
 #  what must NOT be cached
 # ══════════════════════════════════════════════════════════════════════
 
-def test_an_empty_result_is_never_cached(pair):
-    """An empty read means "not populated yet", not "no such data". Caching it
-    until restart would leave the Learning tab blank for the rest of the
-    session even after the first rows landed."""
+def test_an_empty_result_is_held_briefly_rather_than_never_cached(pair):
+    """⭐ Never caching an empty made the cache useless.
+
+    A live session measured **741 reads, 734 of which reached Supabase** — a
+    0.9% hit rate. Most of MIOS's analytics tables are empty for most of a
+    session, and every one of those reads was cached, immediately discarded,
+    and asked again twenty seconds later. The rule meant the emptier the
+    database, the harder it was queried.
+
+    An empty is now trusted for `EMPTY_TTL`, so repeated asks inside the window
+    cost one round-trip rather than one each.
+    """
     raw, db = pair
     for _ in range(3):
         assert db.get_trade_results() == []
-    assert raw.hits["get_trade_results"] == 3
+    assert raw.hits["get_trade_results"] == 1, "one fetch, not three"
 
 
-def test_a_result_that_arrives_later_is_picked_up(pair):
+def test_an_empty_is_asked_again_once_the_window_passes(pair, monkeypatch):
+    """It is trusted briefly, not indefinitely — a table that fills at 09:20
+    must not still read blank at 15:00."""
+    raw, db = pair
+    assert db.get_trade_results() == []
+    assert raw.hits["get_trade_results"] == 1
+
+    clock = [RC._time.time() + RC.EMPTY_TTL + 1]
+    monkeypatch.setattr(RC._time, "time", lambda: clock[0])
+    db.get_trade_results()                      # expires the held empty
+    raw.get_trade_results = lambda limit=500: [{"pnl": 12}]
+    assert db.get_trade_results() == [{"pnl": 12}]
+
+
+def test_a_write_picks_up_the_new_rows_without_waiting(pair):
+    """The window is a bound, not the mechanism. Anything this app writes
+    invalidates its own read, so rows it produced appear on the next call —
+    which is the case that matters, since the app is the only writer for the
+    tables in `_INVALIDATES`."""
     raw, db = pair
     assert db.get_trade_results() == []
     raw.get_trade_results = lambda limit=500: [{"pnl": 12}]
+    RC.invalidate("get_trade_results")
     assert db.get_trade_results() == [{"pnl": 12}]
+
+
+def test_empties_are_counted_so_a_low_hit_rate_can_be_diagnosed(pair):
+    """A high `empty` beside a low saving means the tables are unpopulated, not
+    that the cache keys are wrong. Without the count those look identical, and
+    they have completely different fixes."""
+    _raw, db = pair
+    RC.reset_stats()
+    db.get_trade_results()
+    assert RC.stats()["empty"] >= 1
 
 
 def test_a_failing_read_is_not_cached(pair):
