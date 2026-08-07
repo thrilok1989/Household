@@ -13986,6 +13986,16 @@ def _render_main_analyzer():
         # tab and expander body on EVERY rerun meant ~30,800 rows fetched per
         # cycle, whether or not anyone was looking at the tab that asked.
         db = _cache_reads(SupabaseDB(supabase_url, supabase_key))
+        # ── egress measurement · OFF unless MIOS_EGRESS=1 ──────────────
+        # Installed on the raw client, before the cache wrapper, so it counts
+        # what actually left the network — a read served from `st.cache_data`
+        # never reaches PostgREST and must not be counted as if it had.
+        try:
+            from tools import egress_meter as _egress
+            if _egress.ENABLED:
+                _egress.install(db.client)
+        except Exception:
+            pass
         db.sync_pending()
         st.session_state['_db_obj'] = db
         st.session_state['_story_task'] = get_story_task()
@@ -14656,6 +14666,14 @@ def main():
             st.caption(_prof.summary_line(_prof.flush()))
         except Exception:
             pass
+
+    # Same rule for the egress meter: one cycle's bytes, ranked by table.
+    try:
+        from tools import egress_meter as _egress
+        if _egress.ENABLED:
+            st.caption(_egress.summary_line(_egress.flush()))
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
