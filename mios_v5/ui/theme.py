@@ -90,13 +90,47 @@ BIAS_EMOJI = {"BULL": "🟢", "BEAR": "🔴", "NEUTRAL": "🟡"}
 GRADE_TONE = {"A+": BULL, "A": BULL_SOFT, "B": WARN, "C": ALERT}
 
 
+#: Longest key first, so `NEUTRAL` is tested before a shorter key could match
+#: inside a longer word. Order is fixed here rather than left to dict iteration
+#: because a colour that depends on insertion order is a bug waiting for an
+#: alphabetised refactor.
+_BIAS_KEYS = ("NEUTRAL", "BEAR", "BULL")
+
+
+def _bias_key(value) -> str:
+    """The map key for a bias label, or `""`.
+
+    ⚠️ Exact lookup was not enough, and this is a bug fix rather than a
+    convenience.
+
+    The engines publish `BULLISH`, `STRONG BULLISH`, `BEARISH` — that is what
+    Stage 27 and Stage 71 put on screen and into the Telegram message. The maps
+    are keyed `BULL` / `BEAR` / `NEUTRAL`, and an exact match means every one of
+    those real labels fell through to the default: white text and a ⚪, on a
+    reading that was strongly bullish. The colour code silently stopped working
+    for the only vocabulary that actually reaches it.
+
+    `BEAR` is tested before `BULL` only for determinism; no real label contains
+    both, and a hypothetical one is ambiguous whichever way it is read.
+    """
+    v = str(value or "").strip().upper()
+    if not v:
+        return ""
+    if v in BIAS_TONE:
+        return v
+    for key in _BIAS_KEYS:
+        if key in v:
+            return key
+    return ""
+
+
 def bias_tone(value, default=INK) -> str:
-    """A bias's colour whatever case it arrived in."""
-    return BIAS_TONE.get(str(value or "").strip().upper(), default)
+    """A bias's colour, whatever case or wording it arrived in."""
+    return BIAS_TONE.get(_bias_key(value), default)
 
 
 def bias_emoji(value, default="⚪") -> str:
-    return BIAS_EMOJI.get(str(value or "").strip().upper(), default)
+    return BIAS_EMOJI.get(_bias_key(value), default)
 
 
 def grade_tone(value, default=MUTED) -> str:
