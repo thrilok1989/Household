@@ -173,25 +173,57 @@ class SupabaseDB:
         except Exception:
             pass
 
+    #: Most candles any one chart read may return. A 1-minute series is 375
+    #: bars a trading day, so this is roughly a month — more than any chart
+    #: draws, and a ceiling on a `hours_back` a caller got wrong.
+    CANDLE_ROWS_MAX = 12000
+
     def get_candles(self, symbol, exchange, timeframe, hours_back=24):
+        """Recent candles, oldest first — the shape every chart consumes.
+
+        ⚠️ The database is asked **newest first** and the frame is reversed
+        here, which is not cosmetic: with a `.limit()` and ascending order the
+        rows dropped would be the newest ones, and a chart missing its live
+        edge is worse than a chart missing its history.
+        """
         cutoff = (datetime.now(IST) - timedelta(hours=hours_back)).isoformat()
         def query():
             return self.client.table('candles_data').select('*') \
                 .eq('symbol', symbol).eq('exchange', exchange).eq('timeframe', timeframe) \
-                .gte('datetime', cutoff).order('timestamp', desc=False).execute()
+                .gte('datetime', cutoff).order('timestamp', desc=True) \
+                .limit(self.CANDLE_ROWS_MAX).execute()
         df = self._safe_query('candles_data', query, {'symbol': symbol, 'timeframe': timeframe})
-        if not df.empty and 'datetime' in df.columns:
-            df['datetime'] = pd.to_datetime(df['datetime'])
+        if not df.empty:
+            if 'datetime' in df.columns:
+                df['datetime'] = pd.to_datetime(df['datetime'])
+            if 'timestamp' in df.columns:
+                df = df.sort_values('timestamp').reset_index(drop=True)
+            else:
+                df = df.iloc[::-1].reset_index(drop=True)
         return df
 
     # ── Historical backfill (Stage 2) ──
+    #: How many recent candle rows are enough to name every series being
+    #: collected. At ~375 bars a day per series this covers several days.
+    #:
+    #: ⚠️ The bound is the point. This query used to have no filter and no
+    #: limit — a full scan of `candles_data`, the largest table in the app,
+    #: pulled three columns of every candle ever stored just to derive a
+    #: handful of distinct tuples. A series that stopped being collected days
+    #: ago now drops off the list, which is the correct answer for a "what is
+    #: being collected" question anyway.
+    CANDLE_SERIES_SCAN = 5000
+
     def get_available_candle_series(self):
-        """Distinct (symbol, exchange, timeframe) combos actually present in
+        """Distinct (symbol, exchange, timeframe) combos recently present in
         candles_data. The chart's timeframe is a user-selectable sidebar
         dropdown (default 3-min, not 1-min) — callers must never hardcode a
         timeframe guess; detect what's really been collected instead."""
         def query():
-            return self.client.table('candles_data').select('symbol,exchange,timeframe').execute()
+            return (self.client.table('candles_data')
+                    .select('symbol,exchange,timeframe')
+                    .order('timestamp', desc=True)
+                    .limit(self.CANDLE_SERIES_SCAN).execute())
         res = self._safe_query('candles_data', query)
         try:
             rows = res.to_dict('records') if hasattr(res, 'to_dict') else list(res or [])
@@ -200,13 +232,25 @@ class SupabaseDB:
         return sorted({(r['symbol'], r['exchange'], r['timeframe']) for r in rows
                        if r.get('symbol') and r.get('exchange') and r.get('timeframe')})
 
+    #: Rows scanned to derive the list of collected trading days. Roughly two
+    #: months of one-minute candles for a single series.
+    CANDLE_DAYS_SCAN = 25000
+
     def get_candle_trading_days(self, symbol, exchange, timeframe):
-        """Distinct trading days already collected, ascending — the full
-        backfill scope, whatever it turns out to be."""
+        """Distinct trading days already collected, ascending — the backfill
+        scope, most recent first and bounded.
+
+        ⚠️ Bounded because this had no limit: reading one column of every
+        candle ever collected for a series — tens of thousands of rows — to
+        derive a few dozen distinct dates. `latest_candle_day_before` is the
+        cheaper answer when only the previous session is wanted, which is what
+        every caller on the render path actually asks for.
+        """
         def query():
             return (self.client.table('candles_data').select('trading_day')
                     .eq('symbol', symbol).eq('exchange', exchange).eq('timeframe', timeframe)
-                    .order('trading_day', desc=False).execute())
+                    .order('trading_day', desc=True)
+                    .limit(self.CANDLE_DAYS_SCAN).execute())
         res = self._safe_query('candles_data', query, {'symbol': symbol, 'timeframe': timeframe})
         try:
             rows = res.to_dict('records') if hasattr(res, 'to_dict') else list(res or [])
@@ -215,13 +259,49 @@ class SupabaseDB:
         days = sorted({r['trading_day'] for r in rows if r.get('trading_day')})
         return days
 
+    def latest_candle_day_before(self, symbol, exchange, day):
+        """The most recent collected trading day before `day`, and the
+        timeframe it was collected at — as `(trading_day, timeframe)`.
+
+        One row. The previous session's value area needs exactly this, and used
+        to derive it from two unbounded scans of `candles_data`: every row in
+        the table to list the series, then every row of that series to list its
+        days. Both answers were thrown away except for one date.
+
+        `timeframe` comes back rather than being passed in because the chart's
+        timeframe is a sidebar choice and callers must not guess it.
+        """
+        if not day:
+            return None, None
+        def query():
+            return (self.client.table('candles_data').select('trading_day,timeframe')
+                    .eq('symbol', symbol).eq('exchange', exchange)
+                    .lt('trading_day', str(day))
+                    .order('trading_day', desc=True).limit(1).execute())
+        res = self._safe_query('candles_data', query,
+                               {'symbol': symbol, 'exchange': exchange, 'day': day})
+        try:
+            rows = res.to_dict('records') if hasattr(res, 'to_dict') else list(res or [])
+        except Exception:
+            rows = []
+        if not rows:
+            return None, None
+        row = rows[0]
+        return row.get('trading_day'), row.get('timeframe')
+
     def get_candles_for_day(self, symbol, exchange, timeframe, trading_day):
         """One specific day's candles, oldest first — not limited by
-        get_candles()'s recency window."""
+        get_candles()'s recency window.
+
+        The `.limit()` never binds: a trading day is 375 one-minute bars. It is
+        there so a wrong `trading_day` — an empty string, a value the filter
+        does not narrow — cannot turn this into a full-table read.
+        """
         def query():
             return (self.client.table('candles_data').select('*')
                     .eq('symbol', symbol).eq('exchange', exchange).eq('timeframe', timeframe)
-                    .eq('trading_day', trading_day).order('timestamp', desc=False).execute())
+                    .eq('trading_day', trading_day).order('timestamp', desc=False)
+                    .limit(self.CANDLE_ROWS_MAX).execute())
         df = self._safe_query('candles_data', query,
                               {'symbol': symbol, 'timeframe': timeframe, 'trading_day': trading_day})
         if not df.empty and 'datetime' in df.columns:
