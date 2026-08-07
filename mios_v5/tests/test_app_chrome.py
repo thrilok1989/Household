@@ -267,3 +267,78 @@ def test_the_chrome_failure_is_loud_rather_than_swallowed():
               if not [c for c in ast.walk(h) if isinstance(c, ast.Call)]
               and any(isinstance(x, ast.Return) for x in ast.walk(h))]
     assert not silent, "_render_app_chrome returns silently on failure"
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  frozen in place, Word-style
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_strips_carry_the_markers_the_css_needs():
+    """The CSS selects the wrapper by what it contains. Without a class on the
+    strip there is nothing to select on."""
+    assert C.HEADER_CLASS in C.header_html(24650.3, 24580.0)
+    assert C.FOOTER_CLASS in C.footer_html("15:22", "open", "v1")
+
+
+def test_the_rule_targets_the_wrapper_not_the_strip():
+    """⭐ The reason this is CSS and not an inline style.
+
+    `position: sticky` moves an element within its containing block, and
+    Streamlit sizes `.element-container` to exactly the height of what it
+    holds. A sticky div inside a box its own height has nowhere to travel, so
+    an inline rule is accepted and does nothing — the confusing kind of broken.
+    """
+    css = C.chrome_css()
+    assert ":has(" in css, "the wrapper can only be selected by its contents"
+    assert "position: sticky" in css
+    # the strip's own style must NOT try to do it alone
+    assert "position:sticky" not in C.header_html(24650.3, 24580.0)
+    assert "position: sticky" not in C.header_html(24650.3, 24580.0)
+
+
+def test_the_header_parks_below_streamlits_own_toolbar():
+    """Sticking at 0 slides it underneath."""
+    assert C.HEADER_TOP not in ("0", "0px", "0rem")
+    assert f"top: {C.HEADER_TOP}" in C.chrome_css()
+
+
+def test_the_footer_sticks_to_the_bottom():
+    assert "bottom: 0" in C.chrome_css()
+
+
+def test_both_strips_are_opaque():
+    """A transparent bar lets the page scroll visibly through it."""
+    css = C.chrome_css()
+    assert "backdrop-filter" in css
+    header = C.header_html(24650.3, 24580.0)
+    assert "background:" in header, "the header paints its own ground"
+    assert "background: #0e1117" in css, "and so does the footer"
+
+
+def test_the_footer_returns_to_the_flow_on_a_phone():
+    """Two frozen strips would eat most of a short viewport."""
+    css = C.chrome_css()
+    assert "max-width: 640px" in css
+    phone = css.split("max-width: 640px")[1]
+    assert "position: static" in phone
+    assert C.FOOTER_CLASS in phone and C.HEADER_CLASS not in phone
+
+
+def test_the_css_is_injected_before_the_strips_are_drawn():
+    """A `<style>` block after the markup still applies, but a missing one
+    silently un-freezes the page — so it is asserted to run, and first."""
+    tree = ast.parse((ROOT / "vob_minimal.py").read_text())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_render_app_chrome")
+    order = [getattr(c.func, "id", "") for c in ast.walk(fn)
+             if isinstance(c, ast.Call)
+             and getattr(c.func, "id", "") in
+             ("render_chrome_css", "render_header", "render_footer")]
+    assert "render_chrome_css" in order
+    assert order.index("render_chrome_css") < order.index("render_header")
+
+
+def test_the_css_never_raises():
+    class Boom:
+        def markdown(self, *a, **k): raise RuntimeError("no")
+    C.render_chrome_css(Boom())

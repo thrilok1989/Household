@@ -51,7 +51,16 @@ UNKNOWN = "UNKNOWN"
 APP_NAME = "Nifty Trading & Options Analyzer"
 
 #: Shown in the footer so a screenshot says which build produced it.
-CHROME_VERSION = "chrome.1"
+CHROME_VERSION = "chrome.2"
+
+#: Marker classes. The CSS below cannot target the strip directly — see
+#: `chrome_css` for why it has to reach the wrapper Streamlit puts around it.
+HEADER_CLASS = "mios-chrome-header"
+FOOTER_CLASS = "mios-chrome-footer"
+
+#: How far below the top of the viewport the header parks. Streamlit draws its
+#: own toolbar there; sticking at 0 slides the strip underneath it.
+HEADER_TOP = "3.2rem"
 
 
 def _num(v) -> Optional[float]:
@@ -184,7 +193,8 @@ def header_html(spot: Any = None, prev_close: Any = None,
     meta = " · ".join(x for x in (_esc(market), _esc(updated)) if x)
 
     return (
-        f"<div style='background:{PANEL_BG};border:1px solid {GRID};"
+        f"<div class='{HEADER_CLASS}' "
+        f"style='background:{PANEL_BG};border:1px solid {GRID};"
         f"border-radius:10px;padding:8px 12px;margin-bottom:10px;"
         f"display:flex;align-items:center;gap:12px;flex-wrap:wrap'>"
         f"<div style='min-width:0'>"
@@ -234,7 +244,8 @@ def footer_html(updated: str = "", market: str = "",
             bits.append(t)
     line = " · ".join(bits)
     return (
-        f"<div style='margin-top:14px;padding:8px 12px;border-top:1px solid "
+        f"<div class='{FOOTER_CLASS}' "
+        f"style='margin-top:14px;padding:8px 12px;border-top:1px solid "
         f"{GRID};display:flex;gap:10px;flex-wrap:wrap;align-items:baseline'>"
         f"<span style='font-size:9.5px;color:{MUTED}'>"
         f"⚠️ Advisory only — every reading on this screen is an observation, "
@@ -250,5 +261,84 @@ def render_footer(st, updated: str = "", market: str = "",
     try:
         st.markdown(footer_html(updated, market, version, notes),
                     unsafe_allow_html=True)
+    except Exception:
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  making them stay put
+# ══════════════════════════════════════════════════════════════════════
+
+def chrome_css() -> str:
+    """Freeze the header to the top and the footer to the bottom, Word-style.
+
+    ## Why the strip cannot make itself sticky
+
+    `position: sticky` moves an element **within its containing block**, and
+    Streamlit wraps every `st.markdown` in an `.element-container` sized to
+    exactly the height of what it holds. A sticky div inside a box its own
+    height has nowhere to travel, so it never sticks — the inline style is
+    accepted and does nothing, which is the confusing kind of broken.
+
+    So the rule has to reach the *wrapper*, and the only way to select a
+    wrapper by what it contains is `:has()`.
+
+    ## Browser support, and what happens without it
+
+    `:has()` is Chrome 105+, Safari 15.4+, Firefox 121+. Anywhere older the
+    selector simply does not match, the wrapper stays static, and the strips
+    scroll with the page exactly as they did before. **Degrading to the old
+    behaviour is the reason this is CSS rather than a fixed-position layout** —
+    `position: fixed` would work everywhere but takes the strips out of flow,
+    where they overlay the sidebar and need the page padded to compensate, and
+    a miscalculated pad hides content permanently rather than briefly.
+
+    ## `top` is not zero
+
+    Streamlit draws its own toolbar across the top of the viewport. Parking the
+    header at `0` slides it underneath, so it sits at `HEADER_TOP`.
+
+    Sticky also needs an opaque background — a transparent bar lets the content
+    scroll visibly through it — which both strips already have, and a `z-index`
+    above the page but below Streamlit's own overlays.
+    """
+    return f"""<style>
+/* the wrapper, not the strip — see chrome_css.__doc__ */
+[data-testid="stVerticalBlock"] > div:has(> .stMarkdown .{HEADER_CLASS}),
+.element-container:has(.{HEADER_CLASS}) {{
+    position: sticky;
+    top: {HEADER_TOP};
+    z-index: 90;
+    background: transparent;
+}}
+[data-testid="stVerticalBlock"] > div:has(> .stMarkdown .{FOOTER_CLASS}),
+.element-container:has(.{FOOTER_CLASS}) {{
+    position: sticky;
+    bottom: 0;
+    z-index: 90;
+}}
+/* Opaque, or the page scrolls visibly through them. */
+.{HEADER_CLASS}, .{FOOTER_CLASS} {{
+    backdrop-filter: blur(6px);
+    box-shadow: 0 2px 10px rgba(0,0,0,.45);
+}}
+.{FOOTER_CLASS} {{
+    background: #0e1117;
+    margin-top: 8px !important;
+    border-radius: 8px 8px 0 0;
+}}
+/* On a phone the two strips would eat most of a short viewport, so the
+   header stays and the footer returns to the flow. */
+@media (max-width: 640px) {{
+    [data-testid="stVerticalBlock"] > div:has(> .stMarkdown .{FOOTER_CLASS}),
+    .element-container:has(.{FOOTER_CLASS}) {{ position: static; }}
+}}
+</style>"""
+
+
+def render_chrome_css(st) -> None:
+    """Inject the sticky rules once per rerun. Never raises."""
+    try:
+        st.markdown(chrome_css(), unsafe_allow_html=True)
     except Exception:
         pass
