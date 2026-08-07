@@ -163,12 +163,23 @@ def _bias_chip(label: str, value: Any) -> str:
 def header_html(spot: Any = None, prev_close: Any = None,
                 v5: Any = None, v6: Any = None,
                 market: str = "", updated: str = "",
-                name: str = APP_NAME) -> str:
+                name: str = APP_NAME, extras: Any = None) -> str:
     """The strip above every tab.
 
     `prev_close` is what the change is measured against. Absent, no change is
     shown — a move of unknown size is not a flat one, and `+0.00` would say the
     market had not moved.
+
+    `extras` is a sequence of short PLAIN-TEXT readings — the S/R odds, the war
+    zone winner, premium energy — each rendered as a chip on a second row.
+    Text, not markup: this file owns the styling and each engine's own panel
+    owns its wording, which is why the strings arrive already worded.
+
+    ⚠️ The strip is **frozen at the top of the page**, so every row it grows
+    costs vertical space on every screen for the whole session. That is the
+    constraint the `micro` forms exist to satisfy, and the reason the extras
+    are one wrapped line rather than a block. An empty or blank entry is
+    dropped rather than drawn as a hollow chip.
     """
     px = _num(spot)
     prev = _num(prev_close)
@@ -178,12 +189,25 @@ def header_html(spot: Any = None, prev_close: Any = None,
                  f"—</span>")
     else:
         change = None if prev is None or prev == 0 else px - prev
-        tone = INK if change is None else BULL if change >= 0 else BEAR
+        # ── the price takes the BIAS's colour, the change takes the MOVE's ──
+        #
+        # Both used to follow the move, which meant a down day painted the
+        # number red however bullish the engines were — the owner asked for the
+        # bias instead, and the bias is the reading a glance off a frozen strip
+        # is actually for.
+        #
+        # ⚠️ The change keeps the move's colour, deliberately. Colouring BOTH by
+        # bias would leave a bullish read with nothing on the strip saying price
+        # is falling, and green on a −70 is a contradiction a trader should see
+        # rather than one the strip resolves for them. A missing bias falls back
+        # to the move, so the number is never uncoloured.
+        move_tone = INK if change is None else BULL if change >= 0 else BEAR
+        tone = bias_tone(v6 or v5, move_tone)
         price = (f"<span style='font-size:20px;font-weight:800;color:{tone};"
                  f"line-height:1'>{px:,.2f}</span>")
         if change is not None:
             price += (f"<span style='font-size:11px;font-weight:700;"
-                      f"color:{tone};margin-left:5px'>"
+                      f"color:{move_tone};margin-left:5px'>"
                       f"{change:+,.2f} ({change / prev * 100:+.2f}%)</span>")
 
     right = "".join(x for x in (
@@ -191,6 +215,15 @@ def header_html(spot: Any = None, prev_close: Any = None,
         _bias_chip("V6", v6) if _txt(v6) else "") if x)
 
     meta = " · ".join(x for x in (_esc(market), _esc(updated)) if x)
+
+    chips = "".join(
+        f"<span style='display:inline-block;background:{PANEL_BG};"
+        f"border:1px solid {GRID};border-radius:5px;padding:1px 6px;"
+        f"margin:2px 4px 0 0;font-size:10.5px;color:{MUTED};"
+        f"white-space:nowrap'>{_esc(x)}</span>"
+        for x in (extras or []) if _txt(x))
+    extras_row = (f"<div style='flex-basis:100%;line-height:1.5'>{chips}</div>"
+                  if chips else "")
 
     return (
         f"<div class='{HEADER_CLASS}' "
@@ -205,13 +238,14 @@ def header_html(spot: Any = None, prev_close: Any = None,
         f"{right}</div>"
         + (f"<div style='font-size:9.5px;color:{MICRO};white-space:nowrap'>"
            f"{meta}</div>" if meta else "")
+        + extras_row
         + "</div>")
 
 
 def render_header(st, slot: Any = None, spot: Any = None,
                   prev_close: Any = None, v5: Any = None, v6: Any = None,
                   market: str = "", updated: str = "",
-                  name: str = APP_NAME) -> None:
+                  name: str = APP_NAME, extras: Any = None) -> None:
     """Draw the header into `slot`, or inline when there is none.
 
     A slot exists because the header sits at the TOP of the page and its values
@@ -222,7 +256,8 @@ def render_header(st, slot: Any = None, spot: Any = None,
     try:
         target = slot if slot is not None else st
         target.markdown(
-            header_html(spot, prev_close, v5, v6, market, updated, name),
+            header_html(spot, prev_close, v5, v6, market, updated, name,
+                        extras),
             unsafe_allow_html=True)
     except Exception:
         pass
