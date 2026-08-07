@@ -103,6 +103,11 @@ LEVEL_LABEL = {
     "proj_vwap": "⇢ VWAP",
 }
 
+#: Which subplot column the two option legs occupy. They are the rightmost
+#: thing in the figure, which is what makes a right-positioned annotation on
+#: them overhang the margin instead of the next panel.
+LEG_COL = 2
+
 #: higher-timeframe POCs get their own dimmer treatment so they never compete
 #: with today's actionable levels
 HTF_COLOUR = "#9fb0c4"
@@ -277,21 +282,33 @@ def terminal_chart(nifty_df=None, call_df=None, put_df=None,
 
     positions = [(1, 1), (1, 2), (2, 2)]
 
-    # ── the liquidity & sentiment profile, BEFORE the candles ──
-    # Drawn first so the bands sit under the price series. Each panel gets its
-    # OWN profile — the premium legs are not a projection of the index one.
-    # Stage 71.8's audit settled that: a premium profile is computed natively
-    # per leg, and drawing the index's POC on a premium panel would mark a
-    # price that series can never trade.
-    for prof, (r, c) in zip((nifty_profile, call_profile, put_profile),
-                            positions):
-        if prof:
-            _profile_overlay(fig, prof, r, c)
-
     for (name, p), (r, c) in zip(parsed, positions):
         if p is None:
             continue
         _add_series(go, fig, name, p, r, c)
+
+    # ── the liquidity & sentiment profile, AFTER the candles ──
+    #
+    # ⚠️ The order is load-bearing, and it used to be the other way round.
+    # `add_hline`/`add_hrect` with `row=`/`col=` are **silently dropped by
+    # Plotly when that subplot holds no trace yet** — no error, no warning, the
+    # shape simply never reaches the figure. The profile ran before
+    # `_add_series`, so every panel's POC, VAH and VAL line and every liquidity
+    # band was discarded on the way in. The three profiles were computed each
+    # cycle and drawn nowhere.
+    #
+    # The original reason for going first — "so the bands sit under the price
+    # series" — is handled by `layer="below"` on the rects, which is what
+    # actually controls stacking. Order controls whether they exist at all.
+    #
+    # Each panel gets its OWN profile — the premium legs are not a projection of
+    # the index one. Stage 71.8's audit settled that: a premium profile is
+    # computed natively per leg, and drawing the index's POC on a premium panel
+    # would mark a price that series can never trade.
+    for prof, (r, c) in zip((nifty_profile, call_profile, put_profile),
+                            positions):
+        if prof:
+            _profile_overlay(fig, prof, r, c)
 
     # ── levels: NIFTY panel only ──
     for key, price in (levels or {}).items():
@@ -405,14 +422,34 @@ def _profile_overlay(fig, profile: Dict[str, Any], row: int, col: int) -> None:
     carrying a `shape` from Stage 71.86 and a `dynamic_poc` from
     `compute_dynamic_poc`. Nothing is computed here or in the overlay module —
     both only decide where a value already published is drawn.
+
+    The option panels are the rightmost column, so their POC/VAH/VAL labels are
+    kept inside the panel; a right-positioned label there overhangs an 8px
+    margin and is cut off. The index panel has the column gap to spill into and
+    keeps the wider placement.
     """
     from .profile_overlay import draw
     draw(fig, row, col, rows=profile.get("rows"), profile=profile,
-         shape=profile.get("shape"))
+         shape=profile.get("shape"), labels_inside=(col == LEG_COL))
 
 
 def _leg_overlay(fig, levels, zones, row: int, col: int) -> None:
-    """One option panel's own levels and VOB zones, in premium terms."""
+    """One option panel's own levels and VOB zones, in premium terms.
+
+    Labels sit on the **right**, which is where the trader reads them: the
+    right-hand edge is *now*, so the price a line marks is next to the candle
+    that is testing it. They used to be on the left, at the oldest bar on the
+    panel — the one place on the chart nothing is happening.
+
+    ⚠️ `xanchor` is set explicitly, and that is not a detail. Plotly's
+    `annotation_position="right"` means *outside* the panel: it resolves to
+    `x=1, xanchor="left"`, so the text starts at the right edge and runs on
+    past it. These two panels are the rightmost column and the figure's right
+    margin is 8px, so the label would be cut off — a level drawn with its price
+    invisible is worse than one drawn on the wrong side. `xanchor="right"`
+    turns the text back into the panel, over the empty space beside the last
+    candle, and costs no chart width.
+    """
     for key, price in (levels or {}).items():
         v = _f(price)
         if v is None or key not in LEVELS:
@@ -421,7 +458,8 @@ def _leg_overlay(fig, levels, zones, row: int, col: int) -> None:
         fig.add_hline(y=v, row=row, col=col, line_width=width, line_dash=dash,
                       line_color=colour,
                       annotation_text=f"{LEVEL_LABEL[key]} ₹{v:,.2f}",
-                      annotation_position="left",
+                      annotation_position="right",
+                      annotation=dict(xanchor="right"),
                       annotation_font=dict(size=8, color=colour))
 
     for z in list(zones or [])[:6]:

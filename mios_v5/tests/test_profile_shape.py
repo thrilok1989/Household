@@ -379,8 +379,31 @@ def test_the_leg_profile_uses_the_app_s_registered_builder():
 
 
 def test_the_profile_is_drawn_under_the_candles():
-    """Bands over the price series would hide it. The overlay loop must come
-    before `_add_series` in the source, and a test is the only thing that keeps
-    it there through a refactor."""
-    src = (ROOT / "mios_v5" / "ui" / "terminal_chart.py").read_text()
-    assert src.index("_profile_overlay(fig") < src.index("_add_series(go, fig")
+    """Bands over the price series would hide it.
+
+    ⚠️ This used to assert that `_profile_overlay` appeared *before*
+    `_add_series` in the source, on the reasoning that call order is what
+    stacks a Plotly figure. It is not, and that reading of it was actively
+    harmful: `add_hrect`/`add_hline` with `row=`/`col=` are **silently dropped
+    when the subplot has no trace yet**, so drawing the profile first did not
+    put it underneath the candles — it threw it away. Every panel's bands, POC,
+    VAH and VAL were computed each cycle and reached the figure on none of
+    them, and this test held that in place.
+
+    `layer="below"` is what actually controls the stacking, so that is what is
+    asserted now. `test_terminal_chart_labels` covers the other half — that the
+    marks reach the figure at all — by reading the rendered figure rather than
+    the source.
+    """
+    src = (ROOT / "mios_v5" / "ui" / "profile_overlay.py").read_text()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "draw")
+    rects = [c for c in ast.walk(fn)
+             if isinstance(c, ast.Call)
+             and getattr(c.func, "attr", "") == "add_hrect"]
+    assert rects, "the bands are no longer drawn as rects"
+    for call in rects:
+        below = {kw.value.value for kw in call.keywords
+                 if kw.arg == "layer" and isinstance(kw.value, ast.Constant)}
+        assert below == {"below"}, "a band would render over the candles"
