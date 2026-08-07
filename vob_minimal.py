@@ -14131,10 +14131,20 @@ def _render_main_analyzer():
         _cs = _db_cache_stats()
         with st.sidebar.expander("🗄 Database cache", expanded=False):
             _served = max(0, _cs['calls'] - _cs['fetches'])
+            _hit = (_served / _cs['calls'] * 100) if _cs['calls'] else 0
             st.caption(
                 f"{_cs['calls']:,} reads asked · **{_cs['fetches']:,}** reached "
-                f"Supabase · {_served:,} served from cache "
+                f"Supabase · {_served:,} served from cache ({_hit:.0f}%) "
                 f"({_cs['rows']:,} rows fetched this session)")
+            # The diagnostic, not decoration. A low hit rate has two completely
+            # different causes with completely different fixes: cache keys that
+            # never match, or tables that are simply empty. A high empty count
+            # beside a low saving says it is the second — which is what a
+            # measured 0.9% hit rate turned out to be.
+            if _cs.get('empty'):
+                st.caption(
+                    f"{_cs['empty']:,} of those came back **empty** — held for "
+                    f"5 min each rather than re-asked every cycle.")
             st.caption(
                 "Analytics and history are held until the app resets; live "
                 "reads (open position, spot, config) refresh every cycle.")

@@ -44,12 +44,20 @@ carve-outs, and both are about not lying to a trader:
 Everything else — the learning and history analytics, which is where the volume
 actually was — is `STATIC`.
 
-## Empty results are never cached
+## Empty results are held briefly, not discarded
 
-If a query returns nothing, that is almost always "not populated yet", not "no
-such data". Caching it until restart would leave the Learning tab blank for the
-rest of the session even after the first rows landed. An empty result is
-discarded from the cache so the next cycle asks again.
+An empty read means "not populated yet", not "no such data" — so it is not
+trusted until restart. It was originally not cached **at all**, and that made
+the cache useless: a live session measured **741 reads, 734 of which reached
+Supabase**, a 0.9% hit rate. Most of MIOS's analytics tables are empty for most
+of a session, and every one of those reads was cached, immediately discarded,
+and asked again twenty seconds later. The rule meant the emptier the database,
+the harder it was queried.
+
+An empty is now held for `EMPTY_TTL`, then dropped so the table is asked again.
+Anything this app writes still invalidates its own read, so rows it produced
+appear on the next call rather than waiting out the window — the window bounds
+the case where something else filled the table.
 
 A failed read is not cached either: the exception propagates out of the cached
 function, so Streamlit stores nothing and the next cycle retries.
@@ -58,6 +66,7 @@ function, so Streamlit stores nothing and the next cycle retries.
 from __future__ import annotations
 
 import inspect as _inspect
+import time as _time
 from typing import Any, Callable, Dict, Tuple
 
 import streamlit as st
@@ -71,6 +80,25 @@ LIVE_TTL = 20
 INTRADAY_TTL = 300
 
 STATIC, INTRADAY, LIVE = "static", "intraday", "live"
+
+#: How long an EMPTY result is trusted before the table is asked again.
+#:
+#: ⚠️ This exists because "never cache an empty result" made the cache useless.
+#: A live session measured **741 reads, 734 of which reached Supabase** — a 0.9%
+#: hit rate. Most of MIOS's analytics tables are empty for most of a session
+#: (nothing has been graded, no story validated, no bias resolved yet), and
+#: every one of those reads was cached, immediately discarded, and asked again
+#: on the next rerun. The rule meant the emptier the database, the harder it
+#: was queried.
+#:
+#: The fear behind the old rule was real — an empty cached until restart would
+#: leave a panel blank all day after its first rows landed. Five minutes is not
+#: the rest of the session, and it is the same window `INTRADAY_TTL` already
+#: accepts for tables that grow during one.
+EMPTY_TTL = 300
+
+#: `(method, signature)` → when it last came back empty.
+_EMPTY_KEY = "_db_cache_empty_since"
 
 #: Decision-critical "right now" reads. Never frozen.
 _LIVE_READS: Tuple[str, ...] = (
@@ -245,10 +273,40 @@ def _bump(kind: str) -> None:
     """Count a hit or a miss, when there is a session to count it in."""
     try:
         stats = st.session_state.setdefault(
-            _STATS_KEY, {"calls": 0, "fetches": 0, "rows": 0})
+            _STATS_KEY, {"calls": 0, "fetches": 0, "rows": 0, "empty": 0})
     except Exception:
         return
     stats[kind] = stats.get(kind, 0) + 1
+
+
+def _empty_expired(method: str, signature: Tuple[Any, ...]) -> bool:
+    """Has this empty been trusted long enough? Stamps it on first sight.
+
+    Returns True only once the window has passed, which is the moment the
+    caller should drop the cached entry so the table is asked again.
+    """
+    try:
+        seen = st.session_state.setdefault(_EMPTY_KEY, {})
+    except Exception:
+        return True          # no session to remember in — behave as before
+    key = (method, signature)
+    now = _time.time()
+    first = seen.get(key)
+    if first is None:
+        seen[key] = now
+        return False
+    if now - first >= EMPTY_TTL:
+        seen.pop(key, None)
+        return True
+    return False
+
+
+def _forget_empty(method: str, signature: Tuple[Any, ...]) -> None:
+    """A read that came back with rows is no longer an empty one."""
+    try:
+        st.session_state.get(_EMPTY_KEY, {}).pop((method, signature), None)
+    except Exception:
+        pass
 
 
 def _rows(result: Any) -> int:
@@ -321,17 +379,23 @@ def invalidate(*methods: str) -> None:
 
 def stats() -> Dict[str, int]:
     """`calls` asked of this layer · `fetches` that reached Supabase · `rows`
-    those fetches returned. `calls - fetches` is what the cache saved."""
+    those fetches returned · `empty` reads that came back with nothing.
+
+    `calls - fetches` is what the cache saved. `empty` is the diagnostic: a
+    high count beside a low saving means the tables are unpopulated, not that
+    the keys are wrong — which is exactly what a 0.9% hit rate turned out to
+    be."""
     try:
         return dict(st.session_state.get(_STATS_KEY)
-                    or {"calls": 0, "fetches": 0, "rows": 0})
+                    or {"calls": 0, "fetches": 0, "rows": 0, "empty": 0})
     except Exception:
-        return {"calls": 0, "fetches": 0, "rows": 0}
+        return {"calls": 0, "fetches": 0, "rows": 0, "empty": 0}
 
 
 def reset_stats() -> None:
     try:
-        st.session_state[_STATS_KEY] = {"calls": 0, "fetches": 0, "rows": 0}
+        st.session_state[_STATS_KEY] = {"calls": 0, "fetches": 0, "rows": 0,
+                                        "empty": 0}
     except Exception:
         pass
 
@@ -376,12 +440,26 @@ class CachedDB:
             fetch = _FETCHERS[_bucket(method)]
             result = fetch(self._db, method, signature, args, kwargs)
             if _empty(result):
-                # Not populated yet — discard so the next cycle asks again,
-                # rather than rendering an empty panel until restart.
-                try:
-                    fetch.clear(self._db, method, signature, args, kwargs)
-                except Exception:
-                    pass
+                _bump("empty")
+                # ⚠️ Not discarded outright — held for `EMPTY_TTL`.
+                #
+                # Discarding immediately is what produced a 0.9% hit rate on a
+                # live session: MIOS's analytics tables are empty for most of a
+                # session, so nearly every read was cached, dropped, and asked
+                # again twenty seconds later. The emptier the database, the
+                # harder it was queried.
+                #
+                # An empty is still not trusted for long — a table that fills
+                # at 09:20 must not read blank at 15:00 — so the entry is kept
+                # only until the window expires, then cleared so the next call
+                # asks again.
+                if _empty_expired(method, signature):
+                    try:
+                        fetch.clear(self._db, method, signature, args, kwargs)
+                    except Exception:
+                        pass
+            else:
+                _forget_empty(method, signature)
             return result
         call.__name__ = method
         return call
