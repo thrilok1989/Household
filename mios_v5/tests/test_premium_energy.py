@@ -915,3 +915,99 @@ def test_the_panel_shows_the_acceleration_beside_the_state():
     html = premium_energy_html(c2)
     acc = c2["shift"]["CALL"]["acceleration"]
     assert f"{acc:+.0f}" in html
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  the compact form on the MIOS V6 card
+# ══════════════════════════════════════════════════════════════════════
+
+def _live_energy():
+    """The reading that prompted this: energy prefers PUT, spike prefers CALL."""
+    return {"ready": True,
+            "call": {"energy": 27, "spike": 39},
+            "put": {"energy": 46, "spike": 34},
+            "dominance": "PUT Dominant",
+            "preferred": {"label": "Prefer PUT"},
+            "confidence": {"grade": "C"}}
+
+
+def test_the_compact_card_carries_both_sides_of_both_rows():
+    from mios_v5.ui.premium_energy_panel import compact_html
+    html = compact_html(_live_energy())
+    for probe in ("C 27%", "P 46%", "C 39%", "P 34%"):
+        assert probe in html, probe
+
+
+def test_the_compact_card_never_drops_spike_for_energy():
+    """⭐ Energy and spike answer different questions and routinely disagree —
+    27/46 energy against 39/34 spike is the side with the participation not
+    being the side with the expansion odds. A compact view is exactly where the
+    second row gets quietly dropped, and choosing one for the trader is not a
+    panel's call."""
+    from mios_v5.ui.premium_energy_panel import compact_html
+    html = compact_html(_live_energy())
+    assert "energy" in html and "spike" in html
+    # …and the disagreement is shown, never scored: no verdict Stage 71.7
+    # never published
+    for invented in ("conflict", "diverge", "disagree", "override"):
+        assert invented not in html.lower(), invented
+
+
+def test_the_compact_card_carries_the_verdicts_it_was_given():
+    from mios_v5.ui.premium_energy_panel import compact_html
+    html = compact_html(_live_energy())
+    assert "Prefer PUT" in html and "conf C" in html and "PUT Dominant" in html
+
+
+def test_a_missing_verdict_draws_no_chip_rather_than_a_dash():
+    from mios_v5.ui.premium_energy_panel import compact_html
+    d = _live_energy()
+    d.pop("preferred"); d.pop("confidence"); d.pop("dominance")
+    html = compact_html(d)
+    assert "C 27%" in html
+    assert "conf" not in html and "Dominant" not in html
+
+
+def test_the_compact_card_says_nothing_when_the_stage_is_not_ready():
+    """A hollow strip on the card above the app is worse than no strip."""
+    from mios_v5.ui.premium_energy_panel import compact_html
+    assert compact_html({"ready": False}) == ""
+    assert compact_html(None) == ""
+    assert compact_html({"ready": True, "call": {}, "put": {}}) == "", \
+        "ready with no numbers is still nothing to say"
+
+
+def test_a_missing_number_is_a_dash_not_a_zero():
+    from mios_v5.ui.premium_energy_panel import compact_html
+    html = compact_html({"ready": True, "call": {"energy": 27},
+                         "put": {"spike": 34}})
+    assert "C 27%" in html and "P 34%" in html
+    assert "0%" not in html
+
+
+def test_the_compact_card_recomputes_nothing():
+    """It lives in the panel that owns this data, so the card and the full
+    section below cannot disagree."""
+    import ast
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parents[2] / "mios_v5" / "ui"
+           / "premium_energy_panel.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef)
+              and n.name == "compact_html")
+    called = {getattr(c.func, "id", "") or getattr(c.func, "attr", "")
+              for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    assert not (called & {"build", "run", "compute", "evaluate"})
+
+
+def test_the_v6_card_renders_it_from_the_published_object():
+    """Not a second read of the raw legs — the same `_premium_energy` the full
+    section renders."""
+    import ast
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[2]
+    tree = ast.parse((root / "vob_minimal.py").read_text())
+    consts = {n.value for n in ast.walk(tree)
+              if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "_premium_energy" in consts
+    src = (root / "vob_minimal.py").read_text()
+    assert "_pe_html" in src, "the compact block is never assembled"

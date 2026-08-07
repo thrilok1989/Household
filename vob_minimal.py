@@ -13464,6 +13464,22 @@ def render_clean_card(spot_price, option_data=None):
         except Exception:
             _charm_html = ""
 
+        # ── Stage 71.7 Premium Energy, in three lines ──────────────────
+        # The full section is drawn inside the Validation expander further down
+        # the page; this is the glance version on the card above the app, from
+        # the SAME published object. Nothing is recomputed here — `compact_html`
+        # lives in the panel that already owns this data, so the card and the
+        # section cannot disagree.
+        #
+        # Both energy AND spike, because they routinely point opposite ways and
+        # a compact view is exactly where the second one gets dropped.
+        _pe_html = ""
+        try:
+            from mios_v5.ui.premium_energy_panel import compact_html as _pehtml
+            _pe_html = _pehtml(st.session_state.get('_premium_energy'))
+        except Exception:
+            _pe_html = ""
+
         # ── MIOS V5 read (Analysis & Audit) — direction + Trade Quality.
         # DIRECTION comes from the SAME authoritative source as the MIOS
         # dashboard: the Conflict-Engine arbitrated preferred_bias in the final
@@ -13678,7 +13694,7 @@ def render_clean_card(spot_price, option_data=None):
                    f"{_sr_intel_html}</div>" if _sr_intel_html else
                    f"<div style='text-align:center;font-size:16px;margin-top:4px;"
                    f"font-weight:800;'>{_sr_line}</div>")
-                + _charm_html + _fs_html + _zh_html),
+                + _pe_html + _charm_html + _fs_html + _zh_html),
                 unsafe_allow_html=True)
 
         # ── 4 · DECISIONS — the three action verdicts, side by side. The Entry
