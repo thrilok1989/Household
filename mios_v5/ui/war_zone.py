@@ -147,12 +147,29 @@ def render(st, fr: Optional[Mapping[str, Any]] = None) -> None:
 def micro(fr: Optional[Mapping[str, Any]] = None) -> str:
     """The fight as PLAIN TEXT for the sticky app header.
 
-    Shorter than `compact_html` again: the level is already on the S/R chips
-    beside it, so this carries the one thing they do not — who is expected to
-    win. `""` when there is no fight.
+    ⚠️ This carries the level AND the odds, and the first version did not.
+
+    It dropped both on the reasoning that "the level is already on the S/R
+    chips beside it". That was wrong, and a live reading disproves it:
+
+        S/R chip   🛡 24,558  brk 44 · rej 56
+        war zone   ⚔️ 24,561  bounce 35 · breakdown 65
+
+    Different level, different odds. Stage 42's battle zone is not the same
+    object as the ranked S/R level next to it, and its probabilities are a
+    separate read — so a header showing only the winner asked the trader to
+    infer two numbers from a neighbouring chip that does not hold them.
+
+    `""` when there is no fight.
     """
     f = fr if isinstance(fr, Mapping) else {}
-    if not _zone(f):
+    bz = _zone(f)
+    if not bz:
         return ""
+
+    price = _fmt(bz.get("price"))
     winner = str(f.get("expected_winner") or "").strip()
-    return f"⚔️ {winner}" if winner else ""
+    odds = " · ".join(f"{k} {v:.0f}" for k, v in _probs(f).items())
+
+    bits = [x for x in (price if price != "—" else "", winner, odds) if x]
+    return f"⚔️ {' · '.join(bits)}" if bits else ""

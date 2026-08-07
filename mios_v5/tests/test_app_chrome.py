@@ -468,13 +468,14 @@ def test_the_footer_renders_into_a_slot_when_given_one():
 # ══════════════════════════════════════════════════════════════════════
 
 _EXTRAS = ["🛡 24,558 brk 44 · rej 56", "🧱 24,608 brk 49 · rej 51",
-           "⚔️ Contested", "⚡ C46 P41 · spk C65 P61"]
+           "⚔️ ₹24,561 · Sellers · bounce 35 · breakdown 65",
+           "⚡ C46 P41 · spk C65 P61"]
 
 
 def test_the_extras_row_carries_every_reading_it_was_given():
     html = C.header_html(24650.3, 24580.0, extras=_EXTRAS)
-    for probe in ("24,558", "rej 56", "24,608", "Contested", "C46 P41",
-                  "spk C65 P61"):
+    for probe in ("24,558", "rej 56", "24,608", "24,561", "Sellers",
+                  "breakdown 65", "C46 P41", "spk C65 P61"):
         assert probe in html, probe
 
 
@@ -506,7 +507,8 @@ def test_the_readings_are_worded_by_the_panels_that_own_them():
                        "probabilities": {"break": 44, "rejection": 56}}) \
         == "🛡 24,558 brk 44 · rej 56"
     assert wz_micro({"battle_zone": {"type": "SUPPORT", "price": 24561},
-                     "expected_winner": "Contested"}) == "⚔️ Contested"
+                     "expected_winner": "Contested"}) \
+        == "⚔️ ₹24,561 · Contested"
     assert pe_micro({"ready": True, "call": {"energy": 46, "spike": 65},
                      "put": {"energy": 41, "spike": 61}}) \
         == "⚡ C46 P41 · spk C65 P61"
