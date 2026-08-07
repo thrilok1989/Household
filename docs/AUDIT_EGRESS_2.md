@@ -180,6 +180,55 @@ Functions), and it cannot see `ws_worker.py`, which is a different process.
 3. **Then** narrow the `select('*')` list, worst first, one at a time, each with
    a test asserting the fields its consumers actually read.
 
+---
+
+## 7 · The TTL finding — measured, modelled, and NOT shipped
+
+Thirty INTRADAY reads refetch every five minutes: **78 times a trading day
+each**. The bounded ones alone come to **~315,900 rows/day**, against 21,080 per
+restart for the entire STATIC set — fifteen times more. Over half of it is one
+method:
+
+| method | limit | refetch/day | rows/day |
+|---|---|---|---|
+| `get_session_log` | 2,000 | 78 | **156,000** |
+| `get_trade_signals` | 500 | 78 | 39,000 |
+| `get_session_recommendations` | 500 | 78 | 39,000 |
+| `get_day_type_log` | 500 | 78 | 39,000 |
+| `get_engine_errors` | 200 | 78 | 15,600 |
+
+**Fifteen of the thirty are already in `_INVALIDATES`** — the app is the only
+writer, so the cache is dropped the moment the data changes and the five-minute
+timer is answering a question invalidation has already answered exactly.
+Reclassifying those modelled at a **92% reduction** in bounded read rows/day
+(392,960 → 31,060).
+
+The other fifteen keep their timer, and the distinction is not cosmetic: they
+are written by `_safe_upsert`, which invalidates nothing, or by another process.
+
+### Why it is not shipped
+
+The existing test `test_invalidating_one_bucket_leaves_the_others_alone` caught
+what the model missed. **`invalidate()` clears a whole bucket**, because this
+layer does not track which argument combinations are live. Moving those reads
+into STATIC would make every `insert_trade_signal` also dump
+`get_engine_attribution`'s eight thousand rows — the saving turned into a larger
+cost. A dedicated bucket fixes that collision but not the one between the
+fifteen themselves.
+
+**Per-method cache functions** would fix it properly. A probe confirms Streamlit
+isolates `.clear()` per dynamically-created cached function even though they
+share a `__qualname__`:
+
+```
+invocations after clearing only p: 1   (1 = isolated, 2 = shared)
+```
+
+That is a structural change to the cache, and it should be made against measured
+write frequencies rather than a model — which is what §6's meter is for. If
+writes to those fifteen tables are rare, the change is a large win; if they are
+frequent, it is a wash or worse, and only the meter can say which.
+
 Until (1) exists, the honest statement is: the writes were provably paying for
 an echo nobody read, that echo was proportional to the largest and most frequent
 writes in the system, and it is now off. Whether that closes the whole gap is
