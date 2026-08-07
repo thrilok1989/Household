@@ -42,14 +42,26 @@ class SupabaseDB:
                         if isinstance(records, pd.DataFrame):
                             records = records.replace({np.nan: None}).to_dict('records')
                         if conflict:
-                            self.client.table(table_name).upsert(records, on_conflict=conflict).execute()
+                            self.client.table(table_name).upsert(records, on_conflict=conflict, returning='minimal').execute()
                         else:
-                            self.client.table(table_name).upsert(records).execute()
+                            self.client.table(table_name).upsert(records, returning='minimal').execute()
                     except:
                         continue
                 self.cache.clear_pending(table_name)
         except:
             pass
+
+    #: ⚠️ `returning='minimal'` is an EGRESS fix, not a tidy-up.
+    #:
+    #: PostgREST echoes every written row back by default, and Supabase bills
+    #: that echo as egress. Nineteen write paths route through here — including
+    #: `save_option_chain`, which writes the whole chain every cycle — and not
+    #: one of them reads the response. So the app was paying to receive a copy
+    #: of ~100 option rows it had just sent, every twenty seconds, all session.
+    #:
+    #: A write that genuinely needs the row back (`upsert_auto_trade` reads
+    #: `.data` for the generated id) does not use this helper and is untouched.
+    _WRITE_RETURNING = 'minimal'
 
     def _safe_upsert(self, table_name, records, conflict_cols):
         if isinstance(records, pd.DataFrame):
@@ -57,7 +69,9 @@ class SupabaseDB:
         if not records:
             return
         try:
-            self.client.table(table_name).upsert(records, on_conflict=conflict_cols).execute()
+            self.client.table(table_name).upsert(
+                records, on_conflict=conflict_cols,
+                returning=self._WRITE_RETURNING).execute()
             self.cache.update(table_name, records)
             self.is_connected = True
         except Exception:
@@ -282,7 +296,7 @@ class SupabaseDB:
         row = dict(row)
         row.setdefault('ts', datetime.now(IST).isoformat())
         def query():
-            return self.client.table('mios_decisions').insert(row).execute()
+            return self.client.table('mios_decisions').insert(row, returning='minimal').execute()
         self._safe_query('mios_decisions', query)
 
     def get_mios_decisions(self, trading_day=None, rejected_only=False, limit=300):
@@ -304,7 +318,7 @@ class SupabaseDB:
         row.setdefault('created_at', datetime.now(IST).isoformat())
         row.setdefault('updated_at', row['created_at'])
         try:
-            self.client.table('trade_signals').insert(row).execute()
+            self.client.table('trade_signals').insert(row, returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -363,7 +377,7 @@ class SupabaseDB:
     def insert_trade_attribution(self, row):
         """Stage 55 — the state of the world at signal birth. Written once."""
         try:
-            self.client.table('trade_attribution').insert(dict(row)).execute()
+            self.client.table('trade_attribution').insert(dict(row), returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -378,7 +392,7 @@ class SupabaseDB:
         if not rows:
             return False
         try:
-            self.client.table('engine_attribution').insert(rows).execute()
+            self.client.table('engine_attribution').insert(rows, returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -388,7 +402,7 @@ class SupabaseDB:
     def insert_trade_event(self, row):
         """Stage 55 — one append-only event in the life of a trade."""
         try:
-            self.client.table('trade_events').insert(dict(row)).execute()
+            self.client.table('trade_events').insert(dict(row), returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -398,7 +412,7 @@ class SupabaseDB:
     def insert_trade_result(self, row):
         """Stage 55 — the outcome, written once at exit and never revised."""
         try:
-            self.client.table('trade_results').insert(dict(row)).execute()
+            self.client.table('trade_results').insert(dict(row), returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -411,7 +425,7 @@ class SupabaseDB:
         if not rows:
             return False
         try:
-            self.client.table('learning_snapshots').insert(rows).execute()
+            self.client.table('learning_snapshots').insert(rows, returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -458,7 +472,7 @@ class SupabaseDB:
     # One row per CHARACTER CHANGE, not per cycle. Append-only.
     def insert_day_type(self, row):
         try:
-            self.client.table('day_type_log').insert(dict(row)).execute()
+            self.client.table('day_type_log').insert(dict(row), returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -482,7 +496,7 @@ class SupabaseDB:
     # ── 🕘 Stage 69 · Session Intelligence (sql/029_session_log.sql) ────
     def insert_session_log(self, row):
         try:
-            self.client.table('session_log').insert(dict(row)).execute()
+            self.client.table('session_log').insert(dict(row), returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -509,7 +523,7 @@ class SupabaseDB:
         if not rows:
             return False
         try:
-            self.client.table('session_recommendations').insert(rows).execute()
+            self.client.table('session_recommendations').insert(rows, returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -528,7 +542,7 @@ class SupabaseDB:
 
     def insert_session_validation(self, row):
         try:
-            self.client.table('session_validation_log').insert(dict(row)).execute()
+            self.client.table('session_validation_log').insert(dict(row), returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -949,7 +963,7 @@ class SupabaseDB:
                 'days_back': days_back, 'pivot_settings': json.dumps(pivot_settings),
                 'pivot_proximity': pivot_proximity, 'updated_at': datetime.now(IST).isoformat()
             }
-            self.client.table('user_preferences').upsert(data, on_conflict="user_id").execute()
+            self.client.table('user_preferences').upsert(data, on_conflict="user_id", returning='minimal').execute()
         except Exception as e:
             if "23505" not in str(e) and "duplicate key" not in str(e).lower():
                 st.error(f"Error saving preferences: {str(e)}")
@@ -973,7 +987,7 @@ class SupabaseDB:
         try:
             data = {'symbol': symbol, 'date': datetime.now(IST).date().isoformat()}
             data.update({k: analytics_data[k] for k in ['day_high', 'day_low', 'day_open', 'day_close', 'total_volume', 'avg_price', 'price_change', 'price_change_pct']})
-            self.client.table('market_analytics').upsert(data, on_conflict="symbol,date").execute()
+            self.client.table('market_analytics').upsert(data, on_conflict="symbol,date", returning='minimal').execute()
         except Exception as e:
             if "23505" not in str(e) and "duplicate key" not in str(e).lower():
                 st.error(f"Error saving analytics: {str(e)}")
@@ -1119,7 +1133,7 @@ class SupabaseDB:
             'updated_at': now.isoformat(),
         }
         try:
-            self.client.table('trade_config').upsert(record, on_conflict='id').execute()
+            self.client.table('trade_config').upsert(record, on_conflict='id', returning='minimal').execute()
         except Exception as e:
             st.warning(f"Could not save trade config: {e}")
 
@@ -1186,7 +1200,7 @@ class SupabaseDB:
     def insert_alert_log(self, row):
         """Store one sent alert (class, side, spot, message)."""
         try:
-            self.client.table('alert_log').insert(row).execute()
+            self.client.table('alert_log').insert(row, returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -1215,7 +1229,7 @@ class SupabaseDB:
     # ── 📊 Leg order-flow snapshots (sql/006_leg_flow_snapshots.sql) ──
     def insert_leg_flow_snapshot(self, row):
         try:
-            self.client.table('leg_flow_snapshots').insert(row).execute()
+            self.client.table('leg_flow_snapshots').insert(row, returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -1229,12 +1243,39 @@ class SupabaseDB:
         return self._safe_query('leg_flow_snapshots', query)
 
     def get_leg_flow_days(self, limit=30):
-        """Distinct trading days that have snapshots, newest first."""
+        """Distinct trading days that have snapshots, newest first.
+
+        ⚠️ This used to pull **15,000 rows** to derive at most thirty values.
+
+        `leg_flow_snapshots` is written many times a minute and kept for sixty
+        days, so the day list was being reconstructed by downloading most of the
+        table and throwing all but the date column away — then deduplicating in
+        Python. The dedupe belongs in the database.
+
+        There is no `DISTINCT` in PostgREST, so the cap is walked down instead:
+        thirty distinct days sit inside a few thousand rows in the worst case,
+        and the loop stops the moment it has enough. Ordered descending, the
+        newest days arrive first, so the common case exits on the first page.
+        """
         try:
-            res = (self.client.table('leg_flow_snapshots').select('trading_day')
-                   .order('trading_day', desc=True).limit(15000).execute())
-            days = sorted({r['trading_day'] for r in (res.data or [])}, reverse=True)
-            return days[:limit]
+            days: list = []
+            seen: set = set()
+            page, size = 0, 1000
+            while len(seen) < limit and page < 6:
+                res = (self.client.table('leg_flow_snapshots')
+                       .select('trading_day')
+                       .order('trading_day', desc=True)
+                       .range(page * size, page * size + size - 1).execute())
+                rows = res.data or []
+                for r in rows:
+                    d = r.get('trading_day')
+                    if d and d not in seen:
+                        seen.add(d)
+                        days.append(d)
+                if len(rows) < size:
+                    break            # the table ended
+                page += 1
+            return sorted(days, reverse=True)[:limit]
         except Exception:
             return []
 
@@ -1242,7 +1283,7 @@ class SupabaseDB:
     def insert_leg_entry_signal(self, sig):
         """Store one qualifying Leg Entry Decision Engine signal."""
         try:
-            self.client.table('leg_entry_signals').insert(sig).execute()
+            self.client.table('leg_entry_signals').insert(sig, returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -1267,7 +1308,8 @@ class SupabaseDB:
         try:
             self.client.table('iv_history').upsert(
                 {'trading_day': trading_day, 'atm_iv': atm_iv},
-                on_conflict='trading_day').execute()
+                on_conflict='trading_day',
+                returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -1292,7 +1334,7 @@ class SupabaseDB:
         """Insert one confirmed-entry signal with its factor snapshot. Returns
         the new row id (for the later outcome update), or None on failure."""
         try:
-            res = self.client.table('signal_outcomes').insert(row).execute()
+            res = self.client.table('signal_outcomes').insert(row, returning='minimal').execute()
             self.is_connected = True
             data = getattr(res, 'data', None) or []
             return data[0]['id'] if data and 'id' in data[0] else None
@@ -1332,7 +1374,7 @@ class SupabaseDB:
     def insert_engine_error(self, row):
         """Store one structured engine-error record (Stage 0 health engine)."""
         try:
-            self.client.table('engine_errors').insert(row).execute()
+            self.client.table('engine_errors').insert(row, returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -1361,7 +1403,8 @@ class SupabaseDB:
             self.client.table('my_analysis').upsert(
                 {'trading_day': trading_day, 'section': section, 'note': note,
                  'updated_at': datetime.now(IST).isoformat()},
-                on_conflict='trading_day,section').execute()
+                on_conflict='trading_day,section',
+                returning='minimal').execute()
             self.is_connected = True
             return True
         except Exception:
@@ -1388,7 +1431,7 @@ class SupabaseDB:
         """Store one ENTRY GATE activation. Returns the row id (for the exit
         monitor's later update), or None on failure."""
         try:
-            res = self.client.table('entry_gate_signals').insert(row).execute()
+            res = self.client.table('entry_gate_signals').insert(row, returning='minimal').execute()
             self.is_connected = True
             data = getattr(res, 'data', None) or []
             return data[0]['id'] if data and 'id' in data[0] else None
@@ -1477,7 +1520,7 @@ class SupabaseDB:
     def insert_bias_prediction(self, row):
         """Log one MIOS directional prediction. Returns row id or None."""
         try:
-            res = self.client.table('bias_predictions').insert(row).execute()
+            res = self.client.table('bias_predictions').insert(row, returning='minimal').execute()
             self.is_connected = True
             data = getattr(res, 'data', None) or []
             return data[0]['id'] if data and 'id' in data[0] else None
@@ -1527,7 +1570,7 @@ class SupabaseDB:
     def insert_market_event(self, event):
         """Store one market intelligence event (event_type, severity, headline, detail, snapshot)."""
         try:
-            res = self.client.table('market_events').insert(event).execute()
+            res = self.client.table('market_events').insert(event, returning='minimal').execute()
             self.is_connected = True
             data = getattr(res, 'data', None) or []
             return data[0]['id'] if data and 'id' in data[0] else None
@@ -1554,7 +1597,7 @@ class SupabaseDB:
     def insert_market_story(self, story):
         """Store a market story with classification."""
         try:
-            res = self.client.table('market_stories').insert(story).execute()
+            res = self.client.table('market_stories').insert(story, returning='minimal').execute()
             self.is_connected = True
             data = getattr(res, 'data', None) or []
             return data[0]['id'] if data and 'id' in data[0] else None
@@ -1578,7 +1621,7 @@ class SupabaseDB:
     def insert_story_validation(self, validation):
         """Store a closed trade linked to its story."""
         try:
-            res = self.client.table('story_validations').insert(validation).execute()
+            res = self.client.table('story_validations').insert(validation, returning='minimal').execute()
             self.is_connected = True
             data = getattr(res, 'data', None) or []
             return data[0]['id'] if data and 'id' in data[0] else None
@@ -1619,7 +1662,7 @@ class SupabaseDB:
     def insert_engine_state(self, row):
         """Store one pipeline pass's flattened engine scores + full snapshot."""
         try:
-            res = self.client.table('engine_state').insert(row).execute()
+            res = self.client.table('engine_state').insert(row, returning='minimal').execute()
             self.is_connected = True
             data = getattr(res, 'data', None) or []
             return data[0]['id'] if data and 'id' in data[0] else None
