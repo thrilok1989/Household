@@ -519,12 +519,40 @@ def _rows(result: Any) -> int:
         return 0
 
 
+class Blocked(Exception):
+    """The budget refused this read.
+
+    ⚠️ Raised from *inside* the cached function on purpose. Streamlit stores
+    nothing when a cached function raises — the property
+    `test_a_failing_read_is_not_cached` already pins — so a refusal leaves no
+    entry behind. The moment the budget is raised or the mode relaxed, the next
+    call simply fetches. Returning an empty instead would have cached the
+    refusal, and the panel would have stayed blank after the trader fixed it.
+    """
+
+
 def _invoke(_db: Any, method: str, signature: Tuple[Any, ...],
             args: tuple, kwargs: dict) -> Any:
     """The real call. Only reached on a cache miss — which is what makes the
-    counter below an accurate count of Supabase round-trips."""
+    counter below an accurate count of Supabase round-trips.
+
+    It is also where `egress_guard` gets its veto, for the same reason: a cache
+    hit never arrives here, so the budget is only ever asked about a read that
+    was actually about to cost something.
+    """
+    guard = _guard()
+    if guard is not None:
+        ok, why = guard.allow(method)
+        if not ok:
+            guard.note_blocked(method, why)
+            raise Blocked(why)
     _bump("fetches")
     result = getattr(_db, method)(*args, **kwargs)
+    if guard is not None:
+        try:
+            guard.spend(method, guard.measure(result))
+        except Exception:
+            pass
     try:
         stats = st.session_state.get(_STATS_KEY)
         if stats is not None:
@@ -532,6 +560,57 @@ def _invoke(_db: Any, method: str, signature: Tuple[Any, ...],
     except Exception:
         pass
     return result
+
+
+_GUARD: Any = None
+_GUARD_TRIED = False
+
+
+def _guard():
+    """`egress_guard`, or `None` when it cannot be found.
+
+    Imported lazily and tolerantly: a budget that could stop the app reading at
+    all — by failing to import — would be a worse outage than the bill it
+    exists to cap.
+
+    ⚠️ Three routes, because this module is not always a package member. The
+    tests load it with `spec_from_file_location`, since `db/__init__.py`
+    imports `supabase` and that is not installed in the test environment. Under
+    that loader there is no parent package, so the relative import cannot
+    resolve and the guard would silently never engage — the wiring would look
+    correct in the source and do nothing. The path fallback is what makes the
+    enforcement testable at all.
+
+    Resolved once. It is asked on every cache miss, and an import that fails is
+    not going to start succeeding.
+    """
+    global _GUARD, _GUARD_TRIED
+    if _GUARD_TRIED:
+        return _GUARD
+    _GUARD_TRIED = True
+    try:
+        from . import egress_guard          # normal: db.read_cache
+        _GUARD = egress_guard
+        return _GUARD
+    except Exception:
+        pass
+    try:
+        import importlib
+        _GUARD = importlib.import_module("db.egress_guard")
+        return _GUARD
+    except Exception:
+        pass
+    try:
+        import importlib.util
+        import pathlib
+        path = pathlib.Path(__file__).resolve().with_name("egress_guard.py")
+        spec = importlib.util.spec_from_file_location("_egress_guard", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _GUARD = mod
+    except Exception:
+        _GUARD = None
+    return _GUARD
 
 
 # Three functions rather than one, because `ttl` is fixed at decoration time.
@@ -643,7 +722,14 @@ class CachedDB:
             # refetch of an all-day table.
             _refresh_if_stale(method)
             fetch = _FETCHERS[_bucket(method)]
-            result = fetch(self._db, method, signature, args, kwargs)
+            try:
+                result = fetch(self._db, method, signature, args, kwargs)
+            except Blocked:
+                # The budget refused it. `None` is what every consumer in this
+                # app already handles — the "did not report" path exists in all
+                # of them — and `egress_guard.blocked_line()` is what stops the
+                # blank panel being mistaken for an empty table.
+                return None
             if _empty(result):
                 _bump("empty")
                 # ⚠️ Not discarded outright — held for `EMPTY_TTL`.
