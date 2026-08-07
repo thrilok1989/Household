@@ -342,3 +342,92 @@ def test_the_css_never_raises():
     class Boom:
         def markdown(self, *a, **k): raise RuntimeError("no")
     C.render_chrome_css(Boom())
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ⭐ they must not be empty for most of every refresh
+# ══════════════════════════════════════════════════════════════════════
+
+def test_both_strips_are_primed_before_the_cycle_runs():
+    """The reported "sometimes it vanishes".
+
+    Both strips are FILLED at the end of the cycle so they carry this cycle's
+    spot — but `st_autorefresh` rebuilds the page from the top every twenty
+    seconds, so an unprimed placeholder is empty for the entire render, network
+    fetches included. They were not vanishing at random: they were absent for
+    most of every refresh and present only between cycles.
+    """
+    tree = ast.parse((ROOT / "vob_minimal.py").read_text())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "main")
+    order = [getattr(c.func, "id", "") for c in ast.walk(fn)
+             if isinstance(c, ast.Call) and getattr(c.func, "id", "") in
+             ("_prime_app_chrome", "_render_main_analyzer", "_render_app_chrome")]
+    assert order == ["_prime_app_chrome", "_render_main_analyzer",
+                     "_render_app_chrome"], (
+        "prime, then render the page, then overwrite with this cycle's values")
+
+
+def test_the_footer_gets_a_placeholder_too():
+    """Without one it has no reserved position and is absent for the whole
+    render, exactly like the header was."""
+    src = (ROOT / "vob_minimal.py").read_text()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "main")
+    empties = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+               and getattr(n.func, "attr", "") == "empty"]
+    assert len(empties) >= 2, "header and footer each need a slot"
+
+
+def test_the_primed_strip_carries_the_stored_timestamp_not_a_fresh_one():
+    """⚠️ The whole reason the fill was late in the first place.
+
+    A previous-cycle price under a live clock claims to be current. Under its
+    OWN timestamp it is simply a reading from a moment ago, which is true.
+    """
+    tree = ast.parse((ROOT / "vob_minimal.py").read_text())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_prime_app_chrome")
+    called = {getattr(c.func, "id", "") or getattr(c.func, "attr", "")
+              for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    assert "now" not in called and "strftime" not in called, (
+        "the priming render must not mint a timestamp")
+    literals = {n.value for n in ast.walk(fn)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "updated" in literals, "it reads the stored one"
+
+
+def test_the_cycle_stores_what_the_next_prime_needs():
+    tree = ast.parse((ROOT / "vob_minimal.py").read_text())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_render_app_chrome")
+    literals = {n.value for n in ast.walk(fn)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "_chrome_last" in literals
+    for field in ("spot", "prev_close", "v5", "v6", "market", "updated"):
+        assert field in literals, field
+
+
+def test_nothing_is_primed_on_the_first_run():
+    """One blank cycle at startup is unavoidable — there is nothing to prime
+    from — and is not what was reported."""
+    tree = ast.parse((ROOT / "vob_minimal.py").read_text())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_prime_app_chrome")
+    assert any(isinstance(n, ast.Return) for n in ast.walk(fn)), (
+        "it must bail out when there is no stored state")
+
+
+def test_the_footer_renders_into_a_slot_when_given_one():
+    drawn = []
+
+    class Slot:
+        def markdown(self, html, **kw): drawn.append(("slot", html))
+
+    class Page:
+        def markdown(self, html, **kw): drawn.append(("page", html))
+
+    C.render_footer(Page(), Slot(), updated="15:22")
+    C.render_footer(Page(), None, updated="15:22")
+    assert [w for w, _ in drawn] == ["slot", "page"]
