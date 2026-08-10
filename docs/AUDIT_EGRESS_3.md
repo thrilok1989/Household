@@ -166,7 +166,72 @@ would be guessing again.
 
 ---
 
-## 7 · Held by tests
+## 7 · Control, not only reduction
+
+Everything above removes waste. It does not stop a *new* waste from running all
+day unnoticed, which is how the 1 GB happened in the first place — the reads
+were not obviously wrong, there was just no ceiling.
+
+`db/egress_guard.py` is the ceiling. A session budget in MB, enforced at the
+read boundary, with the app tightening itself as the budget is consumed:
+
+| mode | at | what stops |
+|---|---|---|
+| `NORMAL` | < 70% | nothing |
+| `FRUGAL` | ≥ 70% | the heavy history and learning reads (`ANALYTICS`) |
+| `CACHE_ONLY` | ≥ 100% | everything except `PROTECTED` |
+
+Cached rows keep serving in every mode, so most of the screen keeps working.
+
+### The rule it may not break
+
+> **The budget may suppress analytics. It may not suppress the reads MIOS
+> state, the decision stages, or Telegram alerts depend on.**
+
+The same rule `AUDIT_FOCUS_MODE.md` opens with, and enforced the same way:
+`PROTECTED` is checked **before** the mode and before the budget, and a test
+asserts that ordering rather than trusting it. A trader who sets the budget to
+zero loses the learning tabs and keeps their signals.
+
+`PROTECTED ∩ ANALYTICS = ∅` is also asserted, because FRUGAL drops `ANALYTICS`
+wholesale — an overlap would mean the first tightening step silently cost a
+signal.
+
+### ⚠️ A refusal is never silent
+
+The failure this design could introduce is worse than the bill: a panel
+rendering empty because its query was refused, indistinguishable from a panel
+whose table is genuinely empty. Every refusal is recorded by method and reason,
+and `blocked_line()` puts it on screen:
+
+```
+⛔ Not fetched — cache-only, the session budget is spent. These panels are
+   blank because the read was refused, not because the table is empty:
+   get_engine_attribution ×22 · get_session_log ×2
+```
+
+### Two design points worth keeping
+
+**A refusal is an exception, not an empty return.** Streamlit stores nothing
+when a cached function raises — the property `test_a_failing_read_is_not_cached`
+already pins — so a refusal leaves no entry behind and raising the budget works
+on the very next call. Returning an empty would have cached the refusal, and
+the panel would have stayed blank after the trader fixed it: a control that
+appears not to work.
+
+**A pin can only tighten.** Pinning `NORMAL` past the stop threshold would let
+the cap be switched off by the same widget that exists to enforce it.
+
+### What the number is
+
+Parsed payload size — the same measure `tools/egress_meter.py` uses, with the
+same caveat. It excludes headers and ignores gzip, so real egress is smaller.
+Setting 50 MB does not promise 50 MB on the invoice; it promises the app will
+have stopped fetching by the time it has parsed 50 MB.
+
+---
+
+## 8 · Held by tests
 
 | test | holds |
 |---|---|
@@ -180,3 +245,10 @@ would be guessing again.
 | `test_an_unwritten_table_is_fetched_once_for_the_whole_day` | the headline |
 | `test_no_read_of_the_candle_table_is_unbounded` | §3 |
 | `test_every_read_is_bounded_by_a_limit_or_a_named_filter` | new unbounded reads |
+| `test_a_decision_critical_read_is_never_refused` | §7's rule, at zero budget |
+| `test_the_protected_check_happens_before_the_budget_is_consulted` | the ordering, not the coincidence |
+| `test_nothing_on_the_decision_path_is_in_the_analytics_set` | FRUGAL cannot cost a signal |
+| `test_a_pin_cannot_loosen_past_the_budget` | the control cannot disable itself |
+| `test_a_refusal_is_not_cached_so_raising_the_budget_works_at_once` | why it raises |
+| `test_the_blocked_line_names_the_panels_and_the_reason` | no silent blank |
+| `test_a_cache_hit_is_never_charged` | the budget only sees real cost |

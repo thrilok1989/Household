@@ -12849,6 +12849,87 @@ def compute_dual_profile(df, num_rows=25):
     return session_mfp, composite_mfp, migration
 
 
+def _render_egress_budget(st):
+    """💸 Egress budget — the app's own limit on what it may spend at Supabase.
+
+    `read_cache` removed the waste. This is control: a cap the app enforces
+    itself, so a runaway day cannot become a runaway bill while nobody is
+    watching. `db/egress_guard.py` owns every decision here; this function only
+    draws what it reports and hands back the two settings.
+
+    ⚠️ The blocked line is not decoration. A panel that renders empty because
+    its query was refused looks exactly like a panel whose table is empty, and
+    this repo has shipped that confusion before. If anything was refused, it is
+    named on screen.
+    """
+    try:
+        from db import egress_guard as _eg
+    except Exception:
+        return
+    try:
+        _s = _eg.state()
+        _tone = {"NORMAL": "🟢", "FRUGAL": "🟡", "CACHE_ONLY": "🔴"}
+        with st.sidebar.expander(
+                f"{_tone.get(_s['mode'], '💸')} Egress budget · "
+                f"{_s['used_mb']:.1f} MB", expanded=False):
+            st.caption(_eg.summary_line())
+            if _s["budget_mb"] > 0:
+                st.progress(min(1.0, _s["used_pct"] / 100.0))
+
+            # ⛔ named refusals, before anything else in the panel — this is
+            # the line that stops a throttled panel being read as a quiet
+            # market.
+            _blocked = _eg.blocked_line()
+            if _blocked:
+                st.warning(_blocked)
+
+            _mb = st.number_input(
+                "Session budget (MB)", min_value=0.0, max_value=2000.0,
+                value=float(_s["budget_mb"]), step=10.0,
+                help="Parsed payload, not the invoice — it excludes headers "
+                     "and ignores gzip, so real egress is smaller. 0 stops "
+                     "every read except the decision-critical ones.")
+            if abs(float(_mb) - float(_s["budget_mb"])) > 1e-9:
+                _eg.set_budget_mb(_mb)
+                st.rerun()
+
+            _choice = st.radio(
+                "Mode", ["Auto", "NORMAL", "FRUGAL", "CACHE_ONLY"],
+                index=(0 if not _s["pinned"]
+                       else ["Auto", "NORMAL", "FRUGAL",
+                             "CACHE_ONLY"].index(_s["pinned"])),
+                horizontal=True,
+                help="Auto tightens on its own at 70% and 100% of the budget. "
+                     "A pin can only be tighter than Auto would choose — a "
+                     "control that quietly disables itself is worse than none.")
+            _pin = None if _choice == "Auto" else _choice
+            if _pin != _s["pinned"]:
+                _eg.pin_mode(_pin)
+                st.rerun()
+
+            st.caption(
+                "**NORMAL** everything reads · **FRUGAL** history and learning "
+                "pause · **CACHE_ONLY** nothing but the decision-critical "
+                "reads reach Supabase. Cached rows keep serving in every mode.")
+            st.caption(
+                "🔒 Never throttled, whatever the budget says: open position, "
+                "spot, trade config, today's signal count, candles, day-open "
+                "spot. **The budget may suppress analytics; it may not "
+                "suppress a decision or an alert.**")
+
+            _top = _s["top"]
+            if _top:
+                st.caption("Biggest spenders this session — where to look "
+                           "next: " + " · ".join(
+                               f"{r['method']} {_eg.human(r['bytes'])}"
+                               f" ×{r['reads']}" for r in _top))
+            if st.button("Reset the meter"):
+                _eg.reset()
+                st.rerun()
+    except Exception:
+        pass
+
+
 def _render_retention_panel(st, db):
     """🗑 Data retention — the preview, and the switch that is not on.
 
@@ -14171,6 +14252,9 @@ def _render_main_analyzer():
                 st.rerun()
     except Exception:
         pass
+
+    # ── egress budget: the app's own spending limit ─────────────────────
+    _render_egress_budget(st)
 
     # ── data retention: what would go, before anything goes ─────────────
     _render_retention_panel(st, db)
