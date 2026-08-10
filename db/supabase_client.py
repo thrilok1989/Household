@@ -13,6 +13,75 @@ from db.cache_manager import CacheManager
 # in raw JSON. This desk thinks in IST; the stored rows should too.
 IST = pytz.timezone('Asia/Kolkata')
 
+# ══════════════════════════════════════════════════════════════════════════
+#  Read projections — the one egress lever caching cannot pull
+# ══════════════════════════════════════════════════════════════════════════
+#
+# `db/read_cache.py` reduced how OFTEN a read reaches Supabase. It cannot
+# reduce how BIG the read is, and the fetches it cannot remove are the
+# expensive ones: the cold-start pass after every restart, and the refetch
+# every invalidation forces. Those pay full row width every time.
+#
+# 52 of 61 reads were `select('*')`. `tools/egress_meter.py` named this the
+# largest remaining item and deferred it for a stated reason:
+#
+#   > narrowing a column list is a per-call-site decision: each one needs its
+#   > consumers checked, and getting it wrong renders a blank field rather
+#   > than a slow one.
+#
+# So this narrows exactly two reads — the two with the most rows AND a JSONB
+# blob column that **no read consumer touches**. A JSON snapshot dwarfs every
+# numeric column beside it, so dropping one blob from an 8,000-row read is
+# worth more than narrowing thirty small ones.
+#
+# ⚠️ An inclusion list has one dangerous failure mode: a column added to the
+# table later is silently omitted, and a silently missing column is precisely
+# the blank field the audit warned about. `test_read_projections.py` closes
+# that by re-deriving each list from `sql/*.sql` — add a column to the schema
+# without adding it here and the suite fails instead of the panel.
+#
+#: table → the columns a read of it needs, and why the omitted one is safe.
+_PROJECTIONS = {
+    # `data` is per-engine JSONB, written by Stage 55 and never read back:
+    # `attribution.py::engine_rows` builds it from a live MarketState, and
+    # `stage29_evolution` reads its own session snapshot, not this table.
+    # Every reader of these rows (contribution · engine_accuracy · calibration
+    # · attribution) uses only the scalar columns below.
+    'engine_attribution': (
+        'id', 'signal_id', 'trading_day', 'created_at', 'engine', 'stage',
+        'output', 'bias', 'status', 'confidence', 'strength', 'weight',
+        'agreement', 'conflict', 'reliability', 'freshness_min'),
+    # `engine_snapshot` has no reference anywhere in the repo outside one
+    # docstring explaining why per-engine rows replaced it. Its consumers are
+    # dashboard_v6's `_history` table and `replay`, and neither asks for it.
+    'trade_signals': (
+        'id', 'signal_id', 'trading_day', 'created_at', 'updated_at', 'side',
+        'quality', 'confidence', 'zone_side', 'entry_price', 'stop', 'target',
+        'rr', 'status', 'signal_spot', 'entered_price', 'entered_at',
+        'exit_price', 'exit_at', 'outcome', 'pnl_points', 'holding_secs',
+        'reason'),
+}
+
+#: The blob each projection deliberately drops. Read by the guard test, which
+#: asserts `projection == declared columns - dropped` for every entry above,
+#: so this file cannot drift from the schema in either direction.
+_PROJECTION_DROPS = {
+    'engine_attribution': ('data',),
+    'trade_signals': ('engine_snapshot',),
+}
+
+
+def projection(table: str) -> str:
+    """The column list for a read of `table` — `'*'` when it has no projection.
+
+    Narrowing is opt-in per table. A table absent from `_PROJECTIONS` keeps
+    `select('*')`, which is the safe direction for a read whose consumers have
+    not been checked.
+    """
+    cols = _PROJECTIONS.get(table)
+    return ','.join(cols) if cols else '*'
+
+
 class SupabaseDB:
     def __init__(self, url, key):
         self.client: Client = create_client(url, key)
@@ -61,6 +130,16 @@ class SupabaseDB:
     #:
     #: A write that genuinely needs the row back (`upsert_auto_trade` reads
     #: `.data` for the generated id) does not use this helper and is untouched.
+    #:
+    #: ⚠️ Round 2 covered the 19 writes routed through `_safe_upsert` and the
+    #: `insert_*` paths, and left the five `update_*` methods echoing. Four of
+    #: them discard the response outright — they `return True` — so they were
+    #: paying for a row nobody looked at, `entry_gate_signals` at 37 columns
+    #: among them. Those four now pass this explicitly.
+    #:
+    #: `upsert_auto_trade` is the one exception and stays as it is: it reads
+    #: `result.data[0]` for the id Postgres generates, so `minimal` would break
+    #: it. `test_egress_writes` holds that distinction.
     _WRITE_RETURNING = 'minimal'
 
     def _safe_upsert(self, table_name, records, conflict_cols):
@@ -412,7 +491,8 @@ class SupabaseDB:
         fields = dict(fields)
         fields['updated_at'] = datetime.now(IST).isoformat()
         try:
-            self.client.table('trade_signals').update(fields).eq(
+            self.client.table('trade_signals').update(
+                fields, returning=self._WRITE_RETURNING).eq(
                 'signal_id', signal_id).execute()
             self.is_connected = True
             return True
@@ -433,9 +513,14 @@ class SupabaseDB:
         return df.iloc[0].to_dict()
 
     def get_trade_signals(self, trading_day=None, limit=500):
-        """Lifecycle history (newest first) as a DataFrame for the history panel."""
+        """Lifecycle history (newest first) as a DataFrame for the history panel.
+
+        Projected: the `engine_snapshot` blob is not read by the history table
+        or by replay, which are this method's only two callers.
+        """
         def query():
-            q = self.client.table('trade_signals').select('*')
+            q = self.client.table('trade_signals').select(
+                projection('trade_signals'))
             if trading_day:
                 q = q.eq('trading_day', trading_day)
             return q.order('created_at', desc=True).limit(limit).execute()
@@ -514,9 +599,15 @@ class SupabaseDB:
 
     def _learning_rows(self, table, limit, order='created_at'):
         """Newest-first records as plain dicts — the order every rolling window
-        in Stages 56/57 assumes."""
+        in Stages 56/57 assumes.
+
+        Reads through `projection()`, so `engine_attribution` — the widest read
+        in the app at 8,000 rows — arrives without its unread `data` blob.
+        `order` is applied by PostgREST and does not require the column to be
+        in the projection.
+        """
         def query():
-            return (self.client.table(table).select('*')
+            return (self.client.table(table).select(projection(table))
                     .order(order, desc=True).limit(limit).execute())
         res = self._safe_query(table, query)
         try:
@@ -1427,7 +1518,9 @@ class SupabaseDB:
         if row_id is None:
             return False
         try:
-            self.client.table('signal_outcomes').update(fields).eq('id', row_id).execute()
+            self.client.table('signal_outcomes').update(
+                fields, returning=self._WRITE_RETURNING).eq(
+                'id', row_id).execute()
             self.is_connected = True
             return True
         except Exception:
@@ -1524,7 +1617,10 @@ class SupabaseDB:
         if row_id is None:
             return False
         try:
-            self.client.table('entry_gate_signals').update(fields).eq('id', row_id).execute()
+            # 37 columns — the widest echo of the four, and nothing reads it.
+            self.client.table('entry_gate_signals').update(
+                fields, returning=self._WRITE_RETURNING).eq(
+                'id', row_id).execute()
             self.is_connected = True
             return True
         except Exception:
@@ -1613,7 +1709,9 @@ class SupabaseDB:
         if row_id is None:
             return False
         try:
-            self.client.table('bias_predictions').update(fields).eq('id', row_id).execute()
+            self.client.table('bias_predictions').update(
+                fields, returning=self._WRITE_RETURNING).eq(
+                'id', row_id).execute()
             self.is_connected = True
             return True
         except Exception:

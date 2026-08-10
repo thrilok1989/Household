@@ -12,6 +12,7 @@ exactly the kind of thing a test can hold.
 
 import ast
 import pathlib
+import re
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SRC = ROOT / "db" / "supabase_client.py"
@@ -20,6 +21,19 @@ SRC = ROOT / "db" / "supabase_client.py"
 #: id the database generated. Listed by name so adding a second exception is a
 #: deliberate edit rather than a silent drift.
 _MAY_ECHO = {"upsert_auto_trade"}
+
+#: The three PostgREST write verbs.
+#:
+#: ⚠️ `update` belongs here and was absent, which is why this suite stayed
+#: green while five `update_*` methods echoed their rows through two rounds of
+#: egress work. PostgREST echoes an UPDATE exactly as it echoes an INSERT; a
+#: test that knew only two of the three verbs could not see the third, and
+#: `entry_gate_signals` is 37 columns wide.
+#:
+#: The lookbehind excludes `self.cache.update(...)` — `db/cache_manager.py` is
+#: an in-process dict and reaches no network. Without it `_safe_query`, which
+#: is a READ, reports as an echoing write.
+_WRITE_VERB = re.compile(r"\.insert\(|\.upsert\(|(?<!cache)\.update\(")
 
 
 def _write_methods():
@@ -31,7 +45,7 @@ def _write_methods():
         if not isinstance(fn, ast.FunctionDef):
             continue
         body = "\n".join(lines[fn.lineno - 1:(fn.end_lineno or fn.lineno)])
-        if ".insert(" in body or ".upsert(" in body:
+        if _WRITE_VERB.search(body):
             yield fn.name, body
 
 
