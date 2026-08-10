@@ -168,9 +168,83 @@ def test_the_card_still_renders_into_its_own_slot_at_the_top():
     claim = _SRC.index("_card_container = st.container()")
     v6 = _SRC.index("_v6_container = st.container()")
     fill = _SRC.index("# 🎯 The Trade Card")
-    bias = _SRC.index("render_all_bias_dashboard(underlying, df, option_data)")
+    # Matched without the closing paren: the call gained a `picture_slot=`
+    # argument when the Market Picture moved above V6, and this test is about
+    # ORDER, not about the argument list.
+    bias = _SRC.index("render_all_bias_dashboard(underlying, df, option_data")
     assert claim < v6, "the card must be claimed above the V6 container"
     assert bias < fill, "the card must be filled after the bias dashboard runs"
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  🗺️ the Market Picture sits above MIOS V6
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_market_picture_slot_is_claimed_above_the_v6_dashboard():
+    """The regime read — UP/DOWN/SIDEWAYS, the levels, the odds — belongs above
+    MIOS V6, not below V6 and V5 both. It is a claimed container rather than a
+    moved call for the reason the Trade Card is: it cannot be computed this
+    early."""
+    claim = _SRC.index("_picture_container = st.container()")
+    v6 = _SRC.index("_v6_container = st.container()")
+    assert claim < v6, "the Market Picture must be claimed above MIOS V6"
+
+
+def test_the_slot_is_handed_to_the_bias_dashboard():
+    """A container nothing draws into leaves a blank band above V6 — the exact
+    failure this repo has shipped three times."""
+    assert "picture_slot=_picture_container" in _SRC
+
+
+def test_the_market_picture_is_still_computed_inside_the_bias_dashboard():
+    """⚠️ Only the container moved. `cat_scores` is built part-way through
+    `render_all_bias_dashboard` and is the Market Picture's input, and
+    `_market_picture` — which it publishes — is what the Trade Card and Entry
+    Gate read. Hoisting the CALL above the dashboard would hand it a half-built
+    vote tally and publish a regime nothing downstream could trust.
+    """
+    body = _SRC[_SRC.index("def render_all_bias_dashboard("):]
+    body = body[:body.index("\ndef ")]
+    assert "render_market_picture(spot_price, df, option_data, cat_scores)" in body
+    bias_call = _SRC.index("render_all_bias_dashboard(underlying, df, option_data")
+    card_fill = _SRC.index("# 🎯 The Trade Card")
+    assert bias_call < card_fill, (
+        "the Trade Card still has to be filled after the dashboard publishes "
+        "_market_picture")
+
+
+def test_the_slot_is_a_parameter_and_not_a_session_key():
+    """Principle 4: an input that arrives through `session_state` is invisible
+    in the signature and cannot be tested or replayed. The card slot precedent
+    is a local; this is a parameter."""
+    sig = _SRC[_SRC.index("def render_all_bias_dashboard("):]
+    sig = sig[:sig.index(")")]
+    assert "picture_slot" in sig
+
+
+def test_a_market_picture_failure_reports_into_the_slot_it_was_given():
+    """⚪ could not report is a report. With the panel lifted above V6, a
+    swallowed failure would leave an empty band at the top of the page, which
+    reads as 'no regime' rather than 'this broke'."""
+    body = _SRC[_SRC.index("def render_all_bias_dashboard("):]
+    body = body[:body.index("\ndef ")]
+    block = body[body.index("🗺️ Market Picture"):]
+    block = block[:block.index("Strike-Mode Cockpit")]
+    assert block.count("with picture_slot:") == 2, (
+        "both the render and its failure caption must go into the slot")
+    assert "Market picture unavailable" in block
+
+
+def test_the_dashboard_still_works_without_a_slot():
+    """`picture_slot=None` must draw inline, exactly where it used to. A helper
+    that only works when wired one way is a trap for the next caller."""
+    sig = _SRC[_SRC.index("def render_all_bias_dashboard("):]
+    sig = sig[:sig.index(")")]
+    assert "picture_slot=None" in sig
+    body = _SRC[_SRC.index("def render_all_bias_dashboard("):]
+    body = body[:body.index("\ndef ")]
+    assert "if picture_slot is not None:" in body
+    assert "else:" in body
 
 
 def test_the_card_body_was_not_edited():

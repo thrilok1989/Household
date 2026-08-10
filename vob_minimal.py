@@ -9028,10 +9028,17 @@ _WAIT_LOG_KEEP = 400
 
 
 
-def render_all_bias_dashboard(spot_price, df, option_data):
+def render_all_bias_dashboard(spot_price, df, option_data, picture_slot=None):
     """Bias dashboard split into 3 categories: Fast / Lagging / Misguiding.
     Each category has its own Overall Verdict + table. Rendered in order:
-    Fast → Lagging → Misguiding."""
+    Fast → Lagging → Misguiding.
+
+    `picture_slot` — an `st.container()` claimed higher up the page for the
+    Market Picture. Passed in rather than read from `session_state` so this
+    function's inputs stay visible in its signature. `None` draws the Market
+    Picture inline, exactly where it used to be, which is what keeps the
+    function usable on its own.
+    """
     rows = []
     cat_scores = {'fast': [0, 0], 'lag': [0, 0], 'mis': [0, 0]}  # [bull, bear]
 
@@ -9714,14 +9721,33 @@ def render_all_bias_dashboard(spot_price, df, option_data):
         pass
 
     # ── Header
-    # 🗺️ Market Picture — regime + levels + probabilities (top of dashboard)
+    # 🗺️ Market Picture — regime + levels + probabilities.
+    #
+    # Drawn into `picture_slot` when the caller claimed one, which puts it ABOVE
+    # the MIOS V6 dashboard instead of below V6 and V5 both. It is computed
+    # here either way: `cat_scores` above is its input, and `_market_picture` —
+    # which it publishes — is what the Trade Card and Entry Gate read. Moving
+    # the computation up would hand it a half-built vote tally; moving only the
+    # container costs nothing.
+    #
+    # A failure still reports into whichever slot is in play, so an empty space
+    # above V6 can never be mistaken for "no regime read".
     try:
-        render_market_picture(spot_price, df, option_data, cat_scores)
+        if picture_slot is not None:
+            with picture_slot:
+                render_market_picture(spot_price, df, option_data, cat_scores)
+        else:
+            render_market_picture(spot_price, df, option_data, cat_scores)
     except Exception as _mp_err:
-        st.caption(f"Market picture unavailable: {_mp_err}")
+        if picture_slot is not None:
+            with picture_slot:
+                st.caption(f"Market picture unavailable: {_mp_err}")
+        else:
+            st.caption(f"Market picture unavailable: {_mp_err}")
 
-    # 🎯 Strike-Mode Cockpit — ATM±2 positioning + spot action, rendered directly
-    # below the Market Picture dashboard.
+    # 🎯 Strike-Mode Cockpit — ATM±2 positioning + spot action. Stays at the top
+    # of the bias dashboard; with the Market Picture lifted above MIOS V6, this
+    # is now the first thing in this section rather than the second.
     try:
         render_strike_mode_dashboard(spot_price, df, option_data)
     except Exception as _sm_err:
@@ -14212,7 +14238,16 @@ def _render_main_analyzer():
     # The Trade Card sits above everything, but it reads state the bias
     # dashboard stashes — so it is rendered into a container claimed here and
     # filled at step 10, after its inputs exist.
+    #
+    # 🗺️ The Market Picture is the same arrangement, for the same reason. It is
+    # the regime read — UP/DOWN/SIDEWAYS, the levels, the odds — so it belongs
+    # above MIOS V6 rather than below two collapsed dashboards. But it cannot be
+    # COMPUTED here: it needs `cat_scores`, which only exists part-way through
+    # the bias dashboard, and it publishes `_market_picture`, which the Trade
+    # Card immediately below reads. So the slot is claimed now and filled during
+    # step 10 — the position moves, the order of computation does not.
     _card_container = st.container()
+    _picture_container = st.container()
     _v6_container = st.container()
     _v5_container = st.container()
     _bias_container = st.container()
@@ -14563,10 +14598,14 @@ def _render_main_analyzer():
     # `_leg_bias_cache`, `_market_picture`, `_full_market_read` and
     # `_market_structure`, five of V6's inputs, and the Opportunity Matrix
     # reads its rows directly.
+    #
+    # `picture_slot` is the container claimed above MIOS V6. The Market Picture
+    # still runs at its own point inside this call — only where it DRAWS moves.
     if underlying and option_data:
         try:
             with _bias_container:
-                render_all_bias_dashboard(underlying, df, option_data)
+                render_all_bias_dashboard(underlying, df, option_data,
+                                          picture_slot=_picture_container)
         except Exception as err:
             st.caption(f"Bias dashboard unavailable: {err}")
 
