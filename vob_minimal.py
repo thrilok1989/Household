@@ -14026,6 +14026,20 @@ def _render_main_analyzer():
                 _egress.install(db.client)
         except Exception:
             pass
+        # ── the day ledger · ALWAYS ON ─────────────────────────────────
+        # Same placement and the same reason — the raw client, before the cache
+        # wrapper — but this one answers the question the per-cycle meter
+        # cannot: what has TODAY cost, and which table spent it?
+        #
+        # Round 3 shipped a proven reduction in round-trips and the bill did not
+        # visibly move, because nobody could see bytes per day. Cheap enough to
+        # leave on: a `len()` per response, and one `json.dumps` of a single row
+        # per table per day to learn its width.
+        try:
+            from db import egress_budget as _budget
+            _budget.install(db.client)
+        except Exception:
+            pass
         db.sync_pending()
         st.session_state['_db_obj'] = db
         st.session_state['_story_task'] = get_story_task()
@@ -14179,6 +14193,15 @@ def _render_main_analyzer():
     try:
         from db.storage_audit import render as _render_storage
         _render_storage(st, db)
+    except Exception:
+        pass
+
+    # ── egress: what today has cost, against the 100 MB/day target ──────
+    # Storage says how big the tables ARE; this says how many bytes left them.
+    # Two different bills, and the reduction rounds kept conflating them.
+    try:
+        from db.egress_budget import render as _render_egress
+        _render_egress(st, db)
     except Exception:
         pass
 

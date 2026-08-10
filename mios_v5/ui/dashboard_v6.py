@@ -45,6 +45,30 @@ _TABS = ["🎯 Decision", "📈 Trading", "🧭 Intelligence",
 SESSION_LOG_LIMIT = 8000
 TRADE_SIGNAL_LIMIT = 300
 
+#: The four learning reads, under the same rule — and they are the heaviest
+#: in the app.
+#:
+#: ⚠️ Round 3 applied the one-limit rule to the two tables above and missed
+#: these, which were being asked at **three** limits each from three panels:
+#:
+#:     get_engine_attribution   2,000 · 8,000 · 3,000   → 13,000 rows
+#:     get_trade_events         1,000 · 4,000 · 1,500   →  6,500 rows
+#:     get_trade_results           40 ·   500 ·    60   →    600 rows
+#:     get_trade_attribution       40 ·   500 ·    60   →    600 rows
+#:
+#: Three cache entries, three round-trips, overlapping rows — and all three
+#: panels run on every rerun whether or not their tab is open, so every
+#: invalidation and every cold start paid for all three.
+#:
+#: Each limit below is the **widest** of the three, so no panel loses a row.
+#: `_learning_rows` returns newest-first, which is what makes a slice
+#: equivalent to a narrower query: `rows[:60]` is the same sixty rows
+#: `limit=60` would have returned.
+ENGINE_ATTRIBUTION_LIMIT = 8000
+TRADE_EVENT_LIMIT = 4000
+TRADE_RESULT_LIMIT = 500
+TRADE_ATTRIBUTION_LIMIT = 500
+
 _CARD = ("background:#0d1117;border:1px solid #1e2836;border-radius:10px;"
          "padding:10px 12px;margin-bottom:8px")
 
@@ -1722,10 +1746,11 @@ def _history(st, db) -> None:
     if not hasattr(db, "get_trade_results"):
         return
     try:
-        res = db.get_trade_results(limit=40)
-        att = db.get_trade_attribution(limit=40)
-        eng = db.get_engine_attribution(limit=2000)
-        evs = db.get_trade_events(limit=1000)
+        # Shared limits, sliced to what this panel shows — see the constants.
+        res = db.get_trade_results(limit=TRADE_RESULT_LIMIT)[:40]
+        att = db.get_trade_attribution(limit=TRADE_ATTRIBUTION_LIMIT)[:40]
+        eng = db.get_engine_attribution(limit=ENGINE_ATTRIBUTION_LIMIT)[:2000]
+        evs = db.get_trade_events(limit=TRADE_EVENT_LIMIT)[:1000]
     except Exception:
         res = att = eng = evs = None
 
@@ -1806,10 +1831,10 @@ def _learning(st, db, fr: Optional[Dict[str, Any]] = None) -> None:
         st.info("Learning tables not available on this DB client.", icon="ℹ️")
         return
     try:
-        eng = db.get_engine_attribution(limit=8000)
-        res = db.get_trade_results(limit=500)
-        att = db.get_trade_attribution(limit=500)
-        evs = db.get_trade_events(limit=4000)
+        eng = db.get_engine_attribution(limit=ENGINE_ATTRIBUTION_LIMIT)
+        res = db.get_trade_results(limit=TRADE_RESULT_LIMIT)
+        att = db.get_trade_attribution(limit=TRADE_ATTRIBUTION_LIMIT)
+        evs = db.get_trade_events(limit=TRADE_EVENT_LIMIT)
     except Exception:
         eng = res = att = evs = None
 
@@ -1893,10 +1918,11 @@ def _daily_summary(st, db, fr: Dict[str, Any]) -> None:
     res = trades = eng = evs = None
     if db is not None and hasattr(db, "get_trade_results"):
         try:
-            res = db.get_trade_results(limit=60)
-            trades = db.get_trade_attribution(limit=60)
-            eng = db.get_engine_attribution(limit=3000)
-            evs = db.get_trade_events(limit=1500)
+            # Shared limits, sliced — see the constants at the top of the file.
+            res = db.get_trade_results(limit=TRADE_RESULT_LIMIT)[:60]
+            trades = db.get_trade_attribution(limit=TRADE_ATTRIBUTION_LIMIT)[:60]
+            eng = db.get_engine_attribution(limit=ENGINE_ATTRIBUTION_LIMIT)[:3000]
+            evs = db.get_trade_events(limit=TRADE_EVENT_LIMIT)[:1500]
         except Exception:
             res = trades = eng = evs = None
     if trades:
