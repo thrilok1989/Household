@@ -534,11 +534,116 @@ def test_both_energy_rows_survive_the_shortest_form():
 
 def test_a_source_that_reported_nothing_contributes_nothing():
     from mios_v5.ui.premium_energy_panel import micro as pe_micro
+    from mios_v5.ui.pin_chip import micro as pin_micro
     from mios_v5.ui.war_zone import micro as wz_micro
     from mios_v5.ui.zone_card import zone_micro
     assert zone_micro(None) == "" and zone_micro({"side": "SUPPORT"}) == ""
     assert wz_micro({}) == "" and wz_micro(None) == ""
     assert pe_micro({"ready": False}) == "" and pe_micro(None) == ""
+    assert pin_micro(None) == "" and pin_micro({}) == ""
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  🧲 the PIN veto on the strip
+# ══════════════════════════════════════════════════════════════════════
+
+_PINNED_GATE = {
+    "state": "PINNED", "level": 24600.0,
+    "why": ["pinned at ₹24600 — heaviest CE+PE at one strike — magnet/pin; "
+            "no directional edge, WAIT"],
+}
+
+
+def test_the_pin_chip_carries_the_strike_the_cause_and_the_verdict():
+    """All three, because each answers a different question: WHERE the magnet
+    is, WHY it is one, and what to do about it."""
+    from mios_v5.ui.pin_chip import micro
+    line = micro(_PINNED_GATE)
+    assert line == ("🧲 pinned at ₹24600 — heaviest CE+PE at one strike — "
+                    "magnet/pin; no directional edge, WAIT")
+
+
+def test_the_sentence_is_the_owners_taken_verbatim():
+    """⚠️ The point of the whole module. `compute_market_picture` decides what a
+    pin is and words it; this adds a glyph. Re-phrasing here would let the strip
+    and the Market Picture panel describe one strike two ways."""
+    from mios_v5.ui.pin_chip import GLYPH, micro
+    own = "pinned at ₹24600 — some future wording nobody has written yet"
+    assert micro({"state": "PINNED", "why": [own]}) == f"{GLYPH} {own}"
+
+
+def test_a_gate_that_is_not_pinned_draws_no_chip():
+    """The normal case. The strip is frozen on every screen for the session, so
+    a chip reporting "not pinned" would cost that space permanently."""
+    from mios_v5.ui.pin_chip import micro
+    for state in ("CALL", "PUT", "WAIT", "", None):
+        assert micro({"state": state, "why": ["something"]}) == ""
+
+
+def test_a_pin_with_no_reason_still_reports_the_veto():
+    """PINNED is a veto on every directional read. Saying nothing because the
+    `why` list came back empty would leave the S/R odds beside it looking like a
+    live contest."""
+    from mios_v5.ui.pin_chip import micro
+    assert micro({"state": "PINNED", "level": 24600.0, "why": []}) == (
+        "🧲 pinned at ₹24600 — no directional edge, WAIT")
+    assert "WAIT" in micro({"state": "PINNED"})
+
+
+def test_a_frozen_mapping_is_still_a_gate():
+    """⚠️ `isinstance(x, dict)` is False for a `MappingProxyType`, and this repo
+    has shipped that confusion three times — `execution_panel._get`, the panel
+    metadata block, and `_mios_market_read`'s per-side behaviour."""
+    from types import MappingProxyType
+
+    from mios_v5.ui.pin_chip import micro
+    assert micro(MappingProxyType(dict(_PINNED_GATE))).startswith("🧲")
+
+
+def test_the_pin_chip_never_raises_on_junk():
+    from mios_v5.ui.pin_chip import micro
+    for junk in (None, {}, [], "PINNED", 7, {"state": "PINNED", "why": None},
+                 {"state": "PINNED", "level": "not a number", "why": ()}):
+        micro(junk)
+
+
+def _extras_fn():
+    """`_chrome_extras` as a parse tree.
+
+    Parsed rather than grepped because the function is heavily commented and its
+    own docstring names `war_zone.micro` — a text search finds the prose, not the
+    code, and would pass or fail on a comment edit.
+    """
+    tree = ast.parse((ROOT / "vob_minimal.py").read_text())
+    return next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                and n.name == "_chrome_extras")
+
+
+def test_the_veto_is_drawn_before_the_chips_it_contradicts():
+    """Order is the product here. The S/R odds and the war-zone winner both
+    describe a directional contest; read without the veto beside them they
+    invite a trade the gate has already refused."""
+    order = [n.module for n in ast.walk(_extras_fn())
+             if isinstance(n, ast.ImportFrom) and n.module]
+    pin = next(i for i, m in enumerate(order) if "pin_chip" in m)
+    for other in ("zone_card", "war_zone", "premium_energy_panel"):
+        idx = next(i for i, m in enumerate(order) if other in m)
+        assert pin < idx, f"the pin veto must be collected before {other}"
+
+
+def test_the_header_reads_the_decided_state_rather_than_the_raw_walls():
+    """`oi_pin` is the detection and `entry_gate['state']` is the decision. The
+    strip must read the decision — re-deriving "is this pinned?" from the walls
+    would be a second implementation of the gate's proximity rule."""
+    fn = _extras_fn()
+    literals = {n.value for n in ast.walk(fn)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    idents = {getattr(n, "id", "") or getattr(n, "attr", "")
+              for n in ast.walk(fn)}
+    assert "entry_gate" in literals, \
+        "the header should read the gate's decided state"
+    assert "oi_pin" not in literals | idents, \
+        "the header should not touch the raw pin detection"
 
 
 def test_the_extras_are_collected_not_phrased_by_the_app():

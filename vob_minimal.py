@@ -14782,6 +14782,32 @@ def _chrome_extras():
     that space permanently to say nothing.
     """
     out = []
+    # ── 🧲 the PIN veto, first ───────────────────────────────────────────
+    # First because it CONTRADICTS every chip after it. When price is pinned at
+    # a magnet strike, `compute_market_picture`'s gate returns PINNED and skips
+    # the directional logic outright — no CALL, no PUT, whatever the S/R odds
+    # and the war-zone winner beside it happen to read. A trader who sees
+    # "support · 68% bounce" and does NOT see the veto is being shown a contest
+    # that is not live, which is the one misreading a frozen strip can cause on
+    # every screen at once.
+    #
+    # This was already computed and already decided: `oi_pin` detects the
+    # coincident CE+PE wall and the gate turns it into a state. It reached the
+    # Market Picture's own panel far down the page and reached nothing up here —
+    # consumed-but-unpublished, which principle 12 names as the smell.
+    #
+    # READ, not re-decided, and not re-worded here. `pin_chip.micro` adds the
+    # glyph and answers "is there a pin?"; the sentence itself stays the
+    # owner's, so the header cannot say "pinned" while the panel below describes
+    # the same strike differently.
+    try:
+        from mios_v5.ui.pin_chip import micro as _pin_micro
+        _line = _pin_micro(
+            (st.session_state.get('_market_picture') or {}).get('entry_gate'))
+        if _line:
+            out.append(_line)
+    except Exception:
+        pass
     try:
         from mios_v5.ui.zone_card import zone_micro
         _rsr = st.session_state.get('_reaction_sr') or {}
