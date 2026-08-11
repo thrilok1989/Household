@@ -366,9 +366,28 @@ KNOWN_UNPUBLISHED = {
     "now_ist_time": "test injection; stage06/38/39 default to the IST clock",
     "now_ist_dt": "test injection; stage40 defaults to the IST clock",
     "open_position": "NOT WIRED — no such key exists in the app; stage52 "
-                     "always decides as if flat",
-    "zone_extremes": "NOT WIRED — no such key exists in the app",
+                     "always decides as if flat. "
+                     "See docs/CONTRACT_POSITION_STATE.md",
+    "zone_extremes": "NOT WIRED — no such key exists in the app, and its "
+                     "MEANING is undefined (liquidity extremes? S/R zone "
+                     "extremes? entry-zone bounds? extremes at entry?). "
+                     "See docs/CONTRACT_POSITION_STATE.md",
 }
+
+
+def test_the_position_contract_gap_is_documented_not_just_excused():
+    """⚠️ An allowlist entry with no written rationale becomes a permanent excuse.
+    Both keys are trading-decision inputs, so the reason they are unwired has to
+    live somewhere a reviewer will find it."""
+    doc = (pathlib.Path(__file__).resolve().parents[2] / "docs"
+           / "CONTRACT_POSITION_STATE.md")
+    assert doc.exists(), "the contract note is gone but the gap is still allowed"
+    text = doc.read_text()
+    for key in ("open_position", "zone_extremes"):
+        assert key in text, key
+    # the distinction that makes this a contract task rather than a patch
+    assert "_entry_signal_open" in text
+    assert "per-leg" in text
 
 
 def test_every_raw_key_an_engine_reads_is_published_or_listed():

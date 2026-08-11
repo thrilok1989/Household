@@ -235,3 +235,84 @@ than hardcoding an order, so moving a tab, adding a block, or moving a
 
 Reverting the fill order reproduces all four faults by name. Suite: **3066
 passed, 3 skipped.**
+
+---
+
+## 7 · Stages 50 – 74 specifically
+
+The range splits across **two mechanisms**, which is why "is stage N reporting?"
+has two different answers depending on N:
+
+| stages | mechanism | registry |
+|---|---|---|
+| 50 51 52 53 54 68 69 | engine classes | `ALL_ENGINES` |
+| 55 – 67, 70 – 74 (incl. 71.5 / 71.7 / 71.8 / 71.85 / 71.86 / 71.95 / 72.9) | plain modules called by the UI or runner | **none** |
+
+An engine class at least appears in a registry. A stage implemented as a module
+has nothing structurally guaranteeing it is called — so it can go dead in silence.
+
+### Engine classes in range — all reporting
+
+Verified by running the real orchestrator: 50 51 52 53 54 68 69 all return
+`OK` with correctly-shaped inputs. (Stage 50 `ltp_behaviour` reports NEUTRAL until
+it has enough LTP history, and Stage 43 depends on it — both honest warm-ups.)
+
+### Module stages — 18 of 20 reachable from production
+
+| module | stages | verdict |
+|---|---|---|
+| `entry_engine` `dispatcher` `profile_shape` `liquidity_context` `futures_oi_store` `checklist` `narrator` `daily_summary` `contribution` `calibration` `false_signal` `learning_report` `explain_decision` `risk_explain` `opportunity` `premium_energy` `strike_validation` `engine_accuracy` | 51–74 | ✅ reached from production |
+| `mios_v5/dispatch_validation.py` | 72.9 | **test-only, correctly** — a fault-injection harness that must not run in production; `test_dispatcher.py` exercises it |
+| `db/dispatch_registry.py` | 72.9 | ⚠️ **dead** — `SupabaseDispatchRegistry` is never constructed. Already recorded in `AUDIT_EGRESS_4.md` §5: it was the prime suspect for the 1 GB egress day and was **disproved** precisely because nothing builds it |
+
+### Every V6 screen renders clean
+
+All nine screens, run in dependency order against a complete fixture:
+
+```
+_charts_screen    0 absence messages
+_trading_screen   0
+_nifty_cockpit    0
+_options_cockpit  0
+_decision_center  0
+_intelligence     0
+_history          0
+_learning         1 — "Learning tables not available on this DB client" (db=None)
+_replay           0
+```
+
+The one message is correct: the learning family (56–60, 67) needs Supabase, and
+with no DB handle it says so rather than drawing empty tables.
+
+### ⚠️ Two more false positives I caught in my own scanners
+
+Recorded because both would have produced confident, wrong bug reports:
+
+* **`from . import calibration` has `node.module is None`.** Keying an import
+  scan on `node.module` alone misses that form entirely, and it reported
+  `calibration` (Stage 57) and `dispatch_validation` as dead. `learning_report.py:66`
+  really does call `calibration.by_engine`. `test_stage_reachability.py` now has a
+  test guarding *the scanner*, so this cannot silently regress into vacuous passes.
+* **`setdefault` both reads and writes.** Counting it as a read alone made 25 live
+  session keys look write-only. Adding `st.session_state[var] = …` loop writes
+  (dynamic subscripts) cut a 62-key "read but never written" list down to nothing
+  provable.
+
+Combined with the four fixture-shape mismatches in §1, that is **six** false
+positives this audit generated before verification. Any conclusion here that was
+not re-checked against the real producer should be assumed wrong.
+
+---
+
+## 8 · Open, by decision — not a bug to patch
+
+`stage52_decision` consumes `open_position` and `zone_extremes`; neither has an
+authoritative producer, so it decides as though the book is flat every cycle.
+
+**Deliberately unresolved.** `_entry_signal_open` is per-leg state and is not
+semantically equivalent to the position-level contract `decide()` expects, so
+adapting it by shape would invent semantics for a trading decision. The next
+change is a contract-definition task.
+
+Full reasoning, the fields to derive rather than assume, and the four possible
+meanings of `zone_extremes`: **`docs/CONTRACT_POSITION_STATE.md`**.
