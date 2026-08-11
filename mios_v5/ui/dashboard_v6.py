@@ -42,7 +42,8 @@ from ..thesis import build_thesis, market_controller, recent_changes
 #: drawn in a tab that runs BEFORE Trading. Moving it to a later tab would leave
 #: the heatmaps reading the previous cycle's profiles.
 _TABS = ["📊 Charts", "🧭 NIFTY", "📈 OPTIONS", "🎯 Decision", "📈 Trading",
-         "🧭 Intelligence", "📒 History", "🎓 Learning", "⏪ Replay"]
+         "🧭 Intelligence", "📒 History", "🎓 Learning", "⏪ Replay",
+         "🔧 Debug"]
 
 #: One limit per table, shared by every panel that reads it.
 #:
@@ -80,6 +81,30 @@ TRADE_ATTRIBUTION_LIMIT = 500
 
 _CARD = ("background:#0d1117;border:1px solid #1e2836;border-radius:10px;"
          "padding:10px 12px;margin-bottom:8px")
+
+
+def _dbg_caption(st, source: str, message) -> None:
+    """A panel-could-not-draw line, routed through the debug gate.
+
+    ⚠️ NOT deleted and NOT silenced — collected. "A swallowed failure looks
+    exactly like the feature was never built" is the report that produced this
+    repo's loud-chrome rule, and turning ten captions into ten silences would
+    reintroduce it one layer up. With the switch on they print exactly where
+    they used to.
+
+    Two failures are deliberately NOT routed here: `Strike Validation` and the
+    execution chain's own "did not run" panel. Those are CRITICAL producers, and
+    a trader who cannot see that the alert chain is down needs it on the screen
+    they are looking at rather than on a tab they are not.
+    """
+    try:
+        from .debug_gate import caption as _c
+        _c(st, source, message)
+    except Exception:
+        try:
+            st.caption(str(message))
+        except Exception:
+            pass
 
 
 def _num(v, d=0.0):
@@ -135,6 +160,11 @@ def render_dashboard_v6(state=None, db=None) -> None:
         _learning(st, db, fr)
     with tabs[8]:
         _replay(st, db)
+    with tabs[9]:
+        # ⚠️ Presentation only. Nothing on this tab switches an engine off — see
+        # `debug_gate.PROTECTED` and docs/AUDIT_FOCUS_MODE.md.
+        from .debug_gate import render_panel as _debug_panel
+        _debug_panel(st, db)
 
 
 # ── 0b · NIFTY INDEX COCKPIT ────────────────────────────────────────────
@@ -836,7 +866,7 @@ def _render_chain_panel(st, not_run_reason: str = "") -> None:
                          last_signal=st.session_state.get("_last_valid_signal"),
                          not_run_reason=not_run_reason)
     except Exception as err:
-        st.caption(f"Execution panel unavailable: {err}")
+        _dbg_caption(st, "execution_panel", f"Execution panel unavailable: {err}")
 
 
 def _decision_center(st, fr: Dict[str, Any]) -> None:
@@ -1009,7 +1039,7 @@ def _trading_screen(st, fr: Dict[str, Any], state) -> None:
         from .liquidity_panel import render_leg_heatmaps
         render_leg_heatmaps(st, st.session_state.get("_leg_profiles"))
     except Exception as err:
-        st.caption(f"Premium liquidity unavailable: {err}")
+        _dbg_caption(st, "liquidity_panel", f"Premium liquidity unavailable: {err}")
 
     # ── market facts + the V5 ‖ V6 divergence ──
     # The slim Trade Card: ONLY what this tab does not already own. Bias,
@@ -1113,7 +1143,7 @@ def _opportunity(st, fr: Dict[str, Any]) -> None:
                                 leg_totals=_totals,
                                 previous=st.session_state.get("_premium_energy_prev"))
         except Exception as _pe_err:
-            st.caption(f"Premium Energy unavailable: {_pe_err}")
+            _dbg_caption(st, "premium_energy", f"Premium Energy unavailable: {_pe_err}")
 
         render_opportunity_panel(st, matrix, premium)
         # this cycle's matrix, for Stage 71.95. `_prev` is next cycle's
@@ -1129,7 +1159,7 @@ def _opportunity(st, fr: Dict[str, Any]) -> None:
             st.session_state["_premium_energy_prev"] = premium
     except Exception as err:
         # advisory panel — it may never take the execution screen down with it
-        st.caption(f"Trade Opportunity Matrix unavailable: {err}")
+        _dbg_caption(st, "opportunity", f"Trade Opportunity Matrix unavailable: {err}")
 
 
 def _leg_reads(st, fr: Dict[str, Any]):
@@ -1368,7 +1398,7 @@ def _strike_validation(st, fr: Dict[str, Any]) -> None:
                 fr=fr, validation=data)
         except Exception as _pb_err:
             _behaviour = None
-            st.caption(f"Premium Behaviour unavailable: {_pb_err}")
+            _dbg_caption(st, "premium_behaviour", f"Premium Behaviour unavailable: {_pb_err}")
         st.session_state["_premium_behaviour"] = _behaviour
 
         # ── Stage 71.95 — the Unified Trading Context ──────────────────
@@ -1391,7 +1421,7 @@ def _strike_validation(st, fr: Dict[str, Any]) -> None:
                 cycle=st.session_state.get("_render_seq"))
         except Exception as _ctx_err:
             st.session_state["_trading_context"] = None
-            st.caption(f"Trading Context unavailable: {_ctx_err}")
+            _dbg_caption(st, "trading_context", f"Trading Context unavailable: {_ctx_err}")
         # the chart overlay reads these; published here so the structure is
         # built once per cycle and consumed by the validation, Stage 71.85 and
         # the chart, rather than analysed three times
@@ -1480,7 +1510,7 @@ def _command_center(st, fr: Dict[str, Any]) -> None:
                    controller=controller, thesis=thesis)
         render_command_center(st, cc)
     except Exception as err:
-        st.caption(f"Command Center unavailable: {err}")
+        _dbg_caption(st, "command_center", f"Command Center unavailable: {err}")
 
 
 def order_flow_families(st, fr: Optional[Dict[str, Any]] = None
@@ -2011,7 +2041,7 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
         except Exception:
             pass
     except Exception as err:
-        st.caption(f"Terminal chart unavailable: {err}")
+        _dbg_caption(st, "terminal_chart", f"Terminal chart unavailable: {err}")
 
 
 def _war_zone(st, fr: Dict[str, Any]) -> None:
@@ -2205,6 +2235,7 @@ _BIAS_COLOUR = {"STRONG_BULL": "#00ff88", "BULL": "#17c98b",
 
 def _intelligence(st, fr: Dict[str, Any], state) -> None:
     """Why does MIOS think that? — grouped, collapsible, deliberately dense."""
+    from .debug_gate import enabled
     from .explain_panel import checklist_html, risk_html
     from ..checklist import build as _build_checklist
     from ..risk_explain import analyse as _risk
@@ -2228,14 +2259,14 @@ def _intelligence(st, fr: Dict[str, Any], state) -> None:
         st.caption("Nothing has changed materially this cycle.")
 
     with st.expander("🕘 Session Intelligence — measures · modifiers",
-                     expanded=True):
+                     expanded=enabled(st)):
         from .session_panel import modifier_table, session_card
         si = fr.get("session_intel") or {}
         st.markdown(session_card(si), unsafe_allow_html=True)
         st.markdown(modifier_table(si), unsafe_allow_html=True)
 
     with st.expander("🗓 Day Classification — groups · evidence · transitions",
-                     expanded=True):
+                     expanded=enabled(st)):
         from .day_type_panel import day_type_detail, day_type_timeline
         from ..day_type import timeline as _dt_timeline
         dc = fr.get("day_classification") or {}
@@ -2244,7 +2275,7 @@ def _intelligence(st, fr: Dict[str, Any], state) -> None:
                     unsafe_allow_html=True)
 
     with st.expander("🏗 Market Structure — state · transition · memory",
-                     expanded=True):
+                     expanded=enabled(st)):
         from .memory_panel import memory_panel_html
         from .state_panel import state_line
         from .transition_panel import render_transition_panel
@@ -2277,7 +2308,7 @@ def _intelligence(st, fr: Dict[str, Any], state) -> None:
         _sections(st, ("orderflow", "liquidity"), fr)
 
     with st.expander("✅ Validation — acceptance · validity · evidence · energy",
-                     expanded=True):
+                     expanded=enabled(st)):
         from .energy_panel import energy_panel_html
         from .family_panel import render_family_panel
         from .validity_panel import validity_panel_html

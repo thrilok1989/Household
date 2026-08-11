@@ -182,9 +182,31 @@ def build() -> Dict[str, object]:
             reachable.add(fn)
             stack.extend(calls.get(fn, ()))
 
+    def draws_anything(fn: str, seen: Set[str] | None = None) -> bool:
+        """Does `fn` put something on screen — directly OR through a helper?
+
+        ⚠️ This used to be a direct-membership test (`fn in draws`), and that was
+        a blind spot: a panel whose only `st.*` call moved behind a helper
+        vanished from this report entirely. It was found the moment
+        `_opportunity`'s single `st.caption` was routed through the debug gate —
+        `_opportunity` is CRITICAL, it publishes `_premium_energy` for the
+        header's ⚡ chip, and the audit stopped listing it at all.
+
+        A report whose job is to say "this panel may not be hidden" must not go
+        quiet because the panel got tidier. Following calls is the same treatment
+        `writes` and `reads` already get.
+        """
+        seen = seen if seen is not None else set()
+        if fn in seen:
+            return False
+        seen.add(fn)
+        if fn in draws:
+            return True
+        return any(draws_anything(c, seen) for c in calls.get(fn, ()))
+
     rows = []
     for fn in sorted(reachable):
-        if fn not in draws:
+        if not draws_anything(fn):
             continue                      # not a panel; nothing to suppress
         own = transitive(fn, writes)
         # who else reads what this writes?
