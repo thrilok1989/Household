@@ -35,12 +35,17 @@ from ..thesis import build_thesis, market_controller, recent_changes
 #: 📊 Charts leads, so the synchronised NIFTY ‖ CALL ‖ PUT figure sits directly
 #: under the price header instead of four blocks down the Trading tab.
 #:
-#: ⚠️ Being FIRST is load-bearing, not cosmetic. `_terminal_chart` is the only
-#: producer of `_leg_profiles` (see `docs/AUDIT_FOCUS_MODE.md` — it is one of the
-#: four CRITICAL panels), and `_trading_screen` reads that key for its per-leg
-#: liquidity bars. Streamlit executes tab bodies in order, so the chart must be
-#: drawn in a tab that runs BEFORE Trading. Moving it to a later tab would leave
-#: the heatmaps reading the previous cycle's profiles.
+#: ⚠️ This list is the STRIP's layout only — it does not decide what runs first.
+#:
+#: Streamlit executes each tab body when its container is FILLED, and
+#: `render_dashboard_v6` fills them in dependency order, not in this order. So
+#: moving a label here is safe; what matters is the fill sequence, and
+#: `test_screen_order.py` checks that against the real producer/consumer graph.
+#:
+#: Charts still has to execute before Trading — `_terminal_chart` is the only
+#: producer of `_leg_profiles` (one of the four CRITICAL panels, see
+#: `docs/AUDIT_FOCUS_MODE.md`) and `_trading_screen` reads it for the per-leg
+#: liquidity bars — but that is enforced by the fill order, not by this list.
 _TABS = ["📊 Charts", "🧭 NIFTY", "📈 OPTIONS", "🎯 Decision", "📈 Trading",
          "🧭 Intelligence", "📒 History", "🎓 Learning", "⏪ Replay",
          "🔧 Debug"]
@@ -230,12 +235,19 @@ def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
         S/R ranking            sr_intel.rank_levels         → _sr_levels
         battle zone            Stage 35                     → final_read
 
-    ⚠️ `_sr_levels` is published by `_sr_intelligence`, which runs on the
-    Intelligence tab — a LATER tab than this one. So on the very first rerun of
-    a session this table is empty and fills on the next; `sr_table_html` returns
-    `""` rather than an empty frame, and the note below says so. Reordering the
-    tabs to fix that would move a CRITICAL producer, which is the mistake the
-    Charts move was careful not to make.
+    ⚠️ FIXED — this note used to describe the bug as expected behaviour, and was
+    wrong about where the producer lives.
+
+    `_sr_levels` is published by `_sr_intelligence`, which `_trading_screen`
+    calls — NOT the Intelligence tab, as this said. Because the tab bodies were
+    filled in tab order, this cockpit (tab 1) ran before that producer (tab 4):
+    the table was empty on the first rerun of a session and showed the PREVIOUS
+    cycle's levels on every rerun after.
+
+    The old note concluded that fixing it would mean moving a CRITICAL producer.
+    It would not: `st.tabs()` containers may be filled in any sequence and the
+    strip's layout is unaffected, so `render_dashboard_v6` now fills Trading
+    before the cockpits and nothing moved on screen. See `test_screen_order.py`.
     """
     from .nifty_cockpit import BLOCK_ORDER, cockpit_blocks
 
@@ -388,12 +400,19 @@ def _options_cockpit(st, fr: Dict[str, Any]) -> None:
         Stage 71.7 `_premium_energy`      energy · spike · strength · preferred
         the chain  `df_summary`           LTP · OI · ΔOI · volume · bid/ask
 
-    ⚠️ `_premium_structures` is keyed by `(side, strike)` TUPLES, and Stage 71.8
-    publishes it from `_strike_validation` on the Trading tab — a LATER tab than
-    this one. So on the first rerun of a session the structure and flow blocks
-    are empty and fill on the next. Re-keying is done here rather than asking the
-    pure module to understand a tuple key, which is the same boundary rename
-    `_mios_market_read` does.
+    `_premium_structures` is keyed by `(side, strike)` TUPLES. Re-keying is done
+    here rather than asking the pure module to understand a tuple key, which is
+    the same boundary rename `_mios_market_read` does.
+
+    ⚠️ FIXED — this note used to end "So on the first rerun of a session the
+    structure and flow blocks are empty and fill on the next", which recorded a
+    real bug as accepted behaviour. Stage 71.8 publishes `_premium_structures`
+    from `_strike_validation` on the Trading tab, and filling the tabs in tab
+    order ran this cockpit first, so those blocks showed nothing on the first
+    rerun and the PREVIOUS cycle's data on every one after.
+    `render_dashboard_v6` now fills Trading before the cockpits — the strip is
+    unchanged, since `st.tabs()` containers may be filled in any sequence. See
+    `test_screen_order.py`.
     """
     from .options_cockpit import (BLOCK_ORDER, cockpit_blocks,
                                  greeks_table_html)

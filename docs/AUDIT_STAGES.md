@@ -88,6 +88,46 @@ Consequences:
 recomputed, no engine is touched, and `_TABS` is unchanged, so the strip looks
 exactly as before.
 
+### Verified end to end, not just by the graph
+
+Running the real collectors against a fixture built from verified production
+shapes:
+
+```
+BEFORE (cockpits filled first — the old order)
+  NIFTY  : ⚪ Not reporting yet: sr table
+  OPTIONS: ⚪ Not reporting yet: premium energy · premium structure · option flow
+
+AFTER (charts → trading → cockpits)
+  NIFTY  : ✅ all blocks rendered
+  OPTIONS: ✅ all blocks rendered
+           _sr_levels · _premium_energy · _premium_structures
+           · _entry_decision · _leg_profiles   all published
+```
+
+Two blocks needed fixture corrections before this was trustworthy, and both are
+worth recording because they are the same class of mismatch as the bug itself:
+
+* `_reaction_sr` zones carry **`price`**, not `level` — `card_from_zone` returns
+  `None` without it (`sr_intel.py:328`), so `sr_table` stayed empty;
+* the strike picker reads `_cockpit_ctx` (`{sids, seg, api, atm, gap}`,
+  `vob_minimal.py:13960`), without which `_strike_validation` never publishes
+  `_premium_structures`.
+
+### ⚠️ The bug was documented as expected behaviour
+
+Three comments described this lag as normal, and one was also factually wrong:
+
+| where | said | actually |
+|---|---|---|
+| `_nifty_cockpit` docstring | `_sr_levels` is published by `_sr_intelligence`, "which runs on the **Intelligence** tab" | `_sr_intelligence` is called by **`_trading_screen`** |
+| same | "Reordering the tabs to fix that would move a CRITICAL producer" | no tab has to move — only the **fill** sequence |
+| `_options_cockpit` docstring | "on the first rerun of a session the structure and flow blocks are empty and **fill on the next**" | that is the bug, recorded as accepted |
+| `_TABS` comment | "Streamlit executes tab bodies **in order**" | it executes them when their container is **filled** |
+
+All four corrected. A note that says "this is expected" beside code where it is
+not is how the same bug comes back.
+
 ### One cycle remains, and it is genuine
 
 There is a **cycle**: `_charts_screen` writes `_leg_profiles` (trading needs it
