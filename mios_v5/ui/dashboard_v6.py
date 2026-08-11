@@ -41,7 +41,7 @@ from ..thesis import build_thesis, market_controller, recent_changes
 #: liquidity bars. Streamlit executes tab bodies in order, so the chart must be
 #: drawn in a tab that runs BEFORE Trading. Moving it to a later tab would leave
 #: the heatmaps reading the previous cycle's profiles.
-_TABS = ["📊 Charts", "🎯 Decision", "📈 Trading", "🧭 Intelligence",
+_TABS = ["📊 Charts", "🧭 NIFTY", "🎯 Decision", "📈 Trading", "🧭 Intelligence",
          "📒 History", "🎓 Learning", "⏪ Replay"]
 
 #: One limit per table, shared by every panel that reads it.
@@ -120,17 +120,177 @@ def render_dashboard_v6(state=None, db=None) -> None:
     with tabs[0]:
         _charts_screen(st, fr)
     with tabs[1]:
-        _decision_center(st, fr)
+        _nifty_cockpit(st, fr)
     with tabs[2]:
-        _trading_screen(st, fr, state)
+        _decision_center(st, fr)
     with tabs[3]:
-        _intelligence(st, fr, state)
+        _trading_screen(st, fr, state)
     with tabs[4]:
-        _history(st, db)
+        _intelligence(st, fr, state)
     with tabs[5]:
-        _learning(st, db, fr)
+        _history(st, db)
     with tabs[6]:
+        _learning(st, db, fr)
+    with tabs[7]:
         _replay(st, db)
+
+
+# ── 0b · NIFTY INDEX COCKPIT ────────────────────────────────────────────
+def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
+    """🧭 Dashboard 1 — the index, in five blocks and nothing else.
+
+    Where is NIFTY · where are the OI walls · is it pinned · where are S/R · who
+    is winning. Option-leg behaviour is Dashboard 2's; engine telemetry is the
+    audit expander's.
+
+    **This function only reads.** Every value below has an owner that already
+    published it, and `nifty_cockpit.py` formats without re-deriving:
+
+        POC · VAH · VAL        calculate_money_flow_profile → _money_flow_data
+        VWAP · walls · pin     compute_market_picture       → _market_picture
+        gamma flip             calculate_dealer_gex         → _gex_data
+        prev day H/L/C         runner Stage 3               → _mios_market_memory
+        S/R ranking            sr_intel.rank_levels         → _sr_levels
+        battle zone            Stage 35                     → final_read
+
+    ⚠️ `_sr_levels` is published by `_sr_intelligence`, which runs on the
+    Intelligence tab — a LATER tab than this one. So on the very first rerun of
+    a session this table is empty and fills on the next; `sr_table_html` returns
+    `""` rather than an empty frame, and the note below says so. Reordering the
+    tabs to fix that would move a CRITICAL producer, which is the mistake the
+    Charts move was careful not to make.
+    """
+    from .nifty_cockpit import BLOCK_ORDER, cockpit_blocks
+
+    ss = st.session_state
+    mp = ss.get("_market_picture") or {}
+    opt = ss.get("_cached_option_data") or {}
+    spot = opt.get("underlying") or ss.get("_nifty_spot_live")
+
+    day = None
+    try:
+        df = ss.get("_nifty_df_live")
+        if df is not None and not getattr(df, "empty", True):
+            day = {"high": float(df["high"].max()),
+                   "low": float(df["low"].min())}
+    except Exception:
+        day = None
+
+    atm = None
+    try:
+        atm = (ss.get("_atm_pm1_vpfr") or {}).get("atm_strike")
+    except Exception:
+        atm = None
+
+    blocks = cockpit_blocks({
+        "spot": spot,
+        "profile": ss.get("_money_flow_data"),
+        "vwap": mp.get("vwap"),
+        "day": day,
+        "prev_day": ss.get("_mios_market_memory"),
+        "oi_ceiling": mp.get("oi_ceiling"),
+        "oi_floor": mp.get("oi_floor"),
+        "oi_pin": mp.get("oi_pin"),
+        "gate": mp.get("entry_gate"),
+        "gamma_flip": (mp.get("gex_disp") or {}).get("flip"),
+        "ladder": _oi_ladder(opt.get("df_summary"), atm),
+        "pcr": _total_pcr(opt.get("df_summary")),
+        "atm": atm,
+        "sr_levels": ss.get("_sr_levels"),
+        "battle_zone": fr.get("battle_zone"),
+        "winner": fr.get("expected_winner"),
+        "probabilities": fr.get("probabilities"),
+    })
+
+    if not blocks:
+        st.info("🧭 NIFTY cockpit standing by — it reads the Market Picture, "
+                "the volume profile and the chain. Those land once the option "
+                "chain and candles are both in.")
+        return
+
+    left, right = st.columns(2)
+    # price map and the walls are the two a trader reads first, so they take the
+    # top row together rather than stacking a 9-row table above a 5-row one.
+    with left:
+        st.markdown(blocks.get("price_map", ""), unsafe_allow_html=True)
+        st.markdown(blocks.get("market_pin", ""), unsafe_allow_html=True)
+    with right:
+        st.markdown(blocks.get("oi_walls", ""), unsafe_allow_html=True)
+        st.markdown(blocks.get("battle_zone", ""), unsafe_allow_html=True)
+    st.markdown(blocks.get("sr_table", ""), unsafe_allow_html=True)
+
+    missing = [b for b in BLOCK_ORDER if b not in blocks]
+    if missing:
+        st.caption("⚪ Not reporting yet: "
+                   + " · ".join(b.replace("_", " ") for b in missing)
+                   + ". Each fills once its producer has run this session.")
+
+
+def _oi_ladder(df_summary, atm) -> Optional[List[Dict[str, Any]]]:
+    """ATM±2 rows off the chain — a projection, not a calculation.
+
+    No maximum is taken and no wall is chosen here: those belong to
+    `compute_market_picture`, and picking them again is how two panels come to
+    disagree about which strike the wall is on.
+    """
+    if df_summary is None or getattr(df_summary, "empty", True):
+        return None
+    try:
+        cols = df_summary.columns
+        ce_oi = "openInterest_CE" if "openInterest_CE" in cols else "CE_OI"
+        pe_oi = "openInterest_PE" if "openInterest_PE" in cols else "PE_OI"
+        if ce_oi not in cols or pe_oi not in cols:
+            return None
+        ce_d = ("changeinOpenInterest_CE"
+                if "changeinOpenInterest_CE" in cols else None)
+        pe_d = ("changeinOpenInterest_PE"
+                if "changeinOpenInterest_PE" in cols else None)
+        strikes = sorted(df_summary["Strike"].dropna().unique().tolist())
+        if not strikes:
+            return None
+        centre = float(atm) if atm is not None else strikes[len(strikes) // 2]
+        near = sorted(strikes, key=lambda s: abs(s - centre))[:5]
+        out = []
+        for k in near:
+            row = df_summary[df_summary["Strike"] == k]
+            if row.empty:
+                continue
+            r = row.iloc[0]
+            out.append({
+                "strike": float(k),
+                "ce_oi": float(r.get(ce_oi) or 0) or None,
+                "pe_oi": float(r.get(pe_oi) or 0) or None,
+                "ce_doi": (float(r.get(ce_d)) if ce_d
+                           and r.get(ce_d) is not None else None),
+                "pe_doi": (float(r.get(pe_d)) if pe_d
+                           and r.get(pe_d) is not None else None),
+            })
+        return out or None
+    except Exception:
+        return None
+
+
+def _total_pcr(df_summary) -> Optional[float]:
+    """Total PE OI ÷ total CE OI, over the strikes the chain published.
+
+    The chain already carries a PER-STRIKE `PCR` column; this is the aggregate,
+    which nothing else publishes. It is a definition rather than a judgement —
+    there is no threshold, weighting or interpretation in it — which is why
+    summing here does not create a second owner of anything.
+    """
+    if df_summary is None or getattr(df_summary, "empty", True):
+        return None
+    try:
+        cols = df_summary.columns
+        ce = "openInterest_CE" if "openInterest_CE" in cols else "CE_OI"
+        pe = "openInterest_PE" if "openInterest_PE" in cols else "PE_OI"
+        if ce not in cols or pe not in cols:
+            return None
+        c = float(df_summary[ce].sum())
+        p = float(df_summary[pe].sum())
+        return round(p / c, 2) if c > 0 else None
+    except Exception:
+        return None
 
 
 # ── 0 · CHARTS ──────────────────────────────────────────────────────────
