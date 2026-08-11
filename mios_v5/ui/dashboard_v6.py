@@ -284,6 +284,22 @@ def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
     # anything after reading the nine above it.
     st.markdown(blocks.get("market_state", ""), unsafe_allow_html=True)
 
+    # ── ⚙️ Dealer & volatility context — the Adaptive Greeks read ────────
+    # Built HERE, once, and published to `_adaptive_greeks`. Three other
+    # surfaces read that key — the header chip, the Market Picture line and the
+    # Trade Card line — so this call is what makes all four work. Without it
+    # they each read an absent key and silently draw nothing, which is exactly
+    # what happened when this block failed to apply the first time.
+    try:
+        from .greeks_panel import greeks_card_html
+        _ag = _adaptive_greeks(st, fr)
+        if _ag:
+            _gw, _gc = _guardian_read(st, fr)
+            st.markdown(greeks_card_html(_ag, _gw, _gc),
+                        unsafe_allow_html=True)
+    except Exception as err:
+        _dbg_caption(st, "greeks_panel", f"Greeks context unavailable: {err}")
+
     missing = [b for b in BLOCK_ORDER if b not in blocks]
     if missing:
         st.caption("⚪ Not reporting yet: "
