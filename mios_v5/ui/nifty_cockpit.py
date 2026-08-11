@@ -486,15 +486,354 @@ def battle_zone_html(battle_zone: Any = None, winner: Any = None,
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  6 · who controls the market — one line each
+# ══════════════════════════════════════════════════════════════════════
+
+def _tone_of(label: Any, direction: Any = None) -> str:
+    """Colour for a bias reading. One map, so BULL is one green everywhere.
+
+    `direction` wins when the owner published one — `'bull'`, `'bear'`,
+    `'neutral'`, or `UP`/`DOWN`/`SIDEWAYS`. That is the reliable path.
+
+    ⚠️ The keyword fallback is a fallback, and it is fragile by nature: it reads
+    the owner's PROSE. `compute_market_picture` writes
+    `'Bullish (PE writers building support)'` today and the match depends on the
+    word "Bullish" surviving a future rewording. `test_the_real_labels_this_repo_produces_are_coloured`
+    pins the live vocabulary so a rewording that silently greys a row fails the
+    suite instead of the screen.
+    """
+    d = str(direction or "").strip().upper()
+    if d:
+        if d.startswith("BULL") or d in ("UP", "LONG", "CALL"):
+            return BULL
+        if d.startswith("BEAR") or d in ("DOWN", "SHORT", "PUT"):
+            return BEAR
+        if d.startswith("NEUTRAL") or d in ("SIDEWAYS", "FLAT", "BALANCED"):
+            return MUTED
+    t = str(label or "").upper()
+    if any(w in t for w in ("BULL", "BUY", "SUPPORT", "POSITIVE", "RISK-ON")):
+        return BULL
+    if any(w in t for w in ("BEAR", "SELL", "FEAR", "NEGATIVE", "RISK-OFF",
+                            "CAPPING")):
+        return BEAR
+    if any(w in t for w in ("BREAKOUT", "ACCEL", "CONTESTED", "PIN")):
+        return WARN
+    return MUTED
+
+
+def _emoji_of(label: Any, direction: Any = None) -> str:
+    tone = _tone_of(label, direction)
+    return {BULL: "🟢", BEAR: "🔴", WARN: "🟡"}.get(tone, "⚪")
+
+
+def _split(entry: Any):
+    """`(name, label)` or `(name, label, direction)` — both accepted.
+
+    Three-element rows are how a caller hands over a direction its owner already
+    published; two-element rows fall back to the label's wording.
+    """
+    items = list(entry or ())
+    name = str(items[0]) if items else ""
+    label = items[1] if len(items) > 1 else None
+    direction = items[2] if len(items) > 2 else None
+    return name, label, direction
+
+
+def bias_stack_html(rows: Optional[Sequence[Sequence[Any]]] = None,
+                    overall: Any = None, confidence: Any = None) -> str:
+    """🧠 Who controls the market — one line per input, then the verdict.
+
+    `rows` is `[(name, label), …]` **already worded by whoever owns that fact**.
+    This block does not decide what "OI Positioning: Bull" means; it lines up
+    readings that already exist so a disagreement is visible in one glance,
+    which is the entire point of stacking them.
+
+    ⚠️ `overall` is **read, not computed**. It is `compute_market_picture`'s own
+    regime, and `confidence` is that regime's own probability. Averaging the
+    rows here would produce a second, competing verdict — from the same inputs,
+    by a different method, on the same screen. That is the failure the
+    architecture principles open with.
+    """
+    parsed = [_split(r) for r in (rows or ())]
+    live = [(n, l, d) for n, l, d in parsed if str(l or "").strip()]
+    if not live and not str(overall or "").strip():
+        return ""
+
+    body = "".join(
+        _row(name, f"{_emoji_of(label, direction)} {_esc(str(label).upper())}",
+             _tone_of(label, direction))
+        for name, label, direction in live)
+
+    verdict = ""
+    if str(overall or "").strip():
+        tone = _tone_of(overall)
+        conf = _f(confidence)
+        verdict = (
+            f"<div style='margin-top:7px;padding-top:6px;"
+            f"border-top:1px solid {CARD_BORDER};display:flex;"
+            f"justify-content:space-between;align-items:baseline'>"
+            f"<span style='font-size:9px;letter-spacing:.11em;color:{MICRO}'>"
+            f"OVERALL NIFTY BIAS</span>"
+            f"<span style='font-size:15px;font-weight:800;color:{tone}'>"
+            f"{_emoji_of(overall)} {_esc(str(overall).upper())}"
+            + (f"<span style='font-size:11px;color:{MICRO};font-weight:600;"
+               f"margin-left:6px'>{conf:.0f}%</span>" if conf is not None else "")
+            + "</span></div>")
+
+    silent = [n for n, l, _d in parsed if not str(l or "").strip()]
+    note = ""
+    if silent:
+        note = (f"<div style='font-size:9.5px;color:{MICRO};margin-top:5px'>"
+                f"⚪ silent: {_esc(' · '.join(silent))}</div>")
+    return _card("🧠 Who controls the market", body + verdict + note)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  7 · liquidity
+# ══════════════════════════════════════════════════════════════════════
+
+def liquidity_html(pools: Any = None, spot: Any = None, poc: Any = None,
+                   poc_regime: Any = None, stability: Any = None) -> str:
+    """💧 The nearest untouched pool each way, and whether value is moving.
+
+    Only four readings, per the spec: above, below, what has already been swept,
+    and the nearest target. The full cluster table is a diagnostic and belongs
+    behind the audit expander.
+
+    A pool with `touched` already true is **spent** — its liquidity has been
+    taken — so it is listed separately rather than offered as a target. Showing a
+    swept pool as the next target is how a level that has already done its job
+    gets traded twice.
+    """
+    p = pools if isinstance(pools, Mapping) else {}
+    above = _pool_pick(p.get("above"))
+    below = _pool_pick(p.get("below"))
+    swept = _pool_swept(p)
+    if not any((above, below, swept, _f(poc) is not None,
+                str(poc_regime or "").strip())):
+        return ""
+
+    inner = [
+        _row("Above", _n(_get(above, "price") if above else None), MUTED,
+             "untouched" if above else ""),
+        _row("Below", _n(_get(below, "price") if below else None), MUTED,
+             "untouched" if below else ""),
+    ]
+    # The nearest of the two — the one price reaches first, which is the only
+    # one that matters for the next few minutes.
+    target = _nearest(above, below, spot)
+    inner.append(_row("Nearest target",
+                      _n(_get(target, "price") if target else None), WARN,
+                      _dist(_get(target, "price") if target else None, spot)
+                      if target else ""))
+    inner.append(_row("Swept", ", ".join(_n(s) for s in swept[:3]) or "—",
+                      FAINT))
+    if _f(poc) is not None:
+        inner.append(_row("POC", _n(poc), VIOLET))
+    if str(poc_regime or "").strip():
+        inner.append(_row("POC regime", _esc(str(poc_regime).upper()),
+                          _tone_of(poc_regime)))
+    if str(stability or "").strip():
+        inner.append(_row("POC stability", _esc(str(stability).upper()), MUTED))
+    return _card("💧 Liquidity", "".join(inner))
+
+
+def _pool_pick(lst: Any) -> Optional[Mapping[str, Any]]:
+    """First UNTOUCHED pool. `_detect_liquidity_pools` already returns them
+    nearest-first, so this takes rather than re-sorts."""
+    for item in (lst or ()):
+        if isinstance(item, Mapping):
+            if not item.get("touched") and _f(_get(item, "price")) is not None:
+                return item
+        elif _f(item) is not None:
+            return {"price": _f(item)}
+    return None
+
+
+def _pool_swept(pools: Mapping[str, Any]) -> List[float]:
+    out: List[float] = []
+    for side in ("above", "below"):
+        for item in (pools.get(side) or ()):
+            if isinstance(item, Mapping) and item.get("touched"):
+                v = _f(_get(item, "price"))
+                if v is not None:
+                    out.append(v)
+    return out
+
+
+def _nearest(a: Any, b: Any, spot: Any) -> Optional[Mapping[str, Any]]:
+    px = _f(spot)
+    cands = [c for c in (a, b) if c and _f(_get(c, "price")) is not None]
+    if not cands or px is None:
+        return cands[0] if cands else None
+    return min(cands, key=lambda c: abs(_f(_get(c, "price")) - px))
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  8 · higher-timeframe structure
+# ══════════════════════════════════════════════════════════════════════
+
+#: The order they are read in — fastest first, so a disagreement between 1H and
+#: Monthly is a row apart rather than a scan away.
+HTF_ORDER = ("1H", "4H", "Daily", "Weekly", "Monthly", "Yearly")
+
+
+def htf_html(profiles: Any = None) -> str:
+    """🏛 One row per timeframe: bias, VAH, POC, VAL.
+
+    `profiles` is `_htf_profiles` — `{tf: {profile, structure, migration}}` from
+    Stage 45. The trend word is `structure['trend']`, computed there; the levels
+    are `profile['vah'/'poc'/'val']`. Nothing is re-derived, and a timeframe
+    whose profile has not been built yet is simply absent rather than drawn with
+    dashes across it.
+    """
+    src = profiles if isinstance(profiles, Mapping) else {}
+    rows = []
+    tally = {"bull": 0, "bear": 0, "other": 0}
+    for tf in HTF_ORDER:
+        node = src.get(tf)
+        if not isinstance(node, Mapping):
+            continue
+        prof = node.get("profile") if isinstance(node.get("profile"), Mapping) else {}
+        struct = (node.get("structure")
+                  if isinstance(node.get("structure"), Mapping) else {})
+        trend = str(_get(struct, "trend", "label") or "").strip()
+        if not trend and not prof:
+            continue
+        tone = _tone_of(trend)
+        tally["bull" if tone == BULL else "bear" if tone == BEAR
+              else "other"] += 1
+        rows.append(
+            "<tr>"
+            + _cell(f"<b>{_esc(tf)}</b>", "left", INK)
+            + _cell(f"{_emoji_of(trend)} {_esc(trend.upper() or '—')}", "left",
+                    tone)
+            + _cell(_n(_get(prof, "vah")), "right", VIOLET)
+            + _cell(_n(_get(prof, "poc")), "right", WARN)
+            + _cell(_n(_get(prof, "val")), "right", VIOLET)
+            + "</tr>")
+    if not rows:
+        return ""
+
+    head = ("<tr>" + "".join(
+        f"<th style='text-align:{a};font-size:8.5px;letter-spacing:.08em;"
+        f"color:{MICRO};font-weight:600;padding:3px 5px'>{h}</th>"
+        for h, a in (("TF", "left"), ("BIAS", "left"), ("VAH", "right"),
+                     ("POC", "right"), ("VAL", "right"))) + "</tr>")
+
+    n = tally["bull"] + tally["bear"] + tally["other"]
+    lead = ("BULL" if tally["bull"] > tally["bear"]
+            else "BEAR" if tally["bear"] > tally["bull"] else "SPLIT")
+    foot = (f"<div style='font-size:10.5px;color:{MUTED};margin-top:5px'>"
+            f"HTF <b style='color:{_tone_of(lead)}'>"
+            f"{max(tally['bull'], tally['bear'])}/{n} {lead}</b></div>")
+    return _card("🏛 Higher-timeframe structure",
+                 f"<table style='width:100%;border-collapse:collapse'>"
+                 f"{head}{''.join(rows)}</table>{foot}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  9 · the outside world
+# ══════════════════════════════════════════════════════════════════════
+
+def external_html(items: Optional[Sequence[Sequence[Any]]] = None) -> str:
+    """🌍 Global · VIX · commodity · news · FII/DII — one line each.
+
+    Same rule as the bias stack: each reading arrives already worded by its own
+    panel. The full global instrument list, the commodity candidate table and
+    the headline list are diagnostics, and the spec puts them behind the audit
+    expander for the reason this dashboard exists.
+    """
+    parsed = [_split(i) for i in (items or ())]
+    live = [(n, l, d) for n, l, d in parsed if str(l or "").strip()]
+    if not live:
+        return ""
+    body = "".join(
+        _row(name, f"{_emoji_of(label, direction)} {_esc(str(label).upper())}",
+             _tone_of(label, direction))
+        for name, label, direction in live)
+    silent = [n for n, l, _d in parsed if not str(l or "").strip()]
+    note = ""
+    if silent:
+        note = (f"<div style='font-size:9.5px;color:{MICRO};margin-top:5px'>"
+                f"⚪ not reporting: {_esc(' · '.join(silent))}</div>")
+    return _card("🌍 External context", body + note)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  10 · so what
+# ══════════════════════════════════════════════════════════════════════
+
+def market_state_html(gate: Any = None, regime: Any = None,
+                      why: Optional[Sequence[Any]] = None,
+                      need: Optional[Sequence[Any]] = None) -> str:
+    """🎯 One state, why it is that, and what would change it.
+
+    ⚠️ **An observation, never a recommendation.** The spec is explicit and so
+    is this repo: MIOS V5 is decision-*support*. This block names the state the
+    gate reported and the conditions it is waiting on. It does not say buy, sell,
+    size, or where to enter — the execution chain owns that, on its own tab,
+    behind a human toggle.
+
+    `gate` is `entry_gate` — its `state` and `why` are the owner's words, taken
+    verbatim so the top of this dashboard cannot describe the market differently
+    from the panel that decided it.
+    """
+    g = gate if isinstance(gate, Mapping) else {}
+    state = str(g.get("state") or "").strip().upper()
+    reasons = [str(w).strip() for w in (why or g.get("why") or ())
+               if str(w).strip()]
+    needs = [str(w).strip() for w in (need or ()) if str(w).strip()]
+    if not state and not str(regime or "").strip():
+        return ""
+
+    shown = state or "—"
+    tone = (WARN if shown in ("WAIT", "PINNED", "—")
+            else BULL if "CALL" in shown else BEAR if "PUT" in shown else MUTED)
+    inner = [
+        f"<div style='text-align:center;padding:6px 0'>"
+        f"<div style='font-size:9px;letter-spacing:.14em;color:{MICRO}'>"
+        f"MARKET STATE</div>"
+        f"<div style='font-size:26px;font-weight:800;color:{tone};"
+        f"line-height:1.15'>{_esc(shown)}</div>"
+        + (f"<div style='font-size:11px;color:{MUTED}'>"
+           f"regime {_esc(str(regime).upper())}</div>"
+           if str(regime or "").strip() else "")
+        + "</div>",
+    ]
+    if reasons:
+        inner.append(_list_block("Why", reasons, MUTED))
+    if needs:
+        inner.append(_list_block("Needs", needs, WARN))
+    inner.append(
+        f"<div style='font-size:9px;color:{MICRO};margin-top:6px;"
+        f"text-align:center'>Observation, not a recommendation — no order is "
+        f"placed from this screen.</div>")
+    return _card("🎯 Final Nifty state", "".join(inner))
+
+
+def _list_block(title: str, items: Sequence[str], tone: str) -> str:
+    lines = "".join(
+        f"<div style='font-size:11.5px;color:{tone};padding:1px 0'>• "
+        f"{_esc(i)}</div>" for i in items[:4])
+    return (f"<div style='margin-top:5px'>"
+            f"<div style='font-size:8.5px;letter-spacing:.1em;color:{MICRO}'>"
+            f"{_esc(title.upper())}</div>{lines}</div>")
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  the block order
 # ══════════════════════════════════════════════════════════════════════
 
 #: Read top to bottom, this is the order the questions get asked in — where am
-#: I, what is holding me, am I stuck to it, what are the levels, who is winning.
+#: I, what is holding me, am I stuck to it, what are the levels, who is winning,
+#: who controls it, where is the liquidity, what do the higher timeframes say,
+#: what is the outside world doing, and so what.
 #: Kept as data so the collector cannot silently reorder them and so a test can
 #: assert the sequence rather than trusting a comment.
 BLOCK_ORDER = ("price_map", "oi_walls", "market_pin", "sr_table",
-               "battle_zone")
+               "battle_zone", "bias_stack", "liquidity", "htf", "external",
+               "market_state")
 
 
 def cockpit_blocks(data: Optional[Mapping[str, Any]]) -> Dict[str, str]:
@@ -518,5 +857,15 @@ def cockpit_blocks(data: Optional[Mapping[str, Any]]) -> Dict[str, str]:
         "sr_table": sr_table_html(d.get("sr_levels"), spot),
         "battle_zone": battle_zone_html(d.get("battle_zone"), d.get("winner"),
                                         d.get("probabilities"), spot),
+        "bias_stack": bias_stack_html(d.get("bias_rows"), d.get("overall"),
+                                      d.get("confidence")),
+        "liquidity": liquidity_html(d.get("liq_pools"), spot,
+                                    _get(d.get("profile") or {}, "poc_price",
+                                         "poc"),
+                                    d.get("poc_regime"), d.get("poc_stability")),
+        "htf": htf_html(d.get("htf")),
+        "external": external_html(d.get("external_rows")),
+        "market_state": market_state_html(d.get("gate"), d.get("regime"),
+                                          d.get("why"), d.get("need")),
     }
     return {k: v for k, v in out.items() if v}

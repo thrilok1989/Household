@@ -332,18 +332,188 @@ def test_it_escapes_what_it_is_given():
     assert "<script>" not in html and "&lt;script&gt;" in html
 
 
+#: A fully-populated cockpit, so a test can assert on every block at once.
+#: Kept beside `BLOCK_ORDER` in spirit: if a block is added and this fixture is
+#: not extended, `test_the_block_order_matches_the_questions_it_answers` fails
+#: rather than quietly covering nine of ten.
+_FULL = {
+    "spot": 24583.8, "profile": _PROFILE, "vwap": 24570.4,
+    "day": {"high": 24607.0, "low": 24351.0},
+    "prev_day": {"prev_high": 24750.0, "prev_low": 24350.0},
+    "oi_ceiling": (24600.0, 153.2), "oi_floor": (24500.0, 116.9),
+    "oi_pin": _PIN, "gate": _GATE, "gamma_flip": 24573.0, "atm": 24600.0,
+    "pcr": 0.76,
+    "ladder": [{"strike": 24600.0, "ce_oi": 1.53e7, "pe_oi": 7.47e6,
+                "ce_doi": 2.18e6, "pe_doi": 3.29e6}],
+    "sr_levels": [_lv("RESISTANCE", 24605, 45, 55, active=True),
+                  _lv("SUPPORT", 24550, 48, 52)],
+    "battle_zone": {"type": "RESISTANCE", "price": 24605.0},
+    "winner": "Contested", "probabilities": {"break": 48, "rejection": 52},
+    "bias_rows": [("Price structure", "SIDEWAYS"), ("ΔOI", "Bull"),
+                  ("Order flow", "Bear")],
+    "overall": "SIDEWAYS", "confidence": 56.0,
+    "liq_pools": {"above": [{"price": 24619.0, "touched": False}],
+                  "below": [{"price": 24543.0, "touched": True}]},
+    "poc_regime": "STABLE", "poc_stability": "HIGH",
+    "htf": {"Daily": {"profile": {"vah": 24700.0, "poc": 24592.0,
+                                  "val": 24450.0},
+                      "structure": {"trend": "bull"}}},
+    "external_rows": [("Global", "Bull"), ("India VIX", "12.40")],
+    "regime": "SIDEWAYS", "need": ["Acceptance", "Signal validity"],
+}
+
+
 def test_the_block_order_matches_the_questions_it_answers():
     """Kept as data so a test can assert the sequence rather than trusting a
     comment, and so the collector cannot silently reorder it."""
-    assert NC.BLOCK_ORDER == ("price_map", "oi_walls", "market_pin",
-                              "sr_table", "battle_zone")
-    got = NC.cockpit_blocks({"spot": 24583.8, "profile": _PROFILE,
-                             "oi_ceiling": (24600.0, 153.2), "oi_pin": _PIN,
-                             "gate": _GATE,
-                             "sr_levels": [_lv("SUPPORT", 24550, 48, 52)],
-                             "battle_zone": {"price": 24605.0},
-                             "winner": "Contested"})
-    assert set(got) == set(NC.BLOCK_ORDER)
+    assert NC.BLOCK_ORDER == (
+        "price_map", "oi_walls", "market_pin", "sr_table", "battle_zone",
+        "bias_stack", "liquidity", "htf", "external", "market_state")
+    got = NC.cockpit_blocks(_FULL)
+    assert set(got) == set(NC.BLOCK_ORDER), (
+        f"blocks that did not render: {set(NC.BLOCK_ORDER) - set(got)}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  9 · who controls the market
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_bias_stack_shows_one_line_per_input():
+    html = NC.bias_stack_html([("ΔOI", "Bull"), ("Order flow", "Bear"),
+                               ("Global", "Bull")], "SIDEWAYS", 56)
+    assert html.count("🟢") == 2 and html.count("🔴") == 1
+    assert "OVERALL NIFTY BIAS" in html and "56%" in html
+
+
+def test_the_overall_bias_is_not_averaged_from_the_rows():
+    """⚠️ The one thing that would make this block dangerous.
+
+    `overall` is `compute_market_picture`'s own regime. Averaging the rows here
+    would produce a second verdict from the same inputs by a different method,
+    on the same screen — the exact disagreement the architecture principles open
+    by forbidding. Three bull rows with a SIDEWAYS regime must render SIDEWAYS.
+    """
+    html = NC.bias_stack_html([("a", "Bull"), ("b", "Bull"), ("c", "Bull")],
+                              "SIDEWAYS", 51)
+    assert "SIDEWAYS" in html
+    assert "OVERALL NIFTY BIAS" in html
+    body = html[:html.index("OVERALL NIFTY BIAS")]
+    assert "BULL" in body                       # the rows still say bull
+
+
+def test_a_silent_input_is_listed_not_called_neutral():
+    """An engine that said nothing and an engine that said "balanced" are
+    different facts, and rendering both as NEUTRAL loses the difference."""
+    html = NC.bias_stack_html([("ΔOI", "Bull"), ("Dealer DEX", None),
+                               ("IV skew", "")], "UP", 60)
+    assert "silent" in html and "Dealer DEX" in html and "IV skew" in html
+
+
+def test_the_bias_stack_is_empty_with_nothing_to_stack():
+    assert NC.bias_stack_html([], None) == ""
+    assert NC.bias_stack_html([("a", None)], None) == ""
+
+
+def test_a_confidence_that_was_not_reported_is_simply_absent():
+    html = NC.bias_stack_html([("ΔOI", "Bull")], "UP", None)
+    assert "OVERALL NIFTY BIAS" in html and "%" not in html
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  10 · liquidity
+# ══════════════════════════════════════════════════════════════════════
+
+def test_a_swept_pool_is_not_offered_as_a_target():
+    """A pool whose liquidity has been taken is SPENT. Listing it as the next
+    target is how a level that already did its job gets traded twice."""
+    html = NC.liquidity_html(
+        {"above": [{"price": 24619.0, "touched": False}],
+         "below": [{"price": 24543.0, "touched": True}]}, 24583.8)
+    assert "24,619" in html
+    swept = html[html.index("Swept"):]
+    assert "24,543" in swept
+
+
+def test_the_nearest_untouched_pool_is_the_target():
+    html = NC.liquidity_html(
+        {"above": [{"price": 24590.0, "touched": False}],
+         "below": [{"price": 24400.0, "touched": False}]}, 24583.8)
+    target = html[html.index("Nearest target"):]
+    assert "24,590" in target
+
+
+def test_liquidity_is_empty_when_nothing_was_measured():
+    assert NC.liquidity_html(None, 24583.8) == ""
+    assert NC.liquidity_html({}, 24583.8) == ""
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  11 · higher timeframes
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_htf_table_runs_fastest_timeframe_first():
+    """A 1H/Monthly disagreement should be a row apart, not a scan away."""
+    html = NC.htf_html({
+        "Monthly": {"profile": {"poc": 24000.0}, "structure": {"trend": "bull"}},
+        "1H": {"profile": {"poc": 24592.0}, "structure": {"trend": "neutral"}},
+        "Daily": {"profile": {"poc": 24500.0}, "structure": {"trend": "bull"}}})
+    assert html.index(">1H<") < html.index(">Daily<") < html.index(">Monthly<")
+
+
+def test_the_htf_tally_counts_the_timeframes_it_actually_has():
+    """3/5 BULL with only three profiles built would be arithmetic on data that
+    does not exist."""
+    html = NC.htf_html({
+        "1H": {"structure": {"trend": "bull"}},
+        "Daily": {"structure": {"trend": "bull"}},
+        "Weekly": {"structure": {"trend": "bear"}}})
+    assert "2/3 BULL" in html
+
+
+def test_a_timeframe_with_no_profile_is_absent_not_dashed():
+    html = NC.htf_html({"1H": {"structure": {"trend": "bull"}},
+                        "Yearly": None, "Monthly": {}})
+    assert ">1H<" in html
+    assert ">Yearly<" not in html and ">Monthly<" not in html
+
+
+def test_htf_is_empty_with_no_profiles():
+    assert NC.htf_html(None) == "" and NC.htf_html({}) == ""
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  12 · the final state — an observation, never a recommendation
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_state_says_it_is_not_a_recommendation():
+    """⚠️ MIOS V5 is decision-SUPPORT. The spec says it and this repo says it:
+    no trade recommendation on this dashboard."""
+    html = NC.market_state_html(_GATE, "SIDEWAYS")
+    assert "PINNED" in html
+    assert "not a recommendation" in html
+    for word in ("BUY", "SELL", "Enter", "Target", "Stop"):
+        assert word not in html, word
+
+
+def test_the_reason_is_the_gates_own_words():
+    """Taken verbatim so the top of this dashboard cannot describe the market
+    differently from the panel that decided it."""
+    html = NC.market_state_html(_GATE, None)
+    assert "no directional edge" in html
+
+
+def test_what_it_needs_is_read_never_inferred():
+    """Guessing that a WAIT needs "acceptance" would put a condition on screen
+    no engine asked for, and the trader would wait for the wrong thing."""
+    html = NC.market_state_html({"state": "WAIT"}, None,
+                                need=["Acceptance", "Signal validity"])
+    assert "NEEDS" in html and "Acceptance" in html
+    assert "NEEDS" not in NC.market_state_html({"state": "WAIT"}, None)
+
+
+def test_the_state_is_empty_when_nothing_reported_one():
+    assert NC.market_state_html(None, None) == ""
+    assert NC.market_state_html({}, "") == ""
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -435,3 +605,76 @@ def test_no_block_title_carries_a_pre_escaped_entity():
     for name, html in blocks.items():
         assert "&amp;amp;" not in html, name
         assert "&amp;lt;" not in html, name
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  13 · the colour must survive this repo's actual wording
+# ══════════════════════════════════════════════════════════════════════
+
+#: The labels `compute_market_picture` really publishes today, transcribed from
+#: the source rather than invented, with the colour each MUST get.
+#:
+#: ⚠️ This exists because a preview with a made-up label ("PE writers building")
+#: rendered grey, and the made-up label was the only reason. The real one reads
+#: "Bullish (PE writers building support)" and colours correctly — but that is
+#: luck depending on the word "Bullish" surviving a rewording. Pinning the live
+#: vocabulary means a rewording that greys a row fails here, not on screen.
+_REAL_LABELS = (
+    ("Bullish (PE writers building support)", "🟢"),
+    ("Bearish (CE writers capping)", "🔴"),
+    ("Both building / mixed", "⚪"),
+    ("Risk-on", "🟢"),
+    ("Risk-off", "🔴"),
+)
+
+
+@pytest.mark.parametrize("label,emoji", _REAL_LABELS)
+def test_the_real_labels_this_repo_produces_are_coloured(label, emoji):
+    assert NC._emoji_of(label) == emoji, label
+
+
+def test_a_published_direction_beats_the_wording():
+    """The reliable path. `dex_bias` and `skew_bias` publish `bias` as BULL/BEAR
+    outright, so their colour never depends on parsing prose."""
+    assert NC._emoji_of("Balanced", "BULL") == "🟢"
+    assert NC._emoji_of("anything at all", "BEAR") == "🔴"
+    assert NC._emoji_of("Bullish (PE writers building)", "NEUTRAL") == "⚪"
+
+
+def test_a_three_tuple_row_carries_its_direction_through():
+    html = NC.bias_stack_html([("Dealer DEX", "Balanced", "BULL")], "UP", 60)
+    assert "🟢" in html
+
+
+def test_two_and_three_tuple_rows_mix_freely():
+    """The collector hands over a direction only where an owner published one, so
+    both shapes arrive in the same list."""
+    html = NC.bias_stack_html(
+        [("ΔOI", "Bullish (PE writers building support)"),
+         ("IV skew", "Put fear", "BEAR")], "SIDEWAYS", 51)
+    assert "🟢" in html and "🔴" in html
+
+
+def test_the_collector_hands_over_the_directions_it_has():
+    """`_bias_rows` must emit 3-tuples, or the direction path is dead code."""
+    from mios_v5.ui.dashboard_v6 import _bias_rows
+    rows = _bias_rows({"regime": "UP",
+                       "dex_bias": {"label": "Balanced", "bias": "BULL"},
+                       "skew_bias": {"label": "Put fear", "bias": "BEAR"}})
+    by_name = {r[0]: r for r in rows}
+    assert len(by_name["Dealer DEX"]) == 3
+    assert by_name["Dealer DEX"][2] == "BULL"
+    assert by_name["IV skew"][2] == "BEAR"
+    assert by_name["Price structure"][2] == "UP"
+
+
+def test_the_regime_confidence_matches_the_regime():
+    """⚠️ Selection, not calculation. Taking a max independently of the regime
+    would let a SIDEWAYS verdict carry `p_up` — the number under the verdict
+    disagreeing with the verdict."""
+    from mios_v5.ui.dashboard_v6 import _regime_confidence
+    mp = {"regime": "SIDEWAYS", "p_up": 31.0, "p_down": 24.0, "p_side": 56.0}
+    assert _regime_confidence(mp) == 56.0
+    assert _regime_confidence({**mp, "regime": "UP"}) == 31.0
+    assert _regime_confidence({"regime": "???"}) is None
+    assert _regime_confidence({}) is None
