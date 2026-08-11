@@ -93,9 +93,18 @@ class _Scan(ast.NodeVisitor):
         self.calls: Dict[str, Set[str]] = {}
         self.draws: Set[str] = set()
         self._fn: List[str] = []
+        #: ⚠️ Local names bound to `st.session_state`, per function.
+        #:
+        #: `_is_state` matched only `<x>.session_state`, so the idiomatic
+        #: `ss = st.session_state` followed by `ss["k"] = v` was INVISIBLE — the
+        #: audit reported no writes for four functions that write plenty. That is
+        #: how `_adaptive_greeks` failed to register as a producer at all, which
+        #: in turn hid it from the orphan check written to catch exactly it.
+        self._alias: Dict[str, Set[str]] = {}
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._fn.append(node.name)
+        self._alias.setdefault(node.name, set())
         self.writes.setdefault(node.name, set())
         self.reads.setdefault(node.name, set())
         self.calls.setdefault(node.name, set())
@@ -103,6 +112,11 @@ class _Scan(ast.NodeVisitor):
         self._fn.pop()
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        # `ss = st.session_state` — remember the local name before using it.
+        if self._fn and self._is_state(node.value):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    self._alias[self._fn[-1]].add(t.id)
         for t in node.targets:
             if isinstance(t, ast.Subscript) and self._is_state(t.value):
                 k = _key_of(t.slice)
@@ -135,9 +149,95 @@ class _Scan(ast.NodeVisitor):
                 self.reads[self._fn[-1]].add(k)
         self.generic_visit(node)
 
-    @staticmethod
-    def _is_state(node) -> bool:
-        return getattr(node, "attr", "") == "session_state"
+    def _is_state(self, node) -> bool:
+        """`st.session_state`, or a local name bound to it in this function."""
+        if getattr(node, "attr", "") == "session_state":
+            return True
+        name = getattr(node, "id", "")
+        return bool(name and self._fn
+                    and name in self._alias.get(self._fn[-1], ()))
+
+
+def orphan_producers(module: str = "mios_v5/ui/dashboard_v6.py",
+                     entry: str = "render_dashboard_v6") -> Dict[str, list]:
+    """Functions in `module` that write a key somebody reads — and are never called.
+
+    ⚠️ The bug class this exists for, in the exact shape it shipped in.
+
+    `_adaptive_greeks` was defined, wrote `_adaptive_greeks` to session state, and
+    three other surfaces read that key. Nothing called it. The key was never
+    published, so the header chip, the Market Picture line and the Trade Card line
+    each read an absent value and drew nothing — three failures presenting as
+    "the market has nothing to say", which is the one misreading this repo keeps
+    paying for.
+
+    The tests at the time did not catch it because they tested **existence**: the
+    panel function was called directly, and the wiring test asserted the write
+    statement appeared in the file. It did — inside a function nobody invoked.
+
+    ## Why the scope is one module
+
+    Run repo-wide this returns 16 hits and almost all are false positives, for two
+    blind spots that are already documented:
+
+    * **`ast.Call` misses a reference.** `_render_main_analyzer` calls its side-
+      market panels by putting them in a tuple and looping — a Name, never a
+      Call — so `render_news_bias_panel` reads as uncalled. `docs/V6_DEPENDENCY_AUDIT.md`
+      records the same trap deleting eleven live functions.
+    * **`ENTRIES` is not every entry.** `main()`, `ws_worker`, `discord_bot`,
+      `auto_option_trader` and `seller_perspective` are separate programs, and a
+      producer reached only from one of those is not an orphan.
+
+    A check that is 90% noise gets relaxed until it catches nothing. Scoped to
+    `dashboard_v6` reached from `render_dashboard_v6` — where every call is a real
+    call and the entry point is the only one — it is exact, it is currently zero,
+    and it is where the bug happened.
+    """
+    root = pathlib.Path(__file__).resolve().parents[1]
+    target = root / module
+    try:
+        tree = ast.parse(target.read_text())
+    except Exception:
+        return {}
+    own = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+    writes: Dict[str, Set[str]] = {}
+    reads: Dict[str, Set[str]] = {}
+    calls: Dict[str, Set[str]] = {}
+    for path in _files():
+        try:
+            other = ast.parse(path.read_text())
+        except Exception:
+            continue
+        scan = _Scan()
+        scan.visit(other)
+        for store, got in ((writes, scan.writes), (reads, scan.reads),
+                           (calls, scan.calls)):
+            for fn, keys in got.items():
+                store.setdefault(fn, set()).update(keys)
+
+    reachable: Set[str] = set()
+    stack = [entry]
+    while stack:
+        fn = stack.pop()
+        if fn in reachable:
+            continue
+        reachable.add(fn)
+        stack.extend(calls.get(fn, ()))
+
+    consumed_anywhere: Set[str] = set()
+    for keys in reads.values():
+        consumed_anywhere |= keys
+
+    out: Dict[str, list] = {}
+    for fn in sorted(own):
+        if fn in reachable or fn.startswith("__"):
+            continue
+        orphaned = sorted(k for k in (writes.get(fn) or ())
+                          if k in consumed_anywhere)
+        if orphaned:
+            out[fn] = orphaned
+    return out
 
 
 def build() -> Dict[str, object]:
