@@ -564,7 +564,11 @@ def _adaptive_greeks(st, fr: Dict[str, Any]):
     """
     try:
         from ..adaptive_greeks import read as _greeks_read
-        from ..charm_pin import read as _pin_read
+        # ⚠️ `dealer_magnet`, not `charm_pin`: the pin gate used to mean the
+        # PINNED regime could never be detected off expiry, so a normal day with
+        # price sat on the max-OI strike read as RANGE. `charm_pin` still owns
+        # the measurement; this only lifts the calendar gate.
+        from ..dealer_magnet import read as _pin_read
     except Exception:
         return None
     ss = st.session_state

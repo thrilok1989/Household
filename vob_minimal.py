@@ -8791,9 +8791,11 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
         # magnet strike so the trader reads breakouts as fade-prone and small
         # dips as noise. Shown whether or not a trade is open; never changes the
         # ON TRACK / PATIENT / WARNING / EXIT verdict.
-        # One shared rule with the Trade Card (mios_v5/charm_pin.py) so the two
-        # panels can never quote different pins or a different distance cut-off.
-        from mios_v5.charm_pin import from_market_picture as _cpin
+        # One shared rule with the Trade Card (mios_v5/dealer_magnet.py, which
+        # delegates the measuring to mios_v5/charm_pin.py) so the two panels can
+        # never quote different pins or a different distance cut-off — and so
+        # both report the magnet on NORMAL days too, not only on expiry.
+        from mios_v5.dealer_magnet import from_market_picture as _cpin
         from mios_v5.ui.charm_pin_panel import charm_pin_html as _cpinhtml
         _charm_g = _cpinhtml(_cpin(
             _is_expiry_day(option_data), spot_price, mp,
@@ -13497,7 +13499,11 @@ def render_clean_card(spot_price, option_data=None):
         # Context ONLY — it never changes the bias or the verdict.
         _charm_html = ""
         try:
-            from mios_v5.charm_pin import from_market_picture as _cpin
+            # `dealer_magnet`, not `charm_pin` directly: the magnet is a real
+            # level on EVERY day, and this wrapper reports it on normal days too
+            # with wording that does not overclaim. `charm_pin` still does the
+            # measuring and is unchanged — on expiry day the read is identical.
+            from mios_v5.dealer_magnet import from_market_picture as _cpin
             from mios_v5.ui.charm_pin_panel import charm_pin_html as _cpinhtml
             _charm_html = _cpinhtml(_cpin(
                 _is_expiry_day(option_data), spot_price, mp,
