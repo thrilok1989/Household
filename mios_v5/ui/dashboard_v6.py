@@ -162,16 +162,41 @@ def render_dashboard_v6(state=None, db=None) -> None:
                 unsafe_allow_html=True)
 
     tabs = st.tabs(_TABS)
+
+    # ⚠️ FILLED IN DEPENDENCY ORDER, NOT TAB ORDER.
+    #
+    # `st.tabs()` returns containers that may be filled in any sequence — the
+    # strip's left-to-right order is fixed by `_TABS` and does not change here.
+    # What changes is the order the bodies EXECUTE in during one rerun, and that
+    # is a real dependency:
+    #
+    #     _charts_screen      writes  _leg_profiles
+    #     _trading_screen     reads   _leg_profiles
+    #                         writes  _sr_levels · _premium_energy
+    #                                 _premium_structures · _entry_decision
+    #     _nifty_cockpit      reads   _sr_levels · _entry_decision
+    #     _options_cockpit    reads   _premium_energy · _premium_structures
+    #
+    # Filled in tab order the three cockpits ran BEFORE their producer, so:
+    #   · on the first render of a session those keys did not exist and the
+    #     blocks drew nothing — the "⚪ Not reporting yet: sr table / premium
+    #     energy / premium structure / option flow" captions;
+    #   · on every render after, they silently showed the PREVIOUS cycle's data,
+    #     20 seconds behind the panels beside them.
+    #
+    # This is a consequence of moving the new dashboards to the front of the
+    # strip: the layout moved, the producers did not. Nothing is recomputed here
+    # and no engine is touched — only the sequence the tab bodies run in.
     with tabs[0]:
         _charts_screen(st, fr)
+    with tabs[4]:
+        _trading_screen(st, fr, state)
     with tabs[1]:
         _nifty_cockpit(st, fr)
     with tabs[2]:
         _options_cockpit(st, fr)
     with tabs[3]:
         _decision_center(st, fr)
-    with tabs[4]:
-        _trading_screen(st, fr, state)
     with tabs[5]:
         _intelligence(st, fr, state)
     with tabs[6]:
