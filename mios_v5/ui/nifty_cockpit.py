@@ -46,8 +46,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from .theme import (ALERT, BEAR, BULL, CARD_BG, CARD_BORDER, FAINT, INK,
-                    LABEL, MICRO, MUTED, VIOLET, WARN)
+from .theme import (ALERT, BEAR, BRIGHT, BULL, CARD_BG, CARD_BORDER, FAINT,
+                    INK, LABEL, MICRO, MUTED, VIOLET, WARN)
 
 #: Shared card chrome, so five blocks cannot drift into five looks.
 _CARD = (f"background:{CARD_BG};border:1px solid {CARD_BORDER};"
@@ -526,6 +526,21 @@ def _emoji_of(label: Any, direction: Any = None) -> str:
     return {BULL: "🟢", BEAR: "🔴", WARN: "🟡"}.get(tone, "⚪")
 
 
+def is_bias_reading(label: Any, direction: Any = None) -> bool:
+    """Did `_tone_of` actually recognise this as a directional reading?
+
+    ⚠️ Needed because `_emoji_of` falls back to `⚪`, and `⚪` means **"not
+    reporting"** on every other card in this dashboard. A numeric row therefore
+    rendered as `⚪ 12.40` — India VIX marked absent while printing its value —
+    and `⚪ 🏛 FII -4,222 · DII +4,020 CR` did the same to the flows row. Caught by
+    rendering, not by a test: every fixture happened to use bias words.
+
+    Callers use this to decide whether a value is a bias word (glyph + uppercase)
+    or a value to print as it was written.
+    """
+    return _tone_of(label, direction) in (BULL, BEAR, WARN)
+
+
 def _split(entry: Any):
     """`(name, label)` or `(name, label, direction)` — both accepted.
 
@@ -748,16 +763,34 @@ def external_html(items: Optional[Sequence[Sequence[Any]]] = None) -> str:
     live = [(n, l, d) for n, l, d in parsed if str(l or "").strip()]
     if not live:
         return ""
-    body = "".join(
-        _row(name, f"{_emoji_of(label, direction)} {_esc(str(label).upper())}",
-             _tone_of(label, direction))
-        for name, label, direction in live)
+    body = "".join(_external_row(name, label, direction)
+                   for name, label, direction in live)
     silent = [n for n, l, _d in parsed if not str(l or "").strip()]
     note = ""
     if silent:
         note = (f"<div style='font-size:9.5px;color:{MICRO};margin-top:5px'>"
                 f"⚪ not reporting: {_esc(' · '.join(silent))}</div>")
     return _card("🌍 External context", body + note)
+
+
+def _external_row(name: str, label: Any, direction: Any = None) -> str:
+    """One external reading — a bias word, or a value printed as written.
+
+    ⚠️ Two shapes, because this card carries both and treating them alike was
+    wrong in two visible ways:
+
+        bias word   "Bull"                     → 🟢 BULL
+        a value     "12.40", "🏛 FII -4,222…"   → printed as-is, no glyph
+
+    Uppercasing a value shouted `CR` and `ABSORPTION BATTLE`, and the `⚪`
+    fallback marked it *not reporting* while printing it. A row that both shows a
+    number and flags it absent is worse than either alone.
+    """
+    if is_bias_reading(label, direction):
+        return _row(name, f"{_emoji_of(label, direction)} "
+                          f"{_esc(str(label).upper())}",
+                    _tone_of(label, direction))
+    return _row(name, _esc(str(label)), BRIGHT)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -833,7 +866,7 @@ def _list_block(title: str, items: Sequence[str], tone: str) -> str:
 #: assert the sequence rather than trusting a comment.
 BLOCK_ORDER = ("price_map", "oi_walls", "market_pin", "sr_table",
                "battle_zone", "bias_stack", "liquidity", "htf", "external",
-               "market_state")
+               "fii_dii", "market_state")
 
 
 def cockpit_blocks(data: Optional[Mapping[str, Any]]) -> Dict[str, str]:
@@ -865,7 +898,27 @@ def cockpit_blocks(data: Optional[Mapping[str, Any]]) -> Dict[str, str]:
                                     d.get("poc_regime"), d.get("poc_stability")),
         "htf": htf_html(d.get("htf")),
         "external": external_html(d.get("external_rows")),
+        # 🏛 Institutional flows. Imported here rather than at module scope
+        # because `fii_dii_panel` imports this file's `_card`/`_row` helpers —
+        # a top-level import either way would be circular.
+        "fii_dii": _fii_dii_block(d),
         "market_state": market_state_html(d.get("gate"), d.get("regime"),
                                           d.get("why"), d.get("need")),
     }
     return {k: v for k, v in out.items() if v}
+
+
+def _fii_dii_block(d: Mapping[str, Any]) -> str:
+    """The FII/DII card, or `""` if the panel could not be reached.
+
+    ⚠️ Guarded so a failure in one late-added block cannot take the other nine
+    down with it. `cockpit_blocks` builds the whole dashboard in one dict, so an
+    exception here would leave the trader with an empty tab and no reason.
+    """
+    try:
+        from .fii_dii_panel import fii_dii_html
+        return fii_dii_html(d.get("fii_dii_cash"), d.get("fii_deriv"),
+                            d.get("flows_bias"), d.get("flows_confidence"),
+                            d.get("flows_conflict"), d.get("flows_evidence"))
+    except Exception:
+        return ""
