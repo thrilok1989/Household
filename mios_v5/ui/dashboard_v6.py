@@ -41,8 +41,8 @@ from ..thesis import build_thesis, market_controller, recent_changes
 #: liquidity bars. Streamlit executes tab bodies in order, so the chart must be
 #: drawn in a tab that runs BEFORE Trading. Moving it to a later tab would leave
 #: the heatmaps reading the previous cycle's profiles.
-_TABS = ["📊 Charts", "🧭 NIFTY", "🎯 Decision", "📈 Trading", "🧭 Intelligence",
-         "📒 History", "🎓 Learning", "⏪ Replay"]
+_TABS = ["📊 Charts", "🧭 NIFTY", "📈 OPTIONS", "🎯 Decision", "📈 Trading",
+         "🧭 Intelligence", "📒 History", "🎓 Learning", "⏪ Replay"]
 
 #: One limit per table, shared by every panel that reads it.
 #:
@@ -122,16 +122,18 @@ def render_dashboard_v6(state=None, db=None) -> None:
     with tabs[1]:
         _nifty_cockpit(st, fr)
     with tabs[2]:
-        _decision_center(st, fr)
+        _options_cockpit(st, fr)
     with tabs[3]:
-        _trading_screen(st, fr, state)
+        _decision_center(st, fr)
     with tabs[4]:
-        _intelligence(st, fr, state)
+        _trading_screen(st, fr, state)
     with tabs[5]:
-        _history(st, db)
+        _intelligence(st, fr, state)
     with tabs[6]:
-        _learning(st, db, fr)
+        _history(st, db)
     with tabs[7]:
+        _learning(st, db, fr)
+    with tabs[8]:
         _replay(st, db)
 
 
@@ -257,6 +259,250 @@ def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
         st.caption("⚪ Not reporting yet: "
                    + " · ".join(b.replace("_", " ") for b in missing)
                    + ". Each fills once its producer has run this session.")
+
+
+# ── 0c · OPTIONS / LTP INTELLIGENCE ─────────────────────────────────────
+def _options_cockpit(st, fr: Dict[str, Any]) -> None:
+    """📈 Dashboard 2 — what the PREMIUMS are doing, and nothing about the index.
+
+    The NIFTY read is Dashboard 1's. Repeating it here is the duplication the
+    split exists to remove, so this tab draws no spot, no regime and no index
+    levels.
+
+    **Reads only.** Every field has a stage that published it:
+
+        Stage 71.8 `_premium_structures`  ltp · support · resistance · vp_poc ·
+                                          acceptance · momentum · rvol ·
+                                          cbv/csv/cvd · break/fakeout · score
+        Stage 71.7 `_premium_energy`      energy · spike · strength · preferred
+        the chain  `df_summary`           LTP · OI · ΔOI · volume · bid/ask
+
+    ⚠️ `_premium_structures` is keyed by `(side, strike)` TUPLES, and Stage 71.8
+    publishes it from `_strike_validation` on the Trading tab — a LATER tab than
+    this one. So on the first rerun of a session the structure and flow blocks
+    are empty and fill on the next. Re-keying is done here rather than asking the
+    pure module to understand a tuple key, which is the same boundary rename
+    `_mios_market_read` does.
+    """
+    from .options_cockpit import (BLOCK_ORDER, cockpit_blocks,
+                                 greeks_table_html)
+
+    ss = st.session_state
+    opt = ss.get("_cached_option_data") or {}
+    ds = opt.get("df_summary")
+    spot = opt.get("underlying") or ss.get("_nifty_spot_live")
+    atm = None
+    try:
+        atm = (ss.get("_atm_pm1_vpfr") or {}).get("atm_strike")
+    except Exception:
+        atm = None
+
+    structures = _by_side(ss.get("_premium_structures"))
+    blocks = cockpit_blocks({
+        "expiry": opt.get("expiry") or opt.get("selected_expiry"),
+        "atm": atm,
+        "spot": spot,
+        "legs": _leg_quotes(ds, atm, structures),
+        "ladder": _premium_ladder(ds, atm, structures),
+        "energy": ss.get("_premium_energy"),
+        "structures": structures,
+        "flows": structures,
+        # Read, not derived: comparing the two CVDs here would be a second
+        # opinion on the question Stage 71.7 answers with `preferred`.
+        "flow_verdict": (ss.get("_premium_energy") or {}).get("preferred"),
+    })
+
+    if not blocks:
+        st.info("📈 Options cockpit standing by — it reads Stage 71.7's premium "
+                "energy and Stage 71.8's premium structure. Those land once the "
+                "chain and the ATM legs are both in.")
+        return
+
+    st.markdown(blocks.get("option_header", ""), unsafe_allow_html=True)
+    st.markdown(blocks.get("leg_cards", ""), unsafe_allow_html=True)
+    st.markdown(blocks.get("premium_ladder", ""), unsafe_allow_html=True)
+
+    # ⚠️ Behind an expander, per the spec: no Greeks on the default screen. Kept
+    # available rather than deleted — a trader who wants delta on expiry day
+    # should not have to read the chain on another tab.
+    _greeks = greeks_table_html(_greek_rows(ds, atm))
+    if _greeks:
+        with st.expander("🔬 Advanced Greeks — ATM ±2", expanded=False):
+            st.markdown(_greeks, unsafe_allow_html=True)
+
+    lo, ro = st.columns(2)
+    with lo:
+        st.markdown(blocks.get("premium_energy", ""), unsafe_allow_html=True)
+    with ro:
+        st.markdown(blocks.get("option_flow", ""), unsafe_allow_html=True)
+    st.markdown(blocks.get("premium_structure", ""), unsafe_allow_html=True)
+
+    st.caption("📊 The synchronised NIFTY ‖ CALL ‖ PUT charts are on the "
+               "**Charts** tab — one figure, not a second copy here.")
+
+    missing = [b for b in BLOCK_ORDER if b not in blocks]
+    if missing:
+        st.caption("⚪ Not reporting yet: "
+                   + " · ".join(b.replace("_", " ") for b in missing)
+                   + ". Each fills once its stage has run this session.")
+
+
+def _by_side(structures) -> Dict[str, Dict[str, Any]]:
+    """`{(side, strike): {...}}` → `{side: {...}}`, ATM-nearest kept.
+
+    ⚠️ The exact re-keying `_mios_market_read` already needed. Handing the tuple
+    keys straight to a consumer that reads `{side}` yields nothing for every
+    field — present, wrong shape, no error — which is how both legs once rendered
+    the same raw dict into a Telegram message.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    if not isinstance(structures, dict):
+        return out
+    for key, val in structures.items():
+        side = key[0] if isinstance(key, tuple) and key else key
+        if side in ("CALL", "PUT") and isinstance(val, dict):
+            # First wins: the picker publishes the chosen strike first, and a
+            # later wing strike must not overwrite the leg being traded.
+            out.setdefault(side, dict(val))
+            if isinstance(key, tuple) and len(key) > 1:
+                out[side].setdefault("strike", key[1])
+    return out
+
+
+def _chain_row(ds, strike):
+    """One strike's chain row, or None. A lookup, never a search for a maximum."""
+    if ds is None or getattr(ds, "empty", True) or strike is None:
+        return None
+    try:
+        hit = ds[(ds["Strike"] - float(strike)).abs() < 0.5]
+        return None if hit.empty else hit.iloc[0]
+    except Exception:
+        return None
+
+
+def _row_num(row, *names):
+    for n in names:
+        try:
+            if row is not None and n in row.index and row.get(n) is not None:
+                return float(row.get(n))
+        except Exception:
+            continue
+    return None
+
+
+def _leg_quotes(ds, atm, structures) -> Dict[str, Dict[str, Any]]:
+    """Per-side quote + flow, assembled from the chain row and Stage 71.8.
+
+    The chain owns LTP, OI, ΔOI, volume and the book; Stage 71.8 owns the flow
+    totals and RVOL. Neither is recomputed — this is a join, and the two sources
+    are kept distinct so a missing stage leaves a hole rather than a guess.
+    """
+    row = _chain_row(ds, atm)
+    out: Dict[str, Dict[str, Any]] = {}
+    for side, sfx in (("CALL", "CE"), ("PUT", "PE")):
+        st_node = (structures or {}).get(side) or {}
+        bid = _row_num(row, f"bidQty_{sfx}", f"top_bid_quantity_{sfx}")
+        ask = _row_num(row, f"askQty_{sfx}", f"top_ask_quantity_{sfx}")
+        node = {
+            "strike": atm,
+            "ltp": (_row_num(row, f"lastPrice_{sfx}", f"last_price_{sfx}")
+                    or st_node.get("ltp")),
+            "volume": _row_num(row, f"totalTradedVolume_{sfx}", f"volume_{sfx}"),
+            "oi": _row_num(row, f"openInterest_{sfx}", f"{sfx}_OI"),
+            "doi": _row_num(row, f"changeinOpenInterest_{sfx}"),
+            "rvol": st_node.get("rvol"),
+            "cbv": st_node.get("cbv"), "csv": st_node.get("csv"),
+            "cvd": st_node.get("cvd"),
+            "buy_share": (st_node.get("flow") or {}).get("buy_share")
+            if isinstance(st_node.get("flow"), dict) else None,
+            "bid_ask": (f"{bid:,.0f} / {ask:,.0f}"
+                        if bid is not None and ask is not None else None),
+            # The same published CVD sign the ladder uses, so the card and the
+            # row for this strike cannot say different things about one leg.
+            "money_flow": _flow_of(st_node),
+        }
+        if any(v is not None for v in node.values()):
+            out[side] = node
+    return out
+
+
+def _premium_ladder(ds, atm, structures) -> Optional[List[Dict[str, Any]]]:
+    """ATM±2 premium rows. A projection of the chain, with no maximum taken.
+
+    CVD and the flow word come from Stage 71.8 for the strikes it published and
+    are simply absent for the wings — an honest hole rather than a zero.
+    """
+    if ds is None or getattr(ds, "empty", True):
+        return None
+    try:
+        strikes = sorted(ds["Strike"].dropna().unique().tolist())
+        if not strikes:
+            return None
+        centre = float(atm) if atm is not None else strikes[len(strikes) // 2]
+        near = sorted(strikes, key=lambda s: abs(s - centre))[:5]
+        rows = []
+        for k in near:
+            row = _chain_row(ds, k)
+            if row is None:
+                continue
+            at_atm = atm is not None and abs(float(k) - float(atm)) < 0.5
+            call = (structures or {}).get("CALL") or {} if at_atm else {}
+            put = (structures or {}).get("PUT") or {} if at_atm else {}
+            rows.append({
+                "strike": float(k),
+                "ce_ltp": _row_num(row, "lastPrice_CE", "last_price_CE"),
+                "pe_ltp": _row_num(row, "lastPrice_PE", "last_price_PE"),
+                "ce_doi": _row_num(row, "changeinOpenInterest_CE"),
+                "pe_doi": _row_num(row, "changeinOpenInterest_PE"),
+                "ce_cvd": call.get("cvd"), "pe_cvd": put.get("cvd"),
+                "ce_flow": _flow_of(call), "pe_flow": _flow_of(put),
+            })
+        return rows or None
+    except Exception:
+        return None
+
+
+def _flow_of(node) -> Optional[str]:
+    """BULL / BEAR from a published CVD sign — the sign IS the reading.
+
+    Not a threshold and not a classification: a positive cumulative delta means
+    buyers were adding, which is what the word says. Anything with a threshold
+    in it would belong to Stage 71.7, not here.
+    """
+    try:
+        v = node.get("cvd") if isinstance(node, dict) else None
+        if v is None:
+            return None
+        f = float(v)
+        return "BULL" if f > 0 else "BEAR" if f < 0 else "FLAT"
+    except (TypeError, ValueError):
+        return None
+
+
+def _greek_rows(ds, atm) -> Optional[List[Dict[str, Any]]]:
+    """ATM±2 Greeks, for the expander only."""
+    if ds is None or getattr(ds, "empty", True):
+        return None
+    try:
+        strikes = sorted(ds["Strike"].dropna().unique().tolist())
+        if not strikes:
+            return None
+        centre = float(atm) if atm is not None else strikes[len(strikes) // 2]
+        rows = []
+        for k in sorted(strikes, key=lambda s: abs(s - centre))[:5]:
+            row = _chain_row(ds, k)
+            if row is None:
+                continue
+            rows.append({
+                "strike": float(k),
+                "ce_delta": _row_num(row, "Delta_CE"), "pe_delta": _row_num(row, "Delta_PE"),
+                "ce_gamma": _row_num(row, "Gamma_CE"), "pe_gamma": _row_num(row, "Gamma_PE"),
+                "ce_vega": _row_num(row, "Vega_CE"), "pe_vega": _row_num(row, "Vega_PE"),
+                "ce_theta": _row_num(row, "Theta_CE"), "pe_theta": _row_num(row, "Theta_PE"),
+            })
+        return rows or None
+    except Exception:
+        return None
 
 
 def _oi_ladder(df_summary, atm) -> Optional[List[Dict[str, Any]]]:
