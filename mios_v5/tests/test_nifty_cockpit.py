@@ -1,0 +1,437 @@
+"""🧭 Dashboard 1 — the NIFTY index cockpit.
+
+Five blocks, five questions about the index. The properties worth testing are
+not "does it draw" but the two that make a display panel trustworthy:
+
+1. **It never invents a number.** A missing reading renders `—`, never `0`.
+   Zero is a market fact — perfectly balanced flow, a wall that did not move —
+   and printing one that was never measured is fabricating data the reader
+   cannot tell apart from the real thing.
+2. **It never re-derives an owned fact.** `compute_market_picture` owns which
+   strike the wall is on; `rank_levels` owns the S/R order. A second
+   implementation that disagreed by one strike would be worse than no panel.
+
+The module is pure — data in, HTML out, no streamlit and no session state — so
+all of this is testable without a market.
+"""
+
+import ast
+import pathlib
+import re
+
+import pytest
+
+from mios_v5.ui import nifty_cockpit as NC
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  1 · it never invents a number
+# ══════════════════════════════════════════════════════════════════════
+
+def test_a_missing_reading_is_a_dash_not_a_zero():
+    """⚠️ The rule this repo states as `MISSING is not 0`, at the display edge.
+
+    A wall printed as `0.0L` reads as "measured, and empty". A `—` reads as
+    "not measured". They must never render the same.
+    """
+    for v in (None, "", "n/a", float("nan"), [], {}):
+        assert NC._n(v) == "—", v
+        assert NC._pct(v) == "—", v
+        assert NC._lakh(v) == "—", v
+        assert NC._doi(v) == "—", v
+
+
+def test_a_real_zero_still_prints_as_zero():
+    """The other half. Zero IS a reading — a wall that genuinely did not move —
+    and turning it into `—` would hide a fact just as badly."""
+    assert NC._n(0) == "0"
+    assert NC._pct(0) == "0%"
+    assert "0" in NC._doi(0)
+    assert NC._f(0) == 0.0
+
+
+def test_booleans_are_not_numbers():
+    """`float(True)` is 1.0. A flag that leaked into a price field would render
+    as a level of ₹1."""
+    assert NC._f(True) is None and NC._f(False) is None
+
+
+def test_every_block_is_empty_rather_than_a_hollow_frame():
+    """A card drawn with nothing in it costs screen space to say nothing, and
+    reads as "measured, no result" instead of "not measured"."""
+    assert NC.price_map_html(None) == ""
+    assert NC.oi_walls_html(None) == ""
+    assert NC.sr_table_html(None) == ""
+    assert NC.sr_table_html([]) == ""
+    assert NC.battle_zone_html() == ""
+
+
+def test_the_collector_drops_blocks_with_nothing_to_say():
+    assert NC.cockpit_blocks(None) == {}
+    assert NC.cockpit_blocks({}) == {}
+    got = NC.cockpit_blocks({"spot": 24583.8})
+    assert "price_map" in got                      # spot alone is a reading
+    assert "sr_table" not in got
+
+
+def test_nothing_here_raises_on_junk():
+    """A display panel may never take a tab down."""
+    for junk in (None, {}, [], "x", 7, {"spot": "abc"},
+                 {"oi_ceiling": "not a tuple", "sr_levels": ["x", None, 3]},
+                 {"ladder": [{"strike": None}, "junk"], "gate": []}):
+        NC.cockpit_blocks(junk)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  2 · the price map
+# ══════════════════════════════════════════════════════════════════════
+
+_PROFILE = {"poc_price": 24592.0, "value_area_high": 24612.0,
+            "value_area_low": 24551.0}
+
+
+def test_the_price_map_is_ordered_by_price_not_by_importance():
+    """It is a MAP. Rows sorted by significance cannot be read as one — the
+    reader has to do the arithmetic the layout was supposed to do."""
+    html = NC.price_map_html(24583.8, _PROFILE, vwap=24570.0,
+                             day={"high": 24700.0, "low": 24400.0},
+                             prev_day={"prev_high": 24750.0,
+                                       "prev_low": 24350.0})
+    order = [float(m.replace(",", ""))
+             for m in re.findall(r">([\d,]{6,9})<", html)]
+    assert order == sorted(order, reverse=True), order
+
+
+def test_spot_is_marked_in_its_place_in_the_ladder():
+    """"Where am I" should be answered by position, not by comparing numbers."""
+    html = NC.price_map_html(24583.8, _PROFILE)
+    assert "SPOT" in html
+    # between VAH (24,612) and VAL (24,551)
+    assert html.index("24,612") < html.index("SPOT") < html.index("24,551")
+
+
+def test_spot_below_every_level_still_gets_a_row():
+    """The loop places spot when it first meets a lower level. Below all of
+    them there is no such level, and an unplaced spot is a map with no ●."""
+    html = NC.price_map_html(1.0, _PROFILE)
+    assert "SPOT" in html
+
+
+def test_the_map_names_the_levels_it_could_not_get():
+    """A map with a hole should say which hole. Silence reads as "there is no
+    previous day high", which is never true."""
+    html = NC.price_map_html(24583.8, _PROFILE)
+    assert "not reported" in html
+    assert "VWAP" in html and "Prev Day High" in html
+
+
+def test_distance_from_spot_is_signed():
+    """`24,605` means nothing without `+22 away`, and an unsigned distance hides
+    which side of price the level is on."""
+    assert NC._dist(24605, 24583) == "+22"
+    assert NC._dist(24550, 24583) == "-33"
+    assert NC._dist(None, 24583) == "—"
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  3 · the OI walls
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_walls_are_read_from_the_market_picture_tuple():
+    """`(strike, oi_in_lakhs)` is the shape `compute_market_picture` publishes.
+    Taken as-is — no maximum is recomputed here."""
+    html = NC.oi_walls_html(24583.8, ceiling=(24600.0, 153.2),
+                            floor=(24500.0, 116.9))
+    assert "24,600" in html and "24,500" in html
+    assert "153.2L" in html and "116.9L" in html
+
+
+def test_a_wall_that_was_not_reported_says_so():
+    html = NC.oi_walls_html(24583.8, ceiling=None, floor=(24500.0, 116.9),
+                            ladder=[{"strike": 24500.0}])
+    assert "not reported" in html
+
+
+def test_delta_oi_keeps_its_sign():
+    """A wall BUILDING and a wall being unwound are opposite facts. An unsigned
+    ΔOI hides which one is happening."""
+    assert "+" in NC._doi(340000)
+    assert "-" in NC._doi(-340000)
+
+
+def test_the_strike_sits_between_the_two_sides_in_the_ladder():
+    """The strike is the axis both sides are measured against. In the first
+    column the reader scans back to it for every comparison."""
+    html = NC._ladder_html(
+        [{"strike": 24600.0, "ce_oi": 1.5e6, "pe_oi": 1.2e6,
+          "ce_doi": 3.4e5, "pe_doi": -1.1e5}], 24600.0, 24583.8)
+    assert html.index("CE OI") < html.index("STRIKE") < html.index("PE OI")
+
+
+def test_the_atm_row_is_marked():
+    html = NC._ladder_html([{"strike": 24600.0, "ce_oi": 1e6},
+                            {"strike": 24650.0, "ce_oi": 1e6}],
+                           24600.0, 24583.8)
+    assert "◀" in html
+
+
+def test_the_ladder_is_ordered_high_strike_first():
+    """Same direction as an option chain and as the price map above it. A table
+    that runs the other way on the same screen is a misread waiting to happen."""
+    html = NC._ladder_html([{"strike": 24500.0, "ce_oi": 1e6},
+                            {"strike": 24700.0, "ce_oi": 1e6},
+                            {"strike": 24600.0, "ce_oi": 1e6}], None, None)
+    assert html.index("24,700") < html.index("24,600") < html.index("24,500")
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  4 · the pin — detection and decision are different facts
+# ══════════════════════════════════════════════════════════════════════
+
+_PIN = (24600.0, "heaviest CE+PE at one strike — magnet/pin")
+_GATE = {"state": "PINNED", "level": 24600.0,
+         "why": ["pinned at ₹24600 — heaviest CE+PE at one strike — "
+                 "magnet/pin; no directional edge, WAIT"]}
+
+
+def test_the_pin_reports_the_gates_verdict_when_it_is_live():
+    html = NC.market_pin_html(24584.0, _PIN, _GATE, poc=24592.0,
+                              gamma_flip=24573.0)
+    assert "24,600" in html
+    assert "PINNED" in html and "no directional edge" in html
+    assert "24,573" in html and "24,592" in html
+
+
+def test_a_detected_pin_price_has_walked_away_from_is_not_PINNED():
+    """⚠️ The distinction the block exists to keep. `oi_pin` is the DETECTION —
+    the coincident CE+PE wall. `gate['state']` is the DECISION — price is close
+    enough that every directional read is vetoed.
+
+    Price can walk away while the walls stay put. Collapsing the two would tell
+    a trader PINNED when nothing is vetoed.
+    """
+    html = NC.market_pin_html(24800.0, _PIN, {"state": "CALL"})
+    assert "NOT PINNED" in html
+    assert "ABOVE PIN" in html
+
+
+def test_the_side_of_the_pin_is_named():
+    assert "ABOVE PIN" in NC.market_pin_html(24700.0, _PIN, None)
+    assert "BELOW PIN" in NC.market_pin_html(24500.0, _PIN, None)
+    assert "AT PIN" in NC.market_pin_html(24603.0, _PIN, None)
+
+
+def test_no_pin_at_all_still_draws_the_regime():
+    """Absence of a pin is a reading a trader acts on — it means the directional
+    logic is live. Drawing nothing would make it indistinguishable from a panel
+    that failed."""
+    html = NC.market_pin_html(24584.0, None, None)
+    assert "NOT PINNED" in html
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  5 · support and resistance
+# ══════════════════════════════════════════════════════════════════════
+
+def _lv(side, price, brk, rej, active=False):
+    return {"side": side, "price": price, "active": active,
+            "probabilities": {"break": brk, "rejection": rej}}
+
+
+def test_at_most_two_levels_a_side():
+    """A ranked list of six is a list nobody finishes, and the fifth-best
+    support is not a level anyone trades."""
+    levels = [_lv("RESISTANCE", 24600 + i * 10, 45, 55) for i in range(4)]
+    levels += [_lv("SUPPORT", 24500 - i * 10, 48, 52) for i in range(4)]
+    html = NC.sr_table_html(levels, 24583.8)
+    # Counted inside the <table> only. Both the word "Support" and the glyph 🛡
+    # also appear in the card's own title ("🛡 Support & resistance"), so
+    # counting over the whole string reported three supports for two rows.
+    body = html[html.index("<table"):html.index("</table>")]
+    assert body.count("🧱") == NC.MAX_PER_SIDE
+    assert body.count("🛡") == NC.MAX_PER_SIDE
+    assert "4 lower-ranked levels not shown" in html
+
+
+def test_the_ranking_is_taken_not_recomputed():
+    """`sr_intel.rank_levels` owns the order — active first, then confidence,
+    then confluence. Re-sorting here would be a second implementation of a
+    judgement that already has an owner, and the two would drift."""
+    first = _lv("SUPPORT", 24000, 10, 90)
+    second = _lv("SUPPORT", 24550, 48, 52)
+    html = NC.sr_table_html([first, second], 24583.8)
+    assert html.index("24,000") < html.index("24,550")
+
+
+def test_break_and_rejection_always_travel_together():
+    """They are complements. Printing one invites the reader to supply the other
+    from a wrong prior."""
+    html = NC.sr_table_html([_lv("RESISTANCE", 24605, 45, 55)], 24583.8)
+    assert "45%" in html and "55%" in html
+
+
+def test_an_active_level_says_price_is_at_it():
+    html = NC.sr_table_html([_lv("SUPPORT", 24550, 48, 52, active=True)],
+                            24551.0)
+    assert "AT PRICE" in html
+
+
+def test_a_level_with_no_odds_still_lists_its_price():
+    """Stage 42 may not have graded a level yet. Dropping the row would hide a
+    level price is sitting on."""
+    html = NC.sr_table_html([{"side": "SUPPORT", "price": 24550}], 24583.8)
+    assert "24,550" in html and "—" in html
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  6 · the battle zone
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_battle_zone_names_the_winner():
+    html = NC.battle_zone_html({"type": "RESISTANCE", "price": 24605.0},
+                               "Contested", {"break": 48, "rejection": 52},
+                               24583.8)
+    assert "24,605" in html and "CONTESTED" in html
+    assert "48%" in html and "52%" in html
+
+
+def test_a_zone_with_only_a_winner_still_draws():
+    assert NC.battle_zone_html(None, "Buyers") != ""
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  7 · it stays a display module
+# ══════════════════════════════════════════════════════════════════════
+
+def test_it_imports_no_engine_no_streamlit_and_no_io():
+    """⚠️ Principle 4 and the reason this file can be screenshotted from
+    synthetic data: data arrives as parameters. The moment it reads
+    `session_state` it stops being testable and starts being a second place
+    market facts come from."""
+    tree = ast.parse((ROOT / "mios_v5" / "ui" / "nifty_cockpit.py").read_text())
+    mods = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            mods |= {a.name.split(".")[0] for a in n.names}
+        elif isinstance(n, ast.ImportFrom) and n.module:
+            mods.add(n.module.split(".")[0])
+    for banned in ("streamlit", "requests", "supabase", "pandas", "numpy"):
+        assert banned not in mods, banned
+    # Attribute access, not a text search: this module's docstring explains
+    # why it does not read `session_state`, and grepping finds the explanation.
+    attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert "session_state" not in attrs
+
+
+def test_it_escapes_what_it_is_given():
+    """Notes and status strings arrive from engines; one of them containing a
+    tag must not become markup."""
+    html = NC.market_pin_html(24584.0, (24600.0, "<script>x</script>"), _GATE)
+    assert "<script>" not in html and "&lt;script&gt;" in html
+
+
+def test_the_block_order_matches_the_questions_it_answers():
+    """Kept as data so a test can assert the sequence rather than trusting a
+    comment, and so the collector cannot silently reorder it."""
+    assert NC.BLOCK_ORDER == ("price_map", "oi_walls", "market_pin",
+                              "sr_table", "battle_zone")
+    got = NC.cockpit_blocks({"spot": 24583.8, "profile": _PROFILE,
+                             "oi_ceiling": (24600.0, 153.2), "oi_pin": _PIN,
+                             "gate": _GATE,
+                             "sr_levels": [_lv("SUPPORT", 24550, 48, 52)],
+                             "battle_zone": {"price": 24605.0},
+                             "winner": "Contested"})
+    assert set(got) == set(NC.BLOCK_ORDER)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  8 · the collector reads and does not compute
+# ══════════════════════════════════════════════════════════════════════
+
+def _v6_src():
+    return (ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
+
+
+def _fn(name):
+    return next(n for n in ast.walk(ast.parse(_v6_src()))
+                if isinstance(n, ast.FunctionDef) and n.name == name)
+
+
+def test_the_nifty_tab_is_wired():
+    from mios_v5.ui.dashboard_v6 import _TABS
+    assert "🧭 NIFTY" in _TABS
+    block = _v6_src()
+    block = block[block.index("tabs = st.tabs(_TABS)"):
+                  block.index("# ── 0 · CHARTS")]
+    assert "_nifty_cockpit(st, fr)" in block
+
+
+def test_the_collector_does_not_pick_the_wall_itself():
+    """⚠️ The one thing that would make this dashboard dangerous. The wall
+    strikes are `compute_market_picture`'s (`oi_ceiling` / `oi_floor`); a second
+    `idxmax` here could put the wall one strike from where every other panel
+    shows it, and both would look right."""
+    src = _v6_src()
+    body = src[src.index("def _oi_ladder"):src.index("def _total_pcr")]
+    for banned in ("idxmax", "idxmin", "nlargest", "max(", "sort_values"):
+        assert banned not in body, f"_oi_ladder should not pick a wall: {banned}"
+
+
+def test_the_ladder_is_centred_on_the_published_atm():
+    """Not on a locally chosen strike. The ATM is `_atm_pm1_vpfr`'s, which is
+    the same one the legs were fetched for."""
+    body = _v6_src()
+    body = body[body.index("def _nifty_cockpit"):body.index("def _oi_ladder")]
+    assert "_atm_pm1_vpfr" in body
+
+
+def test_the_cockpit_reads_only_published_keys():
+    """Every value has an owner that already published it. A `compute_` or
+    `calculate_` call here would mean the display layer had started deriving
+    market facts."""
+    fn = _fn("_nifty_cockpit")
+    called = {getattr(c.func, "id", "") or getattr(c.func, "attr", "")
+              for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    for name in called:
+        assert not name.startswith(("compute_", "calculate_", "analyze_")), name
+
+
+def test_the_cockpit_says_why_it_is_empty():
+    """⚪ could not report is a report. A blank tab is indistinguishable from a
+    tab that decided there was nothing to say — the misreading that makes a
+    working system look broken."""
+    fn = _fn("_nifty_cockpit")
+    text = " ".join(n.value for n in ast.walk(fn)
+                    if isinstance(n, ast.Constant) and isinstance(n.value, str))
+    assert "standing by" in text
+    assert "Not reporting yet" in text
+
+
+def test_a_card_title_is_not_escaped_twice():
+    """⚠️ Caught by looking at the render, not by the suite.
+
+    `_card` escapes its own title, so a title passed in pre-escaped as `&amp;`
+    became `&amp;amp;` and the panel header read literally
+    "SUPPORT &AMP; RESISTANCE". Titles arrive as plain text; escaping is the
+    card's job and happens exactly once.
+    """
+    html = NC.sr_table_html([_lv("SUPPORT", 24550, 48, 52)], 24583.8)
+    assert "&amp;amp;" not in html
+    assert "&amp;" in html          # the single, correct escape of "&"
+    assert "Support & resistance" not in html   # raw & never reaches the page
+
+
+def test_no_block_title_carries_a_pre_escaped_entity():
+    """The same mistake in any other block would look identical. One assertion
+    over every title beats four that each cover one."""
+    blocks = NC.cockpit_blocks({
+        "spot": 24583.8, "profile": _PROFILE, "oi_ceiling": (24600.0, 153.2),
+        "oi_floor": (24500.0, 116.9), "oi_pin": _PIN, "gate": _GATE,
+        "sr_levels": [_lv("SUPPORT", 24550, 48, 52)],
+        "battle_zone": {"price": 24605.0}, "winner": "Contested"})
+    assert blocks, "nothing rendered — the fixture stopped being representative"
+    for name, html in blocks.items():
+        assert "&amp;amp;" not in html, name
+        assert "&amp;lt;" not in html, name

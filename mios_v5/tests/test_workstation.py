@@ -559,7 +559,11 @@ def test_charts_is_the_first_tab():
     all drew above it, which puts a 660px chart below the fold on a laptop."""
     from mios_v5.ui.dashboard_v6 import _TABS
     assert _TABS[0] == "📊 Charts"
-    assert len(_TABS) == 7, "a tab was added or removed without updating indices"
+    # No hardcoded tab count here on purpose: it would have to be edited on
+    # every tab addition, and the risk it was guarding — an index that stops
+    # matching the label list — is what `test_every_tab_is_wired_to_a_body`
+    # actually checks, derived from `_TABS` rather than pinned to a number.
+    assert len(set(_TABS)) == len(_TABS), "two tabs share a label"
 
 
 def test_every_tab_is_wired_to_a_body():
