@@ -365,14 +365,34 @@ def test_the_live_chart_frame_wins_over_the_analysis_side_effect():
 def test_spot_prefers_the_live_ltp_over_the_chains_snapshot():
     """The chain is re-fetched on its own cadence, so its `underlying` is a
     snapshot from whenever that last ran. Taking it alone is why spot sat still
-    on every V5/V6 panel while the foundation header ticked."""
+    on every V5/V6 panel while the foundation header ticked.
+
+    Asserted through `mios_v5.spot`, which now owns the precedence for every
+    panel — the rule used to live in `runner.py` and be true only there.
+    """
+    import time
+
+    from mios_v5 import spot
+
+    now = time.time()
+    state = {"_nifty_spot_live": 24610.5, "_nifty_spot_live_ts": now,
+             "_cached_option_data": {"underlying": 24555.0}}
+    assert spot.price(state, now) == 24610.5
+    assert spot.read(state, now)["source"] == "live LTP"
+
+
+def test_the_runner_takes_its_spot_from_the_one_owner():
+    """`run_mios_pass` must not carry a second copy of the precedence. It read
+    the live LTP first and the panels read the chain first, which is exactly the
+    desync this fixed — so the runner delegates rather than agreeing by luck."""
+    import ast
     import inspect
 
     from mios_v5 import runner
-    src = inspect.getsource(runner.run_mios_pass)
-    live = src.index('session_state.get("_nifty_spot_live")')
-    chain = src.index('_spot = opt.get("underlying")')
-    assert live < chain, "the live LTP must be consulted before the chain"
+    tree = ast.parse(inspect.getsource(runner.run_mios_pass))
+    called = {n.func.id for n in ast.walk(tree)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "_spot_read" in called, "the runner must call mios_v5.spot.read"
 
 
 def test_the_raw_dhan_payload_is_turned_into_a_frame():

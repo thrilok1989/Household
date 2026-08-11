@@ -112,17 +112,17 @@ def run_mios_pass(session_state, db=None,
         # LTP the chart header is showing, published every cycle. Taking the
         # chain's value alone is why spot sat still on every V5/V6 panel while
         # the foundation header ticked.
-        _spot = None
-        try:
-            _live = session_state.get("_nifty_spot_live")
-            _spot = float(_live) if _live and float(_live) > 0 else None
-        except (TypeError, ValueError):
-            _spot = None
-        if _spot is None and isinstance(opt, dict):
-            _spot = opt.get("underlying")
-        raw["spot"] = _spot
-        raw["spot_source"] = ("live LTP" if session_state.get("_nifty_spot_live")
-                              else "option chain")
+        # ⚠️ Delegated to `mios_v5.spot`, the one owner. This block used to
+        # carry its own live-then-chain precedence and it was the only correct
+        # one in the app — three other sites had their own, two of them
+        # backwards. Keeping a fourth copy here, even a correct one, is how they
+        # drifted apart in the first place.
+        from .spot import read as _spot_read
+        _sp = _spot_read(session_state)
+        _spot = _sp["price"]
+        if _spot is not None:
+            raw["spot"] = _spot
+        raw["spot_source"] = _sp["source"]
     except Exception:
         pass
 
