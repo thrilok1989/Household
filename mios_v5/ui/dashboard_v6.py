@@ -274,6 +274,17 @@ def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
         "htf": ss.get("_htf_profiles"),
         # ── the outside world ────────────────────────────────────────
         "external_rows": _external_rows(mp, ss),
+        # ── 🏛 institutional flows · Stage 23 ─────────────────────────
+        # Fetched every cycle into `_fii_dii_cash` / `_fii_deriv_stats` and,
+        # until now, drawn nowhere — the one display site read the wrong key
+        # shape, so the row was permanently a dash.
+        #
+        # The verdict is Stage 23's, passed through: it owns the ₹-crore
+        # thresholds and the absorption-battle test, and re-deciding them here
+        # would put two answers to one question on one screen.
+        "fii_dii_cash": ss.get("_fii_dii_cash"),
+        "fii_deriv": ss.get("_fii_deriv_stats"),
+        **{f"flows_{k}": v for k, v in _flows_read(ss).items()},
         # ── so what ──────────────────────────────────────────────────
         "regime": mp.get("regime"),
         "need": _gate_needs(mp.get("entry_gate")),
@@ -303,6 +314,11 @@ def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
     with ro:
         st.markdown(blocks.get("liquidity", ""), unsafe_allow_html=True)
         st.markdown(blocks.get("external", ""), unsafe_allow_html=True)
+        # 🏛 Under the external context, because it is the same kind of reading:
+        # slow, outside the chain, and daily. Deliberately NOT beside the live
+        # intraday panels on the left, where a ₹-crore figure from yesterday
+        # sits among ticking numbers and reads as current.
+        st.markdown(blocks.get("fii_dii", ""), unsafe_allow_html=True)
     st.markdown(blocks.get("htf", ""), unsafe_allow_html=True)
     # The state closes the dashboard, because it is the only line that is worth
     # anything after reading the nine above it.
@@ -820,14 +836,48 @@ def _external_rows(mp: Dict[str, Any], ss) -> List[Tuple[str, Any]]:
             rows.append(("India VIX", None))
     except Exception:
         rows.append(("India VIX", None))
+    # 🏛 FII / DII — ⚠️ this row read `fd.get("fii_net")`, which is
+    # `stage23_flows`' OUTPUT shape, not the raw NSE payload's. `_fii_dii_cash`
+    # is `{"FII": {buy, sell, net, date}, "DII": {...}}`, so the lookup always
+    # missed and the row has shown a dash since the day it was written — fetched
+    # every cycle, published, and never once displayed.
+    #
+    # Both sides, not just FII: `FII −4,200` is a rout or a non-event depending
+    # entirely on what DII did against it, and one number invites the first
+    # reading.
     try:
-        fd = ss.get("_fii_dii_cash") or {}
-        net = fd.get("fii_net") if isinstance(fd, dict) else None
-        rows.append(("FII cash",
-                     f"{float(net):+,.0f} Cr" if net is not None else None))
+        from .fii_dii_panel import micro as _fii_micro
+        _fl = _flows_read(ss)
+        rows.append(("FII / DII (EOD)",
+                     _fii_micro(ss.get("_fii_dii_cash"),
+                                _fl.get("conflict")) or None))
     except Exception:
-        rows.append(("FII cash", None))
+        rows.append(("FII / DII (EOD)", None))
     return rows
+
+
+def _flows_read(state) -> Dict[str, Any]:
+    """Stage 23's verdict on the institutional flows, or an empty read.
+
+    ⚠️ READ, not re-derived. `stage23_flows` owns the ₹-crore thresholds
+    (`_STRONG = 2500`, `_MILD = 800`), the bias and the absorption-battle
+    detection. Answering "is ₹2,500cr a lot?" a second time in the display layer
+    would put two answers to one question on the same screen.
+    """
+    out: Dict[str, Any] = {}
+    try:
+        res = (state.get("_mios_state") or {}).get("stage23_flows")
+        if res is None:
+            return out
+        out["bias"] = getattr(getattr(res, "bias", None), "name", None) or \
+            getattr(res, "bias", None)
+        out["confidence"] = getattr(res, "confidence", None)
+        out["evidence"] = list(getattr(res, "evidence", None) or ())
+        out["conflict"] = bool((getattr(res, "data", None) or {})
+                               .get("conflict"))
+    except Exception:
+        return {}
+    return out
 
 
 def _gate_needs(gate) -> List[str]:
