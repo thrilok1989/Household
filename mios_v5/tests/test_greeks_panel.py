@@ -147,6 +147,29 @@ def test_the_one_line_form_names_the_magnet_only_when_it_is_near():
     assert "magnet" not in GP.one_line(far)
 
 
+def test_the_publisher_is_actually_called():
+    """⚠️ The hole that let a broken PR ship claiming four surfaces.
+
+    `_adaptive_greeks` was DEFINED and never CALLED: a patch script printed
+    success without verifying its replacement matched, and the anchor had moved.
+    Nothing published `_adaptive_greeks`, so the header chip, the Market Picture
+    line and the Trade Card line all read an absent key and silently drew
+    nothing — three surfaces failing in the one way that looks like "no signal".
+
+    Existence tests are not wiring tests. This asserts the call, inside the
+    function that owns it.
+    """
+    import ast
+    src = (ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_nifty_cockpit")
+    called = {getattr(c.func, "id", "") or getattr(c.func, "attr", "")
+              for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    assert "_adaptive_greeks" in called, "the read is never built"
+    assert "greeks_card_html" in called, "the card is never drawn"
+    assert "_guardian_read" in called, "the Guardian line is never read"
+
+
 def test_every_surface_reads_the_same_published_object():
     """⚠️ One calculation, published once, four consumers (principle 3). Building
     the read per surface would be four chances to disagree about one cycle."""
