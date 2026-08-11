@@ -107,6 +107,23 @@ def _dbg_caption(st, source: str, message) -> None:
             pass
 
 
+def _spot_price(state):
+    """NIFTY spot from the one owner — `mios_v5.spot`.
+
+    A thin adapter so the import lives in one place and every panel in this file
+    resolves spot the same way. Falls back to the chain only if the module cannot
+    be imported, which keeps a broken import from blanking every price on screen.
+    """
+    try:
+        from ..spot import price as _p
+        return _p(state)
+    except Exception:
+        try:
+            return (state.get("_cached_option_data") or {}).get("underlying")
+        except Exception:
+            return None
+
+
 def _num(v, d=0.0):
     try:
         return float(v)
@@ -135,7 +152,10 @@ def render_dashboard_v6(state=None, db=None) -> None:
     from ..header import build as header_tiles
     spot = None
     try:
-        spot = (st.session_state.get("_cached_option_data") or {}).get("underlying")
+        # The strip every tab sits under. Chain-only here was the most visible
+        # desync in the app: this header and the app chrome above it read two
+        # different numbers and both called them spot.
+        spot = _spot_price(st.session_state)
     except Exception:
         spot = None
     st.markdown(header_html(header_tiles(fr, spot), header_alerts(fr)),
@@ -197,7 +217,11 @@ def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
     ss = st.session_state
     mp = ss.get("_market_picture") or {}
     opt = ss.get("_cached_option_data") or {}
-    spot = opt.get("underlying") or ss.get("_nifty_spot_live")
+    # ⚠️ One owner. This line used to read `opt.get("underlying") or
+    # ss.get("_nifty_spot_live")` — chain FIRST — and the chain almost always has
+    # a value, so the live LTP was never reached. The panel showed a price moving
+    # on the chain's cadence while the header beside it ticked.
+    spot = _spot_price(ss)
 
     day = None
     try:
@@ -336,7 +360,11 @@ def _options_cockpit(st, fr: Dict[str, Any]) -> None:
     ss = st.session_state
     opt = ss.get("_cached_option_data") or {}
     ds = opt.get("df_summary")
-    spot = opt.get("underlying") or ss.get("_nifty_spot_live")
+    # ⚠️ One owner. This line used to read `opt.get("underlying") or
+    # ss.get("_nifty_spot_live")` — chain FIRST — and the chain almost always has
+    # a value, so the live LTP was never reached. The panel showed a price moving
+    # on the chain's cadence while the header beside it ticked.
+    spot = _spot_price(ss)
     atm = None
     try:
         atm = (ss.get("_atm_pm1_vpfr") or {}).get("atm_strike")
@@ -574,7 +602,11 @@ def _adaptive_greeks(st, fr: Dict[str, Any]):
     ss = st.session_state
     mp = ss.get("_market_picture") or {}
     opt = ss.get("_cached_option_data") or {}
-    spot = opt.get("underlying") or ss.get("_nifty_spot_live")
+    # ⚠️ One owner. This line used to read `opt.get("underlying") or
+    # ss.get("_nifty_spot_live")` — chain FIRST — and the chain almost always has
+    # a value, so the live LTP was never reached. The panel showed a price moving
+    # on the chain's cadence while the header beside it ticked.
+    spot = _spot_price(ss)
     gex = mp.get("gex_disp") or {}
     is_expiry = bool(ss.get("_is_expiry_today"))
     try:
@@ -1680,8 +1712,7 @@ def _spot_now(st, fr: Optional[Dict[str, Any]] = None) -> Optional[float]:
     Ordered the same way the runner orders it, so a level is sided against the
     same price the rest of the screen is quoting.
     """
-    for src in (st.session_state.get("_nifty_spot_live"),
-                (st.session_state.get("_cached_option_data") or {}).get("underlying"),
+    for src in (_spot_price(st.session_state),
                 (fr or {}).get("spot")):
         v = _num(src, None)
         if v is not None and v > 0:

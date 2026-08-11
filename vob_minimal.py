@@ -938,10 +938,17 @@ def _mios_market_read():
     """
     out = {}
     try:
-        out["spot"] = (st.session_state.get("_cached_option_data") or {}).get(
-            "underlying")
+        # ⚠️ One owner (`mios_v5.spot`). This read the chain's `underlying`
+        # only, so the app header and the V6 header showed two different numbers
+        # and both called them spot.
+        from mios_v5.spot import price as _spot_price
+        out["spot"] = _spot_price(st.session_state)
     except Exception:
-        pass
+        try:
+            out["spot"] = (st.session_state.get("_cached_option_data")
+                           or {}).get("underlying")
+        except Exception:
+            pass
     # Stage 27's arbitrated read vs Stage 71's — the disagreement is the point.
     try:
         from mios_v5.final_read import build_final_read
@@ -14847,6 +14854,24 @@ def _chrome_extras():
             out.append(_line)
     except Exception:
         pass
+    # ── 🗺️ MARKET STATE · the gate's verdict + the regime ────────────────
+    # Second, immediately after the veto, because it answers the question the
+    # chips below it assume: may I trade right now? `CHOP_WAIT · regime SIDEWAYS`
+    # and `CHOP_WAIT · regime UP` are different instructions, and the S/R odds
+    # and war-zone winner further along the strip read the same either way.
+    #
+    # Both words were already computed by `compute_market_picture` and reached
+    # only its own panel — the same consumed-but-unpublished gap the pin had.
+    # `market_state_chip` stays quiet on PINNED so it never repeats the chip
+    # above it, and words nothing the gate did not already decide.
+    try:
+        from mios_v5.ui.market_state_chip import micro as _ms_micro
+        _mp = st.session_state.get('_market_picture') or {}
+        _line = _ms_micro(_mp.get('entry_gate'), _mp)
+        if _line:
+            out.append(_line)
+    except Exception:
+        pass
     try:
         from mios_v5.ui.zone_card import zone_micro
         _rsr = st.session_state.get('_reaction_sr') or {}
@@ -14931,6 +14956,95 @@ def _prime_app_chrome(slot, foot):
 CHROME_VERSION_FALLBACK = "chrome.2"
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  📍 the spot strip — the one number with its own clock
+# ══════════════════════════════════════════════════════════════════════════
+
+#: How often the spot strip re-fetches. See `mios_v5/ui/spot_ticker.py` for why
+#: this is a fragment and not a faster `st_autorefresh`: the page cycle drags an
+#: option-chain fetch, the MIOS pass and Supabase writes behind it, so halving it
+#: would double the egress the audit spent itself reducing. This drags one
+#: `marketfeed/ltp` call.
+SPOT_REFRESH = "10s"
+
+
+def _spot_ticker_body():
+    """Re-read the live index LTP, publish it, draw the strip.
+
+    ⚠️ This is the ONE place that refreshes spot faster than the page, and it is
+    deliberately the cheapest read in the app:
+
+    * `get_index_spot_ltp` is a single `marketfeed/ltp` quote, already cached ~4s
+      in session state and already short-circuited during a Dhan 429 back-off, so
+      a 10-second cadence cannot turn into 10-second API pressure.
+    * It writes **nothing** to Supabase. `_render_main_analyzer` still owns
+      `upsert_spot_data` on the 20-second cycle; persisting here would double the
+      spot writes to buy a row nobody reads twice.
+
+    Publishing to `_nifty_spot_live` is the point of doing it here at all: every
+    panel now reads spot through `mios_v5.spot`, so the next page rerun hands all
+    of them whatever this last fetched. The strip is 10s fresh, the panels are
+    one page cycle behind it, and the strip says so out loud rather than letting
+    a stale number sit under a live clock.
+    """
+    try:
+        from mios_v5.spot import read as _spot_read
+        from mios_v5.ui.spot_ticker import spot_strip_html
+    except Exception as err:
+        st.caption(f"Spot strip unavailable — `mios_v5.ui.spot_ticker` did not "
+                   f"import: {err}")
+        return
+    try:
+        _ltp = get_index_spot_ltp(NIFTY_UNDERLYING_SCRIP, NIFTY_UNDERLYING_SEG)
+        if _ltp:
+            st.session_state['_nifty_spot_live'] = float(_ltp)
+            st.session_state['_nifty_spot_live_ts'] = time.time()
+    except Exception:
+        # A failed quote is not a failed strip: `spot.read` falls through to the
+        # chain and the age chip shows the LTP going cold.
+        pass
+    try:
+        _html = spot_strip_html(
+            _spot_read(st.session_state),
+            (st.session_state.get('_gap_today') or {}).get('prev_close'))
+    except Exception as err:
+        st.caption(f"Spot strip failed to render: {err}")
+        return
+    if _html:
+        st.markdown(_html, unsafe_allow_html=True)
+
+
+def _spot_ticker(container):
+    """Draw the strip into `container`, on its own clock when one is available.
+
+    `st.fragment(run_every=…)` reruns the decorated body alone. Guarded three
+    ways because the alternative to a missing clock is a missing price:
+
+    * no `st.fragment` at all (older Streamlit) → draw once, no ticking
+    * market closed → draw once. Polling Dhan every 10 seconds overnight buys a
+      number that has not moved since 15:30.
+    * the fragment itself raising → fall back to a plain draw
+
+    A fragment may only write inside its own container, so one is passed in
+    rather than claimed here.
+    """
+    def _draw():
+        with container:
+            _spot_ticker_body()
+
+    frag = getattr(st, "fragment", None) or getattr(st, "experimental_fragment",
+                                                    None)
+    if frag is None or not _is_market_open:
+        _draw()
+        return
+    try:
+        frag(run_every=SPOT_REFRESH)(_draw)()
+    except Exception as err:
+        st.caption(f"Spot strip is not auto-refreshing ({err}) — showing the "
+                   f"page cycle's price instead.")
+        _draw()
+
+
 def main():
     # Placeholders, not a title. Both strips are FILLED at the end of the cycle
     # so they carry this cycle's values — but a rerun rebuilds the page from the
@@ -14941,6 +15055,13 @@ def main():
     _chrome_slot = st.empty()
     _chrome_foot = st.empty()
     _prime_app_chrome(_chrome_slot, _chrome_foot)
+
+    # 📍 Directly under the header, before anything that takes a second to
+    # build. Spot is the number the trader looks at first and the only one worth
+    # its own clock — see `SPOT_REFRESH`. Its container is claimed here, outside
+    # the fragment, because a fragment may only write within a container that
+    # already exists.
+    _spot_ticker(st.container())
 
     # ── hot-path measurement · OFF unless MIOS_PROFILE=1 ──────────────
     # The duplication survey counted 11 call sites for
