@@ -32,7 +32,16 @@ from ..final_read import build_final_read, section
 from ..sr_intel import build_level_intel, rank_levels
 from ..thesis import build_thesis, market_controller, recent_changes
 
-_TABS = ["🎯 Decision", "📈 Trading", "🧭 Intelligence",
+#: 📊 Charts leads, so the synchronised NIFTY ‖ CALL ‖ PUT figure sits directly
+#: under the price header instead of four blocks down the Trading tab.
+#:
+#: ⚠️ Being FIRST is load-bearing, not cosmetic. `_terminal_chart` is the only
+#: producer of `_leg_profiles` (see `docs/AUDIT_FOCUS_MODE.md` — it is one of the
+#: four CRITICAL panels), and `_trading_screen` reads that key for its per-leg
+#: liquidity bars. Streamlit executes tab bodies in order, so the chart must be
+#: drawn in a tab that runs BEFORE Trading. Moving it to a later tab would leave
+#: the heatmaps reading the previous cycle's profiles.
+_TABS = ["📊 Charts", "🎯 Decision", "📈 Trading", "🧭 Intelligence",
          "📒 History", "🎓 Learning", "⏪ Replay"]
 
 #: One limit per table, shared by every panel that reads it.
@@ -109,17 +118,43 @@ def render_dashboard_v6(state=None, db=None) -> None:
 
     tabs = st.tabs(_TABS)
     with tabs[0]:
-        _decision_center(st, fr)
+        _charts_screen(st, fr)
     with tabs[1]:
-        _trading_screen(st, fr, state)
+        _decision_center(st, fr)
     with tabs[2]:
-        _intelligence(st, fr, state)
+        _trading_screen(st, fr, state)
     with tabs[3]:
-        _history(st, db)
+        _intelligence(st, fr, state)
     with tabs[4]:
-        _learning(st, db, fr)
+        _history(st, db)
     with tabs[5]:
+        _learning(st, db, fr)
+    with tabs[6]:
         _replay(st, db)
+
+
+# ── 0 · CHARTS ──────────────────────────────────────────────────────────
+def _charts_screen(st, fr: Dict[str, Any]) -> None:
+    """📊 The price screen — NIFTY ‖ ATM Call ‖ ATM Put, and nothing else.
+
+    Its own tab, first, so the figure sits directly under the price header. On
+    the Trading tab it was the fifth block down — Command Center, Stage 71,
+    Stage 71.8 and the execution chain all drew above it — which put a 660px
+    chart below the fold on a laptop.
+
+    **No price line of its own.** `header_html` renders the LTP, the change and
+    both biases above the tab bar on every tab, so a second copy here would be
+    the duplication this split exists to remove.
+
+    Deliberately thin: it reads the same two things `_trading_screen` did and
+    hands them to the same renderer. `_leg_reads` and `dominance` compute
+    nothing — they assemble from caches the app already filled — so calling
+    them here instead of there moves no work.
+    """
+    from ..terminal import dominance
+
+    call, put, call_tag, put_tag = _leg_reads(st, fr)
+    _terminal_chart(st, fr, call_tag, put_tag, dominance(call, put))
 
 
 # ── 1 · DECISION ────────────────────────────────────────────────────────
@@ -326,17 +361,18 @@ def _trading_screen(st, fr: Dict[str, Any], state) -> None:
     from .terminal_panel import (compare_ribbon_html, intelligence_html,
                                  leg_card_html, market_ribbon_html,
                                  recommendation_html)
-    from ..terminal import (compare_ribbon, dominance, market_ribbon,
+    from ..terminal import (compare_ribbon, market_ribbon,
                             option_intelligence, recommendation)
 
     call, put, call_tag, put_tag = _leg_reads(st, fr)
     cmp_ = compare_ribbon(call, put)
-    dom = dominance(call, put)
+    # `dominance` went with the chart — it was read by nothing else here, and a
+    # local nobody uses is how the next reader concludes it must matter.
 
     # ── the header stack, in the order a trader reads it ──
     # Command Center answers "what is the market doing", Stage 71 answers
-    # "where is the opportunity". Both belong above the charts; everything
-    # else moved below (see the note on the context strips further down).
+    # "where is the opportunity". Everything else moved below (see the note on
+    # the context strips further down).
     _command_center(st, fr)
 
     # ── Stage 71 — the opportunity read, directly above the charts ──
@@ -372,18 +408,27 @@ def _trading_screen(st, fr: Dict[str, Any], state) -> None:
     # problem can no longer take the trade verdict down with it.
     _run_execution_chain(st)
 
-    _terminal_chart(st, fr, call_tag, put_tag, dom)
+    # ── the charts moved to their own tab ─────────────────────────────
+    # `_terminal_chart` is now drawn by `_charts_screen`, the FIRST tab, so the
+    # figure sits under the price header rather than five blocks down here.
+    #
+    # ⚠️ It still runs before this function does. Streamlit executes tab bodies
+    # in order and Charts is tab 0, so `_leg_profiles` — which only
+    # `_terminal_chart` publishes, and which the heatmaps below read — is
+    # already written by the time Trading draws. That ordering is what makes the
+    # move safe, and it is asserted by
+    # `test_the_charts_tab_runs_before_the_panel_that_reads_its_output`.
 
-    # ── the same liquidity bars, per leg, directly under the charts ────
+    # ── the same liquidity bars, per leg ──────────────────────────────
     # The chart draws each leg's profile as a translucent band behind the
     # candles, which shows WHERE the volume sits but cannot be read off. These
     # are the identical bins as bars, so a level can be measured rather than
     # eyeballed through a candle.
     #
-    # Called out here rather than inside `_terminal_chart` on purpose: that
-    # function owns a Plotly figure and its own failure mode, and nesting this
-    # inside it would put a second panel behind the chart's `try`. That is
-    # exactly the nesting that made the execution chain invisible.
+    # Kept HERE rather than following the chart to its own tab: the bars are a
+    # measuring tool for a level you are about to act on, and this is the tab
+    # you act from. They read `_leg_profiles` from session state, so they never
+    # needed to be adjacent to the figure — only downstream of it.
     try:
         from .liquidity_panel import render_leg_heatmaps
         render_leg_heatmaps(st, st.session_state.get("_leg_profiles"))
