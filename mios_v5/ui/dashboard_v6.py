@@ -535,6 +535,85 @@ def _greek_rows(ds, atm) -> Optional[List[Dict[str, Any]]]:
         return None
 
 
+def _adaptive_greeks(st, fr: Dict[str, Any]):
+    """Build the Adaptive Greeks read once per cycle and publish it.
+
+    ⚠️ Published to `_adaptive_greeks` because FOUR surfaces show it — this tab,
+    the header chip, the Market Picture and the Trade Card. Building it four
+    times would be four chances to disagree about one cycle, which is the drift
+    principle 3 exists to stop: one calculation, published once, many consumers.
+
+    Every input is read from an owner. The expiry pin comes from `charm_pin`,
+    which already owns that rule and its wording.
+    """
+    try:
+        from ..adaptive_greeks import read as _greeks_read
+        from ..charm_pin import read as _pin_read
+    except Exception:
+        return None
+    ss = st.session_state
+    mp = ss.get("_market_picture") or {}
+    opt = ss.get("_cached_option_data") or {}
+    spot = opt.get("underlying") or ss.get("_nifty_spot_live")
+    gex = mp.get("gex_disp") or {}
+    is_expiry = bool(ss.get("_is_expiry_today"))
+    try:
+        pin = _pin_read(is_expiry, spot,
+                        pin=(mp.get("oi_pin") or (None,))[0]
+                        if isinstance(mp.get("oi_pin"), (list, tuple))
+                        else None,
+                        net_charm=(mp.get("vc_exp") or {}).get("net_charm"))
+    except Exception:
+        pin = None
+    try:
+        out = _greeks_read(
+            flow={"regime": mp.get("regime"),
+                  "order_flow": (mp.get("oflow_imb") or {}).get("label"),
+                  "cvd": (mp.get("oflow_imb") or {}).get("tilt")},
+            doi=mp.get("doi_bias"),
+            gex=gex, dex=mp.get("dex_bias"), vc=mp.get("vc_exp"),
+            skew=mp.get("skew_bias"), iv_series=ss.get("_iv_history"),
+            spot=spot, magnet=gex.get("magnet"), is_expiry=is_expiry,
+            pin=pin, market_picture=mp, reaction=fr.get("reaction"))
+    except Exception as err:
+        _dbg_caption(st, "adaptive_greeks", f"Adaptive Greeks unavailable: {err}")
+        return None
+    ss["_adaptive_greeks"] = out
+    return out
+
+
+def _guardian_read(st, fr: Dict[str, Any]):
+    """The existing verdict and its confidence — READ, never produced.
+
+    `adaptive_greeks` emits no side, so the Guardian line on every surface has to
+    come from whatever already decided it: the entry gate's state, or Stage 72's
+    decision when it has one. The greeks layer's `confidence_delta` is applied
+    through `apply_to`, so the arithmetic lives in one place.
+    """
+    ss = st.session_state
+    word = conf = None
+    try:
+        dec = ss.get("_entry_decision")
+        word = getattr(dec, "state", None) or (
+            dec.get("state") if isinstance(dec, dict) else None)
+        conf = getattr(dec, "confidence", None) or (
+            dec.get("confidence") if isinstance(dec, dict) else None)
+    except Exception:
+        word = conf = None
+    if not word:
+        gate = (ss.get("_market_picture") or {}).get("entry_gate") or {}
+        word = gate.get("state")
+    if conf is None:
+        d2 = fr.get("decision_v2") or {}
+        conf = d2.get("confidence") if isinstance(d2, dict) else None
+    try:
+        from ..adaptive_greeks import apply_to
+        conf = apply_to(conf, ss.get("_adaptive_greeks") or {})
+    except Exception:
+        pass
+    return word, conf
+
+
 def _oi_ladder(df_summary, atm) -> Optional[List[Dict[str, Any]]]:
     """ATM±2 rows off the chain — a projection, not a calculation.
 
