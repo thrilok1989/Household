@@ -9745,6 +9745,21 @@ def render_all_bias_dashboard(spot_price, df, option_data, picture_slot=None):
         else:
             st.caption(f"Market picture unavailable: {_mp_err}")
 
+    # ⚙️ Dealer & volatility context — one line, read from the published
+    # Adaptive Greeks. Context for the regime above it, never a second verdict:
+    # the layer emits no side (`assert_no_recommendation`), so there is nothing
+    # here that could contradict the Market Picture's own read.
+    try:
+        from mios_v5.ui.greeks_panel import one_line as _ag_line
+        _agl = _ag_line(st.session_state.get('_adaptive_greeks'))
+        if _agl:
+            st.markdown(
+                f"<div style='font-size:12px;color:#cfd9e6;padding:4px 0'>"
+                f"⚙️ <b>Dealer context</b> — {_agl}</div>",
+                unsafe_allow_html=True)
+    except Exception:
+        pass
+
     # 🎯 Strike-Mode Cockpit — ATM±2 positioning + spot action. Stays at the top
     # of the bias dashboard; with the Market Picture lifted above MIOS V6, this
     # is now the first thing in this section rather than the second.
@@ -13490,6 +13505,23 @@ def render_clean_card(spot_price, option_data=None):
         except Exception:
             _charm_html = ""
 
+        # ── ⚙️ dealer & volatility context, in one line ─────────────────
+        # The Adaptive Greeks read, from the object Dashboard V6 published this
+        # cycle. Read-only and short by design: the card already carries three
+        # verdicts, and this adds the terrain they have to cross rather than a
+        # fourth opinion about it. The layer emits no side at all
+        # (`assert_no_recommendation`), so it cannot contradict them.
+        _ag_html = ""
+        try:
+            from mios_v5.ui.greeks_panel import one_line as _ag_one
+            _agl = _ag_one(st.session_state.get('_adaptive_greeks'))
+            if _agl:
+                _ag_html = (
+                    f"<div style='font-size:11px;color:#cfd9e6;margin-top:3px;"
+                    f"text-align:center;'>⚙️ {_agl}</div>")
+        except Exception:
+            _ag_html = ""
+
         # ── Stage 71.7 Premium Energy, in three lines ──────────────────
         # The full section is drawn inside the Validation expander further down
         # the page; this is the glance version on the card above the app, from
@@ -13734,7 +13766,8 @@ def render_clean_card(spot_price, option_data=None):
                    f"{_sr_intel_html}</div>" if _sr_intel_html else
                    f"<div style='text-align:center;font-size:16px;margin-top:4px;"
                    f"font-weight:800;'>{_sr_line}</div>")
-                + _wz_html + _pe_html + _charm_html + _fs_html + _zh_html),
+                + _wz_html + _pe_html + _charm_html + _ag_html + _fs_html
+                + _zh_html),
                 unsafe_allow_html=True)
 
         # ── 4 · DECISIONS — the three action verdicts, side by side. The Entry
@@ -14829,6 +14862,17 @@ def _chrome_extras():
     try:
         from mios_v5.ui.premium_energy_panel import micro as _pe_micro
         _line = _pe_micro(st.session_state.get('_premium_energy'))
+        if _line:
+            out.append(_line)
+    except Exception:
+        pass
+    # ── ⚙️ dealer posture · gamma sign · fade risk ──────────────────────
+    # The Adaptive Greeks read, worded by its own panel. Dashboard V6 publishes
+    # `_adaptive_greeks`; this only collects, so the chip and the card cannot
+    # describe one cycle differently.
+    try:
+        from mios_v5.ui.greeks_panel import micro as _ag_micro
+        _line = _ag_micro(st.session_state.get('_adaptive_greeks'))
         if _line:
             out.append(_line)
     except Exception:
