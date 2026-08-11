@@ -541,3 +541,112 @@ def test_market_controller_survives_being_handed_a_list():
         out = market_controller(junk) if not isinstance(junk, list) else None
         if out is not None:
             assert isinstance(out, dict)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  📊 the charts have their own tab, and it leads
+# ══════════════════════════════════════════════════════════════════════
+
+def _v6_src():
+    import pathlib
+    return (pathlib.Path(__file__).resolve().parents[1]
+            / "ui" / "dashboard_v6.py").read_text(encoding="utf-8")
+
+
+def test_charts_is_the_first_tab():
+    """The synchronised NIFTY ‖ CALL ‖ PUT figure was the fifth block down the
+    Trading tab — Command Center, Stage 71, Stage 71.8 and the execution chain
+    all drew above it, which puts a 660px chart below the fold on a laptop."""
+    from mios_v5.ui.dashboard_v6 import _TABS
+    assert _TABS[0] == "📊 Charts"
+    assert len(_TABS) == 7, "a tab was added or removed without updating indices"
+
+
+def test_every_tab_is_wired_to_a_body():
+    """⚠️ The failure this catches is silent: `st.tabs` renders a label whatever
+    happens, so a mis-numbered index leaves a tab that opens onto nothing, or
+    two labels drawing the same screen."""
+    import re
+    src = _v6_src()
+    block = src[src.index("tabs = st.tabs(_TABS)"):src.index("# ── 0 · CHARTS")]
+    indices = [int(n) for n in re.findall(r"with tabs\[(\d+)\]:", block)]
+    from mios_v5.ui.dashboard_v6 import _TABS
+    assert indices == list(range(len(_TABS))), (
+        f"tab bodies {indices} do not cover 0..{len(_TABS) - 1}")
+
+
+def test_the_charts_tab_runs_before_the_panel_that_reads_its_output():
+    """⚠️ Why being FIRST is load-bearing rather than cosmetic.
+
+    `_terminal_chart` is the only producer of `_leg_profiles` — one of the four
+    CRITICAL panels in `docs/AUDIT_FOCUS_MODE.md` — and `_trading_screen` reads
+    that key for its per-leg liquidity bars. Streamlit executes tab bodies in
+    order, so the chart has to be drawn in a tab that runs BEFORE Trading.
+    Moving it to a later tab would leave the heatmaps on last cycle's profiles,
+    which looks like working code.
+    """
+    import re
+    src = _v6_src()
+    block = src[src.index("tabs = st.tabs(_TABS)"):src.index("# ── 0 · CHARTS")]
+    calls = re.findall(r"_(charts_screen|trading_screen)\(", block)
+    assert calls.index("charts_screen") < calls.index("trading_screen")
+
+
+def test_the_charts_tab_draws_no_second_price_line():
+    """The split exists to remove duplication. `header_html` already renders the
+    LTP, the change and both biases above the tab bar on every tab, so a price
+    block here would re-add exactly what was being removed.
+
+    Checked on the parse tree, not the text: this function's own docstring names
+    `header_html` in explaining why it does not call it.
+    """
+    import ast
+    fn = next(n for n in ast.walk(ast.parse(_v6_src()))
+              if isinstance(n, ast.FunctionDef) and n.name == "_charts_screen")
+    names = {getattr(n, "id", "") or getattr(n, "attr", "")
+             for n in ast.walk(fn)}
+    imported = {a.name for n in ast.walk(fn)
+                if isinstance(n, ast.ImportFrom) for a in n.names}
+    for dup in ("header_html", "header_tiles", "metric"):
+        assert dup not in names | imported, \
+            f"_charts_screen should not redraw {dup}"
+
+
+def test_the_charts_tab_computes_nothing():
+    """It reads the same caches `_trading_screen` did and hands them to the same
+    renderer. If it starts computing, the move stopped being a UI change."""
+    import ast
+    src = _v6_src()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_charts_screen")
+    called = {getattr(c.func, "id", "") or getattr(c.func, "attr", "")
+              for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    assert called <= {"_leg_reads", "dominance", "_terminal_chart"}, (
+        f"unexpected calls in _charts_screen: {called}")
+
+
+def test_the_trading_tab_kept_the_bars_that_measure_the_chart():
+    """The heatmaps read `_leg_profiles` from session state, so they were never
+    required to be adjacent to the figure — only downstream of it. They stay on
+    the tab a trader acts from."""
+    src = _v6_src()
+    body = src[src.index("def _trading_screen"):src.index("def _command_center")]
+    assert "render_leg_heatmaps" in body
+
+
+def test_dominance_left_with_the_chart_it_fed():
+    """A local nobody uses is how the next reader concludes it must matter.
+
+    Parse tree again — the comment that records the removal names `dominance`.
+    """
+    import ast
+    fn = next(n for n in ast.walk(ast.parse(_v6_src()))
+              if isinstance(n, ast.FunctionDef) and n.name == "_trading_screen")
+    called = {getattr(c.func, "id", "") or getattr(c.func, "attr", "")
+              for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    imported = {a.name for n in ast.walk(fn)
+                if isinstance(n, ast.ImportFrom) for a in n.names}
+    assert "dominance" not in called | imported
+    assigned = {t.id for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                for t in n.targets if isinstance(t, ast.Name)}
+    assert "dom" not in assigned

@@ -35,10 +35,23 @@ def _load():
     return mod
 
 
+#: The day every test pretends it is.
+#:
+#: ⚠️ `_today` is STUBBED rather than the ledger merely being rolled to a fixed
+#: date. `note()` calls `_roll()` with no argument on every response, so the real
+#: wall clock decides whether that roll clears the ledger — and a test that
+#: seeded "2026-08-10" then rolled to "2026-08-11" passed on every day of the
+#: year except the one the machine's clock actually read 2026-08-11, when the
+#: second roll became a no-op and the ledger kept its rows. A ledger test may not
+#: depend on the date it runs on.
+_FAKE_DAY = "2026-08-10"
+
+
 @pytest.fixture
-def eb():
+def eb(monkeypatch):
     mod = _load()
-    mod._roll("2026-08-10")
+    monkeypatch.setattr(mod, "_today", lambda: _FAKE_DAY)
+    mod._roll(_FAKE_DAY)
     return mod
 
 
@@ -170,13 +183,21 @@ def test_the_budget_is_the_hundred_megabytes_that_was_asked_for(eb):
     assert eb.BUDGET_BYTES == 100 * 1024 * 1024
 
 
-def test_the_ledger_starts_over_on_a_new_trading_day(eb):
+def test_the_ledger_starts_over_on_a_new_trading_day(eb, monkeypatch):
+    """A day total that carries yesterday's rows over is not a day total.
+
+    The clock is moved, not the ledger: `note()` re-rolls on every response, so
+    this checks the mechanism the running app actually relies on at midnight
+    rather than a manual reset nothing calls.
+    """
     eb.note("t", "select", [{"a": 1}] * 10)
     assert eb.report()["total_bytes"] > 0
-    eb._roll("2026-08-11")
+    monkeypatch.setattr(eb, "_today", lambda: "2026-08-11")
+    eb.note("t", "select", [{"a": 1}])       # the first response of the new day
     data = eb.report()
-    assert data["total_bytes"] == 0
     assert data["day"] == "2026-08-11"
+    assert data["by_table"][0]["rows"] == 1, \
+        "yesterday's rows survived the roll-over"
 
 
 # ══════════════════════════════════════════════════════════════════════

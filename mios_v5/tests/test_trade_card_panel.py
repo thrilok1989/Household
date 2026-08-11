@@ -178,11 +178,21 @@ def test_it_is_wired_into_the_trading_tab():
     assert "render_slim_trade_card" in src
 
 
-def test_it_sits_below_the_charts():
-    """Dashboard 2's rule: nothing above the charts but the opportunity read."""
+def test_it_sits_below_the_opportunity_read():
+    """Dashboard 2's rule, restated once the charts moved to their own tab.
+
+    The rule used to read "nothing above the charts but the opportunity read"
+    and was checked as `_terminal_chart(` < `render_slim_trade_card`. The chart
+    is now drawn by `_charts_screen` on the first tab, so the surviving half of
+    the rule is what it always meant: the slim card comes after the opportunity
+    and strike reads, not before them.
+    """
     src = (pathlib.Path(TCP.__file__).parent / "dashboard_v6.py").read_text()
     body = src[src.index("def _trading_screen"):src.index("def _command_center")]
-    assert body.index("_terminal_chart(") < body.index("render_slim_trade_card")
+    assert "_terminal_chart(" not in body, \
+        "the charts moved to _charts_screen — this tab should not redraw them"
+    assert body.index("_opportunity(") < body.index("render_slim_trade_card")
+    assert body.index("_strike_validation(") < body.index("render_slim_trade_card")
 
 
 if __name__ == "__main__":
