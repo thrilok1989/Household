@@ -200,6 +200,27 @@ def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
         "battle_zone": fr.get("battle_zone"),
         "winner": fr.get("expected_winner"),
         "probabilities": fr.get("probabilities"),
+        # ── who controls the market ──────────────────────────────────
+        # Each label is the Market Picture's own wording for that vote, and
+        # `overall` is its own regime with that regime's own probability.
+        # ⚠️ Averaging these rows here would mint a SECOND overall bias — same
+        # inputs, different method, same screen — which is the disagreement the
+        # architecture principles open by forbidding.
+        "bias_rows": _bias_rows(mp),
+        "overall": mp.get("regime"),
+        "confidence": _regime_confidence(mp),
+        # ── liquidity ────────────────────────────────────────────────
+        "liq_pools": mp.get("liq_pools"),
+        "poc_regime": _liq_read(ss.get("_liquidity_context"), "poc_regime"),
+        "poc_stability": _liq_read(ss.get("_liquidity_context"),
+                                   "poc_stability"),
+        # ── higher timeframes · Stage 45 ─────────────────────────────
+        "htf": ss.get("_htf_profiles"),
+        # ── the outside world ────────────────────────────────────────
+        "external_rows": _external_rows(mp, ss),
+        # ── so what ──────────────────────────────────────────────────
+        "regime": mp.get("regime"),
+        "need": _gate_needs(mp.get("entry_gate")),
     })
 
     if not blocks:
@@ -218,6 +239,18 @@ def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
         st.markdown(blocks.get("oi_walls", ""), unsafe_allow_html=True)
         st.markdown(blocks.get("battle_zone", ""), unsafe_allow_html=True)
     st.markdown(blocks.get("sr_table", ""), unsafe_allow_html=True)
+
+    # Second row: who controls it, and where the liquidity is.
+    lo, ro = st.columns(2)
+    with lo:
+        st.markdown(blocks.get("bias_stack", ""), unsafe_allow_html=True)
+    with ro:
+        st.markdown(blocks.get("liquidity", ""), unsafe_allow_html=True)
+        st.markdown(blocks.get("external", ""), unsafe_allow_html=True)
+    st.markdown(blocks.get("htf", ""), unsafe_allow_html=True)
+    # The state closes the dashboard, because it is the only line that is worth
+    # anything after reading the nine above it.
+    st.markdown(blocks.get("market_state", ""), unsafe_allow_html=True)
 
     missing = [b for b in BLOCK_ORDER if b not in blocks]
     if missing:
@@ -268,6 +301,143 @@ def _oi_ladder(df_summary, atm) -> Optional[List[Dict[str, Any]]]:
         return out or None
     except Exception:
         return None
+
+
+def _bias_rows(mp: Dict[str, Any]) -> List[Tuple[str, Any]]:
+    """`(name, label)` for every input the Market Picture voted on.
+
+    Each label is **that vote's own wording**, pulled from the field
+    `compute_market_picture` published. Nothing is classified here: a row whose
+    owner said nothing arrives blank and `bias_stack_html` lists it as silent,
+    which is the honest answer and not the same as neutral.
+    """
+    def lab(node, *keys):
+        if not isinstance(node, dict):
+            return node if isinstance(node, str) else None
+        for k in keys:
+            v = node.get(k)
+            if v not in (None, ""):
+                return v
+        return None
+
+    def direction(node, *keys):
+        """The owner's OWN direction word, when it published one.
+
+        ⚠️ This is why the rows are 3-tuples. Without it the chip's colour comes
+        from keyword-matching the owner's prose — and `'Bullish (PE writers
+        building support)'` only reads as bullish while the word "Bullish"
+        survives a rewording. `dex_bias` and `skew_bias` publish `bias` as
+        BULL/BEAR outright, so those never need guessing at all.
+        """
+        if not isinstance(node, dict):
+            return None
+        for k in keys:
+            v = node.get(k)
+            if v not in (None, ""):
+                return v
+        return None
+
+    return [
+        ("Price structure", mp.get("regime"), mp.get("regime")),
+        ("ATM chain", lab(mp.get("atm_bias"), "verdict", "oi"), None),
+        ("ΔOI", lab(mp.get("doi_bias"), "label"), None),
+        ("Dealer GEX", lab(mp.get("gex_disp"), "signal"), None),
+        ("Dealer DEX", lab(mp.get("dex_bias"), "label", "bias"),
+         direction(mp.get("dex_bias"), "bias")),
+        ("IV skew", lab(mp.get("skew_bias"), "label", "bias"),
+         direction(mp.get("skew_bias"), "bias")),
+        ("Order flow", lab(mp.get("oflow_imb"), "label"), None),
+        ("Global", lab(mp.get("global_bias"), "label"), None),
+        ("News", lab(mp.get("news_bias"), "label"), None),
+    ]
+
+
+def _regime_confidence(mp: Dict[str, Any]) -> Optional[float]:
+    """The published probability OF THE REGIME the Market Picture reported.
+
+    ⚠️ Selection, not calculation. `p_up`, `p_down` and `p_side` are all
+    published; this picks the one that matches `regime` so the number under the
+    verdict is that verdict's own confidence. Taking a max independently of the
+    regime would let the two disagree — a SIDEWAYS call carrying `p_up`.
+    """
+    key = {"UP": "p_up", "DOWN": "p_down",
+           "SIDEWAYS": "p_side"}.get(str(mp.get("regime") or "").upper())
+    if not key:
+        return None
+    try:
+        v = mp.get(key)
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _liq_read(ctx, field: str):
+    """One Stage 74 field, through the context's own accessor.
+
+    `TradingContext.value` returns the sentinel `UNKNOWN` for a field with no
+    live producer, which must not reach the screen as a reading — so it is
+    converted to `None` here and the block simply omits the row.
+    """
+    try:
+        if ctx is None:
+            return None
+        v = ctx.value(field)
+        return None if v is None or str(v).upper() == "UNKNOWN" else v
+    except Exception:
+        return None
+
+
+def _external_rows(mp: Dict[str, Any], ss) -> List[Tuple[str, Any]]:
+    """The outside world, each line already worded by the panel that fetched it.
+
+    VIX is the one that needs care: `vix_history` is a list of values, so the
+    REGIME is `Stage 22`'s to name and there is no published label to read. Rather
+    than inventing a threshold here, the raw level is shown — a number a trader
+    reads directly, with no classification pretending to be one.
+    """
+    rows: List[Tuple[str, Any]] = [
+        ("Global", (mp.get("global_bias") or {}).get("label")
+         if isinstance(mp.get("global_bias"), dict) else None),
+        ("News", (mp.get("news_bias") or {}).get("label")
+         if isinstance(mp.get("news_bias"), dict) else None),
+        ("Commodity", (mp.get("commodity_bias") or {}).get("regime")
+         if isinstance(mp.get("commodity_bias"), dict) else None),
+        ("Sector rotation", (mp.get("sector_bias") or {}).get("rotation")
+         if isinstance(mp.get("sector_bias"), dict) else None),
+    ]
+    try:
+        vh = ss.get("vix_history") or []
+        if vh:
+            rows.append(("India VIX", f"{float(vh[-1]):.2f}"))
+        else:
+            rows.append(("India VIX", None))
+    except Exception:
+        rows.append(("India VIX", None))
+    try:
+        fd = ss.get("_fii_dii_cash") or {}
+        net = fd.get("fii_net") if isinstance(fd, dict) else None
+        rows.append(("FII cash",
+                     f"{float(net):+,.0f} Cr" if net is not None else None))
+    except Exception:
+        rows.append(("FII cash", None))
+    return rows
+
+
+def _gate_needs(gate) -> List[str]:
+    """What the gate is waiting on, in its own words.
+
+    Read from the gate's `needs`/`missing` list when it publishes one. It is NOT
+    inferred from the state: guessing that a WAIT needs "acceptance" would put a
+    condition on screen that no engine ever asked for, and the trader would wait
+    for the wrong thing.
+    """
+    if not isinstance(gate, dict):
+        return []
+    for key in ("needs", "missing", "blockers"):
+        v = gate.get(key)
+        if isinstance(v, (list, tuple)):
+            return [str(x) for x in v if str(x).strip()]
+    return []
 
 
 def _total_pcr(df_summary) -> Optional[float]:
