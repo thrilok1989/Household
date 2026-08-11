@@ -589,14 +589,28 @@ def test_charts_is_the_first_tab():
 def test_every_tab_is_wired_to_a_body():
     """⚠️ The failure this catches is silent: `st.tabs` renders a label whatever
     happens, so a mis-numbered index leaves a tab that opens onto nothing, or
-    two labels drawing the same screen."""
+    two labels drawing the same screen.
+
+    ⚠️ COVERAGE, not ascending order. This asserted `indices == list(range(n))`,
+    which also froze the fill sequence — and the fill sequence has to differ from
+    the tab sequence, because the bodies have a dependency the strip's layout does
+    not: `_trading_screen` (tab 4) publishes `_sr_levels`, `_premium_energy`,
+    `_premium_structures` and `_entry_decision`, which the cockpits at tabs 1 and
+    2 read. Filled in tab order they ran before their producer.
+
+    `st.tabs()` containers may be filled in any order and the strip is unaffected,
+    so what matters here is that every index is filled exactly once.
+    `test_screen_order.py` owns the dependency rule itself.
+    """
     import re
     src = _v6_src()
     block = src[src.index("tabs = st.tabs(_TABS)"):src.index("# ── 0 · CHARTS")]
     indices = [int(n) for n in re.findall(r"with tabs\[(\d+)\]:", block)]
     from mios_v5.ui.dashboard_v6 import _TABS
-    assert indices == list(range(len(_TABS))), (
-        f"tab bodies {indices} do not cover 0..{len(_TABS) - 1}")
+    assert len(indices) == len(set(indices)), (
+        f"a tab is filled twice — two labels draw the same screen: {indices}")
+    assert set(indices) == set(range(len(_TABS))), (
+        f"tab bodies {sorted(indices)} do not cover 0..{len(_TABS) - 1}")
 
 
 def test_the_charts_tab_runs_before_the_panel_that_reads_its_output():

@@ -46,6 +46,19 @@ def run_mios_pass(session_state, db=None,
         "prev_report": session_state.get("_mios_prev_report"),
         # previous-pass snapshot for the Evolution engine (Stage 29)
         "prev_snapshot": session_state.get("_mios_prev_snapshot"),
+        # ⚠️ Stage 33's gap signal, which had never once fired.
+        #
+        # `stage33_event_impact` tests
+        #     (raw.get("gap_today") or {}).get("type") in ("GAP-UP", "GAP-DOWN")
+        # and nothing ever put `gap_today` into `raw`. The data was there the
+        # whole time: `capture_day_open_and_gap` publishes `_gap_today` as
+        # `{'type', 'pct', 'open', 'prev_close'}` — the exact `type` key the
+        # engine checks — and the app header reads it for the previous close.
+        # Forwarded, not recomputed; the producer stays the only owner.
+        "gap_today": session_state.get("_gap_today"),
+        # Stage 4's expiry fallback, for the cycle where `option_data` has no
+        # `expiry` but the raw chain payload does.
+        "cached_raw_chain_latest": session_state.get("_cached_raw_chain_latest"),
         # persist the per-error throttle cache across passes
         "_err_log_seen": session_state.setdefault("_mios_err_seen", {}),
         # Stage-40 prediction-log throttle state (persists across passes)
