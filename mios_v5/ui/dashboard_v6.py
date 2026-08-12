@@ -214,6 +214,67 @@ def _strike_verdict(st, r) -> None:
                     f"{' · '.join(bits)}</div>", unsafe_allow_html=True)
 
 
+def _hv_settings(st) -> None:
+    """⚙️ The three knobs the reference indicator exposes, and nothing more.
+
+    ⚠️ It WRITES `_hv_settings` and computes nothing. `vob_minimal._hv_points` reads
+    the same key and fills anything absent from `volume_points.defaults()`, so the
+    control and the computation cannot disagree about a default.
+
+    Collapsed by default: a settings row permanently open above the leg tabulation
+    costs that space on every screen to say nothing most days.
+    """
+    try:
+        from ..volume_points import defaults
+    except Exception:
+        return
+    try:
+        d = defaults()
+        cur = dict(d)
+        cur.update({k: v for k, v in
+                    (st.session_state.get("_hv_settings") or {}).items()
+                    if k in d})
+        with st.expander("⚙️ High-volume pivots — settings", expanded=False):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                left = st.number_input(
+                    "Left bars", min_value=2, max_value=60,
+                    value=int(cur["left"]), step=1, key="hv_left",
+                    help="Bars before a candidate that must not exceed it. "
+                         "On a 1-minute chart, 15 is a quarter-hour.")
+            with c2:
+                right = st.number_input(
+                    "Right bars", min_value=2, max_value=60,
+                    value=int(cur["right"]), step=1, key="hv_right",
+                    help="Bars after it. A pivot is only confirmed once these "
+                         "have printed, so a larger value means fewer, later "
+                         "pivots — never earlier ones.")
+            with c3:
+                filt = st.number_input(
+                    "Volume filter", min_value=0.0, max_value=6.0,
+                    value=float(cur["filter_vol"]), step=0.1, key="hv_filter",
+                    help="On the normalised scale: the pivot's rolling volume "
+                         "÷ the session's 95th percentile × 5. Lower keeps more "
+                         "pivots. It is relative, so one value works on NIFTY "
+                         "and on a ₹90 leg alike.")
+            st.session_state["_hv_settings"] = {
+                "left": int(left), "right": int(right),
+                "filter_vol": float(filt)}
+            # ⚠️ The cached per-panel profiles carry the OLD pivots, and they key on
+            # bar count — which does not change when a setting does. Cleared here so
+            # a changed threshold takes effect on this rerun rather than at the next
+            # bar close.
+            if {"left": int(left), "right": int(right),
+                    "filter_vol": float(filt)} != cur:
+                st.session_state.pop("_panel_profiles", None)
+            st.caption(
+                f"defaults {d['left']}/{d['right']} bars · filter "
+                f"{d['filter_vol']}. A strongly trending series has no swing "
+                f"pivots at any setting — the window's extreme sits at its edge.")
+    except Exception as err:
+        _dbg_caption(st, "hv_settings", f"settings unavailable: {err}")
+
+
 def _poc_structure(st) -> None:
     """🏛 Four rolling POCs on a daily axis, then the layered read as a table.
 
@@ -1175,6 +1236,9 @@ def _charts_screen(st, fr: Dict[str, Any]) -> None:
 
     call, put, call_tag, put_tag = _leg_reads(st, fr)
     _terminal_chart(st, fr, call_tag, put_tag, dominance(call, put))
+
+    # ⚙️ The high-volume-pivot settings, under the chart they change.
+    _hv_settings(st)
 
     # 🧮 The ATM±1 leg tabulation, directly under the charts it explains.
     #
@@ -2386,6 +2450,13 @@ def _panel_profile(st, tag, df=None, ready: Optional[Dict[str, Any]] = None):
                 _pts = _hv(df)
                 if _pts:
                     profile["hv_points"] = _pts
+                else:
+                    # ⚠️ The REASON, not just the absence. A strongly trending leg has
+                    # no swing pivots at all, which is exactly what a put looks like
+                    # while the index falls — and an empty panel is indistinguishable
+                    # from a broken one.
+                    from ..volume_points import read as _hvread
+                    profile["hv_why"] = _hvread([]).get("why")
         except Exception:
             pass
 

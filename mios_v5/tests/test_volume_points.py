@@ -195,7 +195,7 @@ def test_nothing_to_draw_draws_nothing():
     assert VO.specs([], [1, 2]) == [] and VO.specs(None, [1, 2]) == []
     assert VO.specs([{"index": 1, "price": 10.0}], None) == []
     assert VO.draw(None, 1, 1, points=[{"index": 1, "price": 10.0}]) == {
-        "levels": 0, "dots": 0}
+        "levels": 0, "dots": 0, "note": 0}
 
 
 @pytest.mark.parametrize("junk", [None, "x", 7, [], (), {}, [None], [7]])
@@ -313,3 +313,111 @@ def test_all_three_panels_get_both_overlays():
                 if isinstance(n, ast.FunctionDef) and n.name == "terminal_chart")
     body = ast.get_source_segment(tc, main) or ""
     assert "_profile_overlay(fig, prof, r, c," in body and "x=" in body
+
+
+# ── asked for: thick and bright, a reason, and settings ────────────────
+
+def test_the_dynamic_poc_is_thicker_and_brighter_than_the_frozen_levels():
+    """⚠️ Asked for, and it is the right weight: this is the line that MOVES, so it
+    carries the session's story while POC/VAH/VAL are one frozen reading each. At
+    1.3px dashdot it was the faintest thing on a panel full of thin dotted levels."""
+    from mios_v5.ui import profile_overlay as PO
+    colour, dash, width, label = PO.LEVEL_STYLE["dynamic_poc"]
+    assert width >= 2.5, width
+    assert dash == "solid"
+    assert all(width > PO.LEVEL_STYLE[k][2] for k in ("poc", "vah", "val"))
+    # bright: every channel high, not a muted grey
+    r, g = int(colour[1:3], 16), int(colour[3:5], 16)
+    assert r > 200 and g > 150, colour
+
+
+def test_the_stepline_takes_its_width_from_the_one_style_map():
+    """The stepline and the labelled level it ends at must not drift apart."""
+    pytest.importorskip("plotly")
+    from plotly.subplots import make_subplots
+
+    from mios_v5.ui import profile_overlay as PO
+    fig = make_subplots(rows=1, cols=1)
+    PO.draw(fig, 1, 1, profile={"dynamic_poc_series": [None, 1.0, 2.0]},
+            x=[0, 1, 2])
+    tr = next(t for t in fig.data if t.name == "Dyn PoC")
+    assert tr.line.width == PO.LEVEL_STYLE["dynamic_poc"][2]
+    assert tr.line.color == PO.LEVEL_STYLE["dynamic_poc"][0]
+
+
+def test_a_panel_with_no_pivots_says_why_on_the_panel():
+    """⚠️ Reported as "not displaying in the put ltp". A strongly trending leg has no
+    swing pivots — which is exactly what a put does while the index falls — so the
+    overlay was right to draw nothing and wrong to say nothing. An empty panel and a
+    broken panel look identical."""
+    pytest.importorskip("plotly")
+    from plotly.subplots import make_subplots
+    fig = make_subplots(rows=1, cols=1)
+    why = VP.read([])["why"]
+    got = VO.draw(fig, 1, 1, points=[], x=[0, 1, 2], why=why)
+    assert got["note"] == 1 and got["dots"] == 0
+    note = next(a for a in fig.layout.annotations if "swing pivots" in a.text)
+    assert note.text.startswith("📍")
+    # …and no note when there is nothing to explain
+    fig2 = make_subplots(rows=1, cols=1)
+    assert VO.draw(fig2, 1, 1, points=[], x=[0, 1, 2])["note"] == 0
+
+
+def test_the_note_escapes_what_it_is_given():
+    pytest.importorskip("plotly")
+    from plotly.subplots import make_subplots
+    fig = make_subplots(rows=1, cols=1)
+    VO.draw(fig, 1, 1, points=[], x=[0], why="<script>x</script>")
+    txt = " ".join(a.text for a in fig.layout.annotations)
+    assert "<script>" not in txt and "&lt;script&gt;" in txt
+
+
+def test_the_settings_are_one_map_and_a_caller_cannot_mutate_them():
+    d = VP.defaults()
+    assert set(d) == {"left", "right", "filter_vol"}
+    d["left"] = 999
+    assert VP.defaults()["left"] == VP.LEFT, "defaults() handed out its own dict"
+
+
+def test_the_settings_actually_change_what_is_kept():
+    hs, ls, cs, vs = _bars()
+    loose = VP.high_volume_pivots(hs, ls, cs, vs, filter_vol=0.5)
+    tight = VP.high_volume_pivots(hs, ls, cs, vs, filter_vol=5.5)
+    assert len(loose) > len(tight), "the volume filter does nothing"
+    wide = VP.high_volume_pivots(hs, ls, cs, vs, left=40, right=40)
+    narrow = VP.high_volume_pivots(hs, ls, cs, vs, left=4, right=4)
+    assert len(narrow) > len(wide), "the bar windows do nothing"
+
+
+def test_the_computation_reads_the_settings_and_falls_back_to_defaults():
+    """⚠️ `defaults()` is the ONE place the fallbacks live, so a key the user has not
+    set cannot mean a different threshold here than in the panel offering it."""
+    src = (_ROOT / "vob_minimal.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_hv_points")
+    keys = {n.value for n in ast.walk(fn)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    names = set()
+    for a in ast.walk(fn):
+        if isinstance(a, ast.ImportFrom):
+            names |= {x.name for x in a.names}
+    assert "_hv_settings" in keys
+    assert "defaults" in names
+    assert {"left", "right", "filter_vol"} <= keys
+
+
+def test_changing_a_setting_takes_effect_now_not_at_the_next_bar_close():
+    """⚠️ `_panel_profiles` keys on BAR COUNT, which does not change when a setting
+    does — so a new threshold would sit unused until the next bar closed."""
+    d6 = (_ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(d6))
+              if isinstance(n, ast.FunctionDef) and n.name == "_hv_settings")
+    keys = {n.value for n in ast.walk(fn)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "_hv_settings" in keys and "_panel_profiles" in keys
+    calls = {getattr(c.func, "attr", "") for c in ast.walk(fn)
+             if isinstance(c, ast.Call)}
+    assert "pop" in calls, "the stale cached profiles are never cleared"
+    # the control offers exactly the three knobs and computes nothing
+    assert "number_input" in calls
+    assert not {"high_volume_pivots", "pivots"} & calls

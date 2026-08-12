@@ -443,7 +443,11 @@ def _profile_overlay(fig, profile: Dict[str, Any], row: int, col: int,
     # whole contract is prices.
     try:
         from .volume_points_overlay import draw as _hv_draw
-        _hv_draw(fig, row, col, points=profile.get("hv_points"), x=x)
+        # `hv_why` travels with the points so a panel with none can say why —
+        # reported as the PUT panel "not displaying", which is what a trending leg
+        # correctly looks like and could not explain.
+        _hv_draw(fig, row, col, points=profile.get("hv_points"), x=x,
+                 why=profile.get("hv_why"))
     except Exception:
         pass
 

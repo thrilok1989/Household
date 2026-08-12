@@ -666,8 +666,11 @@ def test_the_charts_tab_computes_nothing():
     # the app published (`_strike_hist`, `_poc_series`) and lays it out. The
     # rolling-POC build itself costs ~420 ms over 1250 daily bars and runs in
     # `vob_minimal._publish_poc_series`, hourly-cached — deliberately NOT here.
+    # `_hv_settings` is a CONTROL: it renders three number inputs and writes
+    # `_hv_settings` to session state. `vob_minimal._hv_points` does the computing.
     _render = {"markdown", "caption", "get", "leg_table_html", "_feed_reason",
-               "_dbg_caption", "_strike_oi_charts", "_poc_structure"}
+               "_dbg_caption", "_strike_oi_charts", "_poc_structure",
+               "_hv_settings"}
     assert called <= {"_leg_reads", "dominance", "_terminal_chart"} | _render, (
         f"unexpected calls in _charts_screen: {called}")
     # ⚠️ The property that actually matters: no BUILDER is invoked here.
