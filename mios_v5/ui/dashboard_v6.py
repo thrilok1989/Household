@@ -903,6 +903,15 @@ def _guardian_read(st, fr: Dict[str, Any]):
         conf = apply_to(conf, ss.get("_adaptive_greeks") or {})
     except Exception:
         pass
+    # 🌉 ONE bridge, not a second read. The header wants the same pair, and
+    # `_chrome_extras` runs in `vob_minimal` after the cycle — which may not import
+    # this module. Publishing the resolved pair means the strip and the card cannot
+    # show different verdicts for the same cycle, which is the whole reason this
+    # function exists rather than each surface resolving the gate itself.
+    try:
+        ss["_entry_verdict"] = (word, conf)
+    except Exception:
+        pass
     return word, conf
 
 
