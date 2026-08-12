@@ -60,6 +60,34 @@ _TABS = ["📊 Charts", "🧭 NIFTY", "📈 OPTIONS", "🎯 Decision", "📈 Tra
 SESSION_LOG_LIMIT = 8000
 TRADE_SIGNAL_LIMIT = 300
 
+#: The Plotly config every chart on the Charts tab shares: a modebar stripped to the
+#: single Fullscreen button Streamlit injects, with scroll-zoom off.
+#:
+#: ⚠️ The terminal chart passed `displayModeBar: False`, which removed the whole
+#: modebar — and with it the Fullscreen button Streamlit adds to the modebar. So the
+#: one chart a trader most wants to enlarge was the only one with no way to. The OI
+#: and POC charts used the default config, which DID carry the button, but only in a
+#: hover-only modebar top-right — discoverable enough to be reported missing.
+#:
+#: `scrollZoom: False` is kept from the terminal's old config: the wheel zoomed the
+#: chart out from under anyone scrolling the page past it. Every pan/zoom/select/reset
+#: button is removed, so what remains is exactly the one Fullscreen control — verified
+#: on screen, not assumed, since `modeBarButtonsToRemove` only names Plotly's own
+#: buttons and the Fullscreen one is Streamlit's.
+FS_CHART_CONFIG = {
+    "displayModeBar": True,
+    "scrollZoom": False,
+    "displaylogo": False,
+    "modeBarButtonsToRemove": ["zoom2d", "pan2d", "select2d", "lasso2d",
+                               "zoomIn2d", "zoomOut2d", "autoScale2d",
+                               "resetScale2d", "toImage"],
+}
+
+#: Force the modebar visible instead of hover-only, so the Fullscreen button reads as
+#: an actual button. Injected once at the top of the Charts tab.
+FS_CHART_CSS = ('<style>[data-testid="stFullScreenFrame"] .modebar'
+                '{opacity:1 !important}</style>')
+
 #: The four learning reads, under the same rule — and they are the heaviest
 #: in the app.
 #:
@@ -162,7 +190,8 @@ def _strike_oi_charts(st) -> None:
             for col, (strike, _label, fig) in zip(cols, figs):
                 with col:
                     st.plotly_chart(fig, use_container_width=True,
-                                    key=f"soi_{measure}_{strike}")
+                                    key=f"soi_{measure}_{strike}",
+                                    config=FS_CHART_CONFIG)
                     if measure == "oi":
                         _strike_verdict(st, SC.strike_read(store, strike))
             drew = True
@@ -255,7 +284,8 @@ def _poc_structure(st) -> None:
         fig = PC.figure(d.get("dates") or [], d.get("series") or {},
                         d.get("spot"), d.get("subdaily"))
         if fig is not None:
-            st.plotly_chart(fig, use_container_width=True, key="poc_structure")
+            st.plotly_chart(fig, use_container_width=True, key="poc_structure",
+                            config=FS_CHART_CONFIG)
         html = PC.table_html(d.get("rows") or [], d.get("align"))
         if html:
             st.markdown(html, unsafe_allow_html=True)
@@ -1172,6 +1202,9 @@ def _charts_screen(st, fr: Dict[str, Any]) -> None:
     them here instead of there moves no work.
     """
     from ..terminal import dominance
+
+    # ⛶ Make the Fullscreen button visible on every chart below. Once per rerun.
+    st.markdown(FS_CHART_CSS, unsafe_allow_html=True)
 
     call, put, call_tag, put_tag = _leg_reads(st, fr)
     _terminal_chart(st, fr, call_tag, put_tag, dominance(call, put))
@@ -2488,11 +2521,11 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
             nifty_profile=_nifty_prof,
             call_profile=_call_prof,
             put_profile=_put_prof)
-        # scrollZoom off: the wheel zoomed the chart out from under anyone
-        # scrolling the page past it. Zoom is on the buttons, where it is
-        # deliberate and the current level is visible.
-        st.plotly_chart(fig, use_container_width=True,
-                        config={"displayModeBar": False, "scrollZoom": False})
+        # ⛶ The shared config: a modebar stripped to the one Fullscreen button, so
+        # the terminal can finally be enlarged. scrollZoom stays off — the wheel
+        # zoomed the chart out from under anyone scrolling the page past it — and
+        # every pan/zoom/reset button is removed, leaving only Fullscreen.
+        st.plotly_chart(fig, use_container_width=True, config=FS_CHART_CONFIG)
         if notes:
             # name the series AND why — "No candle series yet for: NIFTY" on a
             # screen where the two option legs drew fine tells you nothing

@@ -478,12 +478,17 @@ def test_the_zoom_label_says_what_you_are_looking_at():
 
 def test_the_scroll_wheel_no_longer_zooms():
     """The wheel zoomed the chart whenever anyone scrolled the page past it,
-    which is not something a trader can ask for on purpose."""
+    which is not something a trader can ask for on purpose.
+
+    ⚠️ The config moved to the shared `FS_CHART_CONFIG` when the Fullscreen button
+    was added — scrollZoom stays off there, so the intent is unchanged even though
+    the literal no longer sits inside `_terminal_chart`."""
     import inspect
 
     from mios_v5.ui import dashboard_v6
+    assert dashboard_v6.FS_CHART_CONFIG["scrollZoom"] is False
     src = inspect.getsource(dashboard_v6._terminal_chart)
-    assert '"scrollZoom": False' in src
+    assert "config=FS_CHART_CONFIG" in src
     assert "window_minutes=window" in src
 
 
