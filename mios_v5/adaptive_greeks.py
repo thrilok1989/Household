@@ -333,6 +333,22 @@ def dealer_posture(gex: Any = None, dex: Any = None, spot: Any = None,
     return {"posture": posture, "gamma": gamma, "gamma_flip": flip,
             "amplification": ("AMPLIFYING" if gamma == "NEGATIVE" else
                               "STABILISING" if gamma == "POSITIVE" else None),
+            # ── what the posture is relative TO ──────────────────────────
+            #
+            # ⚠️ Added because "SUPPORTIVE" alone was read as "dealers back the
+            # UP regime" in review. It never means that: `regime` is computed
+            # after this and is not an input here. The posture is measured
+            # against `flow_sign`, and with negative gamma "supportive" means
+            # hedging amplifies movement — in EITHER direction.
+            #
+            # `None` when there is no flow direction to be supportive OF. The
+            # posture word and `score` are deliberately left exactly as they
+            # were — they feed `_modifiers`, and changing them would move a
+            # decision when the defect was in the label. A display that finds
+            # `relative_to is None` should say what dealers are doing to
+            # movement instead of asserting support for nothing.
+            "relative_to": ("flow" if flow_sign else None),
+            "flow_sign": int(flow_sign or 0),
             "score": _clamp(support * 40.0), "evidence": ev}
 
 
@@ -366,16 +382,23 @@ def hedging_pressure(vc: Any = None, magnet: Any = None, spot: Any = None,
     if charm is not None:
         ev.append(f"net charm {charm:+,.0f}")
 
-    direction = "NEUTRAL"
+    # ⚠️ `direction` is measured two different ways, and a single arrow on screen
+    # hid which one produced it. `basis` names it, so a panel can say "magnet pull
+    # ↓ ₹24,400" rather than the bare "hedging pressure ↓ downward" that was read
+    # in review as an immediate dealer-flow measurement. It is not one: in the
+    # magnet branch it is one subtraction, `magnet − spot`.
+    direction, basis = "NEUTRAL", None
     if mg is not None and sp is not None:
         gap = mg - sp
         direction = ("UPWARD" if gap > 5 else "DOWNWARD" if gap < -5
                      else "NEUTRAL")
+        basis = "magnet"
         ev.append(f"dealer magnet {mg:,.0f} · {gap:+.0f} pts from spot")
     elif charm is not None and charm != 0:
         # No magnet strike published — the sign still says which way the drag
         # runs, and saying so beats saying nothing.
         direction = "UPWARD" if charm > 0 else "DOWNWARD"
+        basis = "net_charm"
         ev.append("magnet strike not published — direction from net charm only")
 
     near = (mg is not None and sp is not None
@@ -386,6 +409,11 @@ def hedging_pressure(vc: Any = None, magnet: Any = None, spot: Any = None,
 
     return {
         "direction": direction,
+        #: Which measurement produced `direction` — `"magnet"` (magnet minus
+        #: spot), `"net_charm"` (the sign only, no strike published), or `None`
+        #: when nothing did. A panel must not word these two the same way: one
+        #: names a level, the other names a drag with no level behind it.
+        "basis": basis,
         "magnet": mg,
         "distance": (round(mg - sp, 1) if mg is not None and sp is not None
                      else None),
@@ -459,6 +487,22 @@ def volatility_state(iv_series: Optional[Sequence[Any]] = None,
     return {"state": state, "iv_change": (round(change, 2)
                                           if change is not None else None),
             "confirmation": confirmation, "skew_ratio": sk.get("ratio"),
+            # ── ⚪ could not report, vs measured and quiet ─────────────────
+            #
+            # ⚠️ `confirmation` STARTS at "SILENT" and only moves off it when
+            # `state and price_sign`. So with no IV history published, SILENT
+            # means "nothing was measured" — and the card printed it as though it
+            # were a reading. It was read in review as "IV isn't giving strong
+            # confirmation", which is a conclusion about the market drawn from an
+            # absence of data. Principle 9: MISSING is not 0.
+            #
+            # `confirmation` and `score` are unchanged — `conflicts()` already
+            # guards this correctly by requiring `state` truthy before firing
+            # NO_VOLATILITY_RESPONSE, so only the display was wrong.
+            "reporting": state is not None,
+            "why_silent": (None if state is not None else
+                           ("no IV history published" if not vals else
+                            "only one IV sample — no history to compare")),
             "score": score, "evidence": ev}
 
 
@@ -627,12 +671,21 @@ def _modifiers(adaptive: float, flow_sign: int, dealer: Mapping[str, Any],
     delta = 0.0
     why: List[str] = []
 
+    # ⚠️ "movement, not an entry". These read "supports/opposes the move", which
+    # was reported as the confusing part of the card: beneath a GUARDIAN WAIT it
+    # looked like the greeks endorsing a trade the Guardian had refused.
+    #
+    # What the posture actually says is whether dealer hedging AMPLIFIES or DAMPS
+    # movement (relative to flow — see `dealer_posture.relative_to`). It says
+    # nothing about whether there is a valid entry, and with negative gamma it
+    # amplifies in EITHER direction. The delta is unchanged; only the sentence is
+    # more precise about its own scope.
     if dealer.get("posture") == "SUPPORTIVE":
         delta += 6.0
-        why.append("dealer hedging supports the move")
+        why.append("dealer hedging supports movement, not an entry")
     elif dealer.get("posture") == "OPPOSING":
         delta -= 6.0
-        why.append("dealer hedging opposes the move")
+        why.append("dealer hedging damps movement")
     if vol.get("confirmation") == "CONFIRMING":
         delta += 6.0
         why.append("volatility confirms")

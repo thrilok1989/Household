@@ -6507,7 +6507,6 @@ def _publish_poc_series():
         'series': series,
         'rows': rows,
         'align': _ps.alignment(rows),
-        'caption': _ps.caption(series, len(hs)),
         'spot': spot,
         'error': st.session_state.get('_htf_daily_error'),
         # 1H and 4H are finer than a daily bar — their CURRENT POC only, from the

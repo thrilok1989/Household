@@ -250,16 +250,3 @@ def alignment(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         label = f"inside structure — above {above} of {n}"
     return {"n": n, "above": above, "below": below, "label": label,
             "reporting": True}
-
-
-def caption(series: Dict[str, List[Optional[float]]], n_bars: Any = None) -> str:
-    """What was measured, so the lines are never read without their basis."""
-    got = [k for k in (series or {})]
-    if not got:
-        return ("no daily history yet — the rolling POCs build once the daily "
-                "series is fetched")
-    bars = _f(n_bars)
-    span = f"{bars:.0f} daily bars · " if bars else ""
-    return (f"{span}rolling POC per window ({', '.join(got)}) · volume-weighted, "
-            f"recomputed each bar · {' and '.join(SUBDAILY)} are finer than one "
-            f"bar and appear as current levels, not curves")

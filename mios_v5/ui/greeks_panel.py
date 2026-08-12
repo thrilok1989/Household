@@ -29,7 +29,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Optional
 
 from .nifty_cockpit import _card, _esc, _f, _get, _n, _row
-from .theme import BEAR, BULL, CARD_BORDER, INK, MICRO, MUTED, VIOLET, WARN
+from .theme import (ALERT, BEAR, BULL, CARD_BORDER, INK, MICRO, MUTED, VIOLET,
+                    WARN)
 
 #: Posture → (emoji, tone). One map, so the chip and the card agree.
 POSTURE = {
@@ -41,8 +42,20 @@ POSTURE = {
 
 RISK_TONE = {"LOW": BULL, "MEDIUM": WARN, "HIGH": BEAR}
 
-PRESSURE_ARROW = {"UPWARD": "↑ upward", "DOWNWARD": "↓ downward",
-                  "NEUTRAL": "↔ neutral"}
+#: Just the arrow. The words that follow it depend on what was measured — see
+#: `_pressure_row`.
+PRESSURE_ARROW = {"UPWARD": "↑", "DOWNWARD": "↓", "NEUTRAL": "↔"}
+
+#: What dealers are doing to MOVEMENT, when there is no flow direction for them
+#: to be supportive or opposing OF.
+#:
+#: ⚠️ This row used to print the bare posture word regardless. `SUPPORTIVE` with
+#: nothing to support was read in review as "dealers back the UP regime" — a
+#: claim `adaptive_greeks` never makes, since the regime is not an input to
+#: `dealer_posture` at all. With no flow, the honest statement is what hedging
+#: does to movement, which is exactly what gamma's sign already says.
+AMPLIFICATION = {"AMPLIFYING": "amplifying moves",
+                 "STABILISING": "dampening moves"}
 
 
 def _risk(word: Any) -> str:
@@ -56,6 +69,82 @@ def _band(pct: Any) -> str:
     if v is None:
         return "—"
     return "HIGH" if v >= 60 else "MEDIUM" if v >= 40 else "LOW"
+
+
+def _dealer_row(dealer: Mapping[str, Any]) -> str:
+    """The dealer line, saying what the posture is relative TO.
+
+    Three shapes, because there are three situations:
+
+        flow + posture     🟢 SUPPORTIVE of flow · amplifying moves
+        no flow            🟡 amplifying moves — no flow direction to back
+        nothing published  ⚪ UNKNOWN
+
+    ⚠️ The middle one is the fix. `dealer_posture` scores negative gamma as
+    `SUPPORTIVE` whether or not flow has a direction, because negative gamma
+    genuinely amplifies movement — but "supportive" with no object invites the
+    reader to supply one, and the obvious guess (the regime) is wrong. The score
+    is untouched; only the sentence changed.
+    """
+    posture = str(_get(dealer, "posture") or "UNKNOWN").upper()
+    emoji, tone = POSTURE.get(posture, POSTURE["UNKNOWN"])
+    amp = AMPLIFICATION.get(str(_get(dealer, "amplification") or "").upper(), "")
+    rel = _get(dealer, "relative_to")
+
+    if posture == "UNKNOWN":
+        return _row("Dealer position", f"{emoji} UNKNOWN", tone)
+    if rel:
+        return _row("Dealer position",
+                    f"{emoji} {_esc(posture)} of {_esc(str(rel))}", tone, amp)
+    # No flow direction. Say what hedging does to movement and say why the
+    # posture word is missing, rather than asserting support for nothing.
+    return _row("Dealer position",
+                f"🟡 {_esc(amp or 'positioned')}", WARN,
+                "no flow direction to back")
+
+
+def _pressure_row(pressure: Mapping[str, Any]) -> str:
+    """The hedging line, naming what produced the arrow.
+
+    `direction` is measured two ways and one arrow hid which:
+
+        basis "magnet"     Magnet pull   ↓ toward ₹24,400 · −183 pts
+        basis "net_charm"  Charm drag    ↓ (no magnet strike published)
+        basis None         Hedging pressure  ↔ neutral
+
+    ⚠️ "Hedging pressure ↓ downward" was read in review as an immediate dealer
+    **flow** measurement. In the magnet branch it is one subtraction —
+    `magnet − spot` — so the arrow says where the level is, not what dealers are
+    doing this minute. Naming the basis is the whole fix.
+    """
+    word = str(_get(pressure, "direction") or "").upper()
+    arrow = PRESSURE_ARROW.get(word, "—")
+    basis = str(_get(pressure, "basis") or "")
+    mg = _f(_get(pressure, "magnet"))
+    dist = _f(_get(pressure, "distance"))
+
+    if basis == "magnet" and mg is not None:
+        return _row("Magnet pull", f"{arrow} toward ₹{_n(mg)}", WARN,
+                    (f"{dist:+.0f} pts" if dist is not None else ""))
+    if basis == "net_charm":
+        return _row("Charm drag", f"{arrow} {word.lower()}", MUTED,
+                    "no magnet strike published")
+    return _row("Hedging pressure",
+                f"{arrow} {word.lower() if word else '—'}", MUTED)
+
+
+def _volatility_row(vol: Mapping[str, Any]) -> str:
+    """The volatility line, distinguishing "quiet" from "not measured".
+
+    ⚠️ `confirmation` starts at `SILENT` and only moves off it once there is both
+    an IV state and a price sign. Printing that as a reading turned an absence of
+    data into a statement about the market — and it was read that way in review.
+    """
+    if not _get(vol, "reporting"):
+        why = str(_get(vol, "why_silent") or "not reporting")
+        return _row("Volatility", "⚪ not reporting", MUTED, why)
+    return _row("Volatility", _esc(str(_get(vol, "state") or "—").title()),
+                VIOLET, str(_get(vol, "confirmation") or "").title())
 
 
 def greeks_card_html(out: Any = None, guardian: Any = None,
@@ -75,27 +164,19 @@ def greeks_card_html(out: Any = None, guardian: Any = None,
     vol = _get(o, "volatility") or {}
     mods = _get(o, "modifiers") or {}
 
-    posture = str(_get(dealer, "posture") or "UNKNOWN").upper()
-    emoji, tone = POSTURE.get(posture, POSTURE["UNKNOWN"])
-
     rows: List[str] = [
-        _row("Dealer position", f"{emoji} {_esc(posture)}", tone),
+        _dealer_row(dealer),
         _row("Gamma",
              _esc(str(_get(dealer, "gamma") or "—").title()), MUTED,
              (f"flip {_n(_get(dealer, 'gamma_flip'))}"
               if _f(_get(dealer, "gamma_flip")) is not None else "")),
-        _row("Hedging pressure",
-             _esc(PRESSURE_ARROW.get(str(_get(pressure, "direction") or "")
-                                     .upper(), "—")), MUTED),
+        # ⚠️ One row, not two. This used to print "Hedging pressure ↓ downward"
+        # AND "Pin / magnet ₹24,400 · −183 pts" — the same subtraction stated
+        # twice, once as a direction with no basis and once as a level. Merged so
+        # the arrow and the level it points at cannot be read apart.
+        _pressure_row(pressure),
+        _volatility_row(vol),
     ]
-    if _f(_get(pressure, "magnet")) is not None:
-        d = _f(_get(pressure, "distance"))
-        rows.append(_row("Pin / magnet", f"₹{_n(_get(pressure, 'magnet'))}",
-                         WARN,
-                         f"{d:+.0f} pts" if d is not None else ""))
-    rows.append(_row("Volatility",
-                     _esc(str(_get(vol, "state") or "—").title()), VIOLET,
-                     str(_get(vol, "confirmation") or "").title()))
 
     brk = _band(_get(mods, "breakout_probability"))
     fade = _band(_get(mods, "fade_probability"))
@@ -109,27 +190,37 @@ def greeks_card_html(out: Any = None, guardian: Any = None,
     word = str(guardian or "").strip().upper()
     if word:
         conf = _f(confidence)
+        # ⚠️ WAIT used to be drawn in MUTED grey — the same tone as a secondary
+        # label. WAIT is a DECISION, not an absence of one, and rendering the
+        # Guardian's actual call dimmer than the rows above it made the one line
+        # that matters the hardest to read. Amber: visible, and still not the green
+        # of an entry.
         gt = (BULL if "BUY" in word else BEAR if "SELL" in word
-              else MUTED if "HOLD" in word or "WAIT" in word else WARN)
+              else WARN if "HOLD" in word or "WAIT" in word else ALERT)
         verdict = (
-            f"<div style='margin-top:7px;padding-top:6px;"
+            f"<div style='margin-top:9px;padding-top:8px;"
             f"border-top:1px solid {CARD_BORDER};display:flex;"
             f"justify-content:space-between;align-items:baseline'>"
-            f"<span style='font-size:9px;letter-spacing:.12em;color:{MICRO}'>"
-            f"GUARDIAN</span>"
-            f"<span style='font-size:15px;font-weight:800;color:{gt}'>"
+            f"<span style='font-size:11px;letter-spacing:.12em;font-weight:700;"
+            f"color:{MUTED}'>GUARDIAN</span>"
+            f"<span style='font-size:26px;font-weight:900;line-height:1.1;"
+            f"color:{gt}'>"
             f"{_esc(word)}"
-            + (f"<span style='font-size:11px;color:{MICRO};font-weight:600;"
-               f"margin-left:6px'>{conf:.0f}/100</span>"
+            # ⚠️ A separator, not just a margin — extracted as text the two ran
+            # together and read as "WAIT100/100".
+            + (f"<span style='font-size:14px;color:{MUTED};font-weight:700;"
+               f"margin-left:8px'>· {conf:.0f}/100</span>"
                if conf is not None else "")
             + "</span></div>")
 
     # ── the reason, from the layer's own words ───────────────────────
+    # Brought up from 10.5px/MUTED: this sentence is what explains the verdict
+    # above it, and it was set smaller than the rows it was explaining.
     reason = _reason_line(o)
-    note = (f"<div style='font-size:10.5px;color:{MUTED};margin-top:5px'>"
-            f"{_esc(reason)}</div>" if reason else "")
+    note = (f"<div style='font-size:12.5px;font-weight:600;color:{INK};"
+            f"margin-top:6px'>{_esc(reason)}</div>" if reason else "")
 
-    foot = (f"<div style='font-size:9px;color:{MICRO};margin-top:5px'>"
+    foot = (f"<div style='font-size:10px;color:{MICRO};margin-top:6px'>"
             f"Context and confirmation — greeks modify confidence, they do not "
             f"make the call. Regime: "
             f"{_esc(str(_get(o, 'regime') or '—'))}</div>")
@@ -157,8 +248,39 @@ def _reason_line(out: Mapping[str, Any]) -> str:
         verdict = str(_get(first, "verdict") or "").strip()
         why = str(_get(first, "why") or "").strip()
         return f"{verdict} — {why}" if verdict and why else (verdict or why)
-    why = list(_get(_get(out, "modifiers") or {}, "confidence_why") or ())
-    return "; ".join(str(w) for w in why[:2]).capitalize() if why else ""
+
+    mods = _get(out, "modifiers") or {}
+    why = list(_get(mods, "confidence_why") or ())
+    line = "; ".join(str(w) for w in why[:2]).capitalize() if why else ""
+
+    # ⚠️ `confidence_why` only records what MOVED the confidence, and a cycle can
+    # have one positive entry and nothing else. That produced a reason reading
+    # "Dealer hedging supports the move" directly under "Fade risk HIGH 65%" —
+    # the one-sidedness a review flagged as the card contradicting itself.
+    #
+    # `risk_level` is the layer's own conclusion, already computed in
+    # `_modifiers` from the same fade figure, and it reached no surface at all
+    # (principle 12: a computed decision must be inspectable). Appended, not
+    # re-worded — the counterweight is the engine's, not this panel's.
+    # ⚠️ MEDIUM as well as HIGH, and it names the number.
+    #
+    # This fired only on HIGH (fade ≥ 60), so a cycle reading **fade 55%** —
+    # MEDIUM — showed the positive half alone: "Dealer hedging supports…" sitting
+    # directly under a GUARDIAN WAIT, which was reported as the card contradicting
+    # itself. 55% favours a failed move, and that is the reason the Guardian is
+    # waiting; it has to appear in the sentence that explains the wait.
+    #
+    # The percentage is `_modifiers`' own `fade_probability`, quoted not derived,
+    # and "wait for confirmation" describes the greeks' limitation — it does not
+    # manufacture a side. The Guardian's verdict is untouched either way.
+    risk = str(_get(mods, "risk_level") or "").strip().upper()
+    fade = _f(_get(mods, "fade_probability"))
+    if risk in ("HIGH", "MEDIUM") and "fade" not in line.lower():
+        tail = (f"fade risk {fade:.0f}%; wait for confirmation"
+                if fade is not None else
+                f"{risk.lower()} fade/pin risk; wait for confirmation")
+        line = f"{line} — {tail}" if line else tail.capitalize()
+    return line
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -178,8 +300,18 @@ def micro(out: Any = None) -> str:
     posture = str(_get(dealer, "posture") or "").upper()
     if not posture or posture == "UNKNOWN":
         return ""
-    emoji = POSTURE.get(posture, POSTURE["UNKNOWN"])[0]
-    bits = [f"{emoji} dealer {posture.lower()}"]
+    # ⚠️ Same fix as the card, and it matters more here: the chip is frozen on
+    # every screen, so "dealer supportive" with no object would be the version a
+    # trader reads all session. With no flow direction, say what hedging does to
+    # movement instead.
+    if _get(dealer, "relative_to"):
+        emoji = POSTURE.get(posture, POSTURE["UNKNOWN"])[0]
+        bits = [f"{emoji} dealer {posture.lower()} of flow"]
+    else:
+        amp = AMPLIFICATION.get(str(_get(dealer, "amplification") or "").upper())
+        if not amp:
+            return ""
+        bits = [f"🟡 dealers {amp}"]
     gamma = str(_get(dealer, "gamma") or "").upper()
     if gamma in ("POSITIVE", "NEGATIVE"):
         bits.append(f"{'+' if gamma == 'POSITIVE' else '−'}γ")
@@ -202,7 +334,13 @@ def one_line(out: Any = None) -> str:
     posture = str(_get(dealer, "posture") or "").upper()
     if not posture or posture == "UNKNOWN":
         return ""
-    parts = [f"Dealers {posture.lower()}"]
+    if _get(dealer, "relative_to"):
+        parts = [f"Dealers {posture.lower()} of flow"]
+    else:
+        amp = AMPLIFICATION.get(str(_get(dealer, "amplification") or "").upper())
+        if not amp:
+            return ""
+        parts = [f"Dealers {amp}"]
     gamma = str(_get(dealer, "gamma") or "").title()
     if gamma in ("Positive", "Negative"):
         parts.append(f"{gamma.lower()} gamma")
