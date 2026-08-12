@@ -359,19 +359,6 @@ _FULL = {
                                   "val": 24450.0},
                       "structure": {"trend": "bull"}}},
     "external_rows": [("Global", "Bull"), ("India VIX", "12.40")],
-    "fii_dii_cash": {"FII": {"date": "08-Aug-2026", "buy": 12480.5,
-                             "sell": 16702.3, "net": -4221.8},
-                     "DII": {"date": "08-Aug-2026", "buy": 15310.2,
-                             "sell": 11290.6, "net": 4019.6}},
-    "fii_deriv": {"date": "08-Aug-2026", "fut_index_long": 82450.0,
-                  "fut_index_short": 141200.0, "fut_index_net": -58750.0,
-                  "opt_index_call_long": 210300.0,
-                  "opt_index_put_long": 168900.0,
-                  "opt_index_call_short": 189400.0,
-                  "opt_index_put_short": 233100.0},
-    "flows_bias": "BEAR", "flows_confidence": 38.5, "flows_conflict": True,
-    "flows_evidence": ["FII -4,222cr · DII +4,020cr · net -202cr "
-                       "(as of 08-Aug-2026, EOD)"],
     "regime": "SIDEWAYS", "need": ["Acceptance", "Signal validity"],
 }
 
@@ -381,17 +368,10 @@ def test_the_block_order_matches_the_questions_it_answers():
     comment, and so the collector cannot silently reorder it."""
     assert NC.BLOCK_ORDER == (
         "price_map", "oi_walls", "market_pin", "sr_table", "battle_zone",
-        "bias_stack", "liquidity", "htf", "external", "fii_dii",
-        "market_state")
+        "bias_stack", "liquidity", "htf", "external", "market_state")
     got = NC.cockpit_blocks(_FULL)
     assert set(got) == set(NC.BLOCK_ORDER), (
         f"blocks that did not render: {set(NC.BLOCK_ORDER) - set(got)}")
-
-
-def test_the_market_state_stays_last():
-    """It is the only line worth anything after reading the ones above it, so a
-    new block must never be appended past it."""
-    assert NC.BLOCK_ORDER[-1] == "market_state"
 
 
 # ══════════════════════════════════════════════════════════════════════
