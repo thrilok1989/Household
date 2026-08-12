@@ -215,14 +215,23 @@ def _strike_verdict(st, r) -> None:
 
 
 def _hv_settings(st) -> None:
-    """⚙️ The three knobs the reference indicator exposes, and nothing more.
+    """⚙️ The three knobs the reference indicator exposes, behind an Apply button.
 
-    ⚠️ It WRITES `_hv_settings` and computes nothing. `vob_minimal._hv_points` reads
-    the same key and fills anything absent from `volume_points.defaults()`, so the
+    ⚠️ Apply, not live. The settings expander renders AFTER the chart in
+    `_charts_screen` — the chart is drawn first, from `_hv_settings`, and this comes
+    below it. So writing the settings on every keystroke changed nothing visible until
+    the NEXT rerun: the chart above had already drawn with the old values. Reported as
+    "changing the settings doesn't change the chart."
+
+    Now the number inputs hold PENDING values (their own widget state), and Apply
+    commits them: it writes `_hv_settings`, drops the cached per-panel profiles — which
+    key on bar count, so a changed threshold alone would not invalidate them — and
+    calls `st.rerun()`, so the chart above redraws with the new values this instant
+    rather than at the next bar close.
+
+    It still WRITES `_hv_settings` and computes nothing. `vob_minimal._hv_points`
+    reads that key and fills anything absent from `volume_points.defaults()`, so the
     control and the computation cannot disagree about a default.
-
-    Collapsed by default: a settings row permanently open above the leg tabulation
-    costs that space on every screen to say nothing most days.
     """
     try:
         from ..volume_points import defaults
@@ -230,47 +239,63 @@ def _hv_settings(st) -> None:
         return
     try:
         d = defaults()
-        cur = dict(d)
-        cur.update({k: v for k, v in
-                    (st.session_state.get("_hv_settings") or {}).items()
-                    if k in d})
+        applied = dict(d)
+        applied.update({k: v for k, v in
+                        (st.session_state.get("_hv_settings") or {}).items()
+                        if k in d})
+        # ⚠️ Seed the widget keys once, then let the widgets own their state — no
+        # `value=` on the inputs below. Passing both `value=` and a `key=` whose slot
+        # is already set makes Streamlit ignore one and warn; seeding first and
+        # omitting `value=` is the pattern that keeps an edit pending across the
+        # rerun it triggers (verified on a live Streamlit before writing this).
+        for field, key in (("left", "hv_left"), ("right", "hv_right"),
+                           ("filter_vol", "hv_filter")):
+            st.session_state.setdefault(key, applied[field])
+
         with st.expander("⚙️ High-volume pivots — settings", expanded=False):
             c1, c2, c3 = st.columns(3)
             with c1:
-                left = st.number_input(
-                    "Left bars", min_value=2, max_value=60,
-                    value=int(cur["left"]), step=1, key="hv_left",
+                st.number_input(
+                    "Left bars", min_value=2, max_value=60, step=1, key="hv_left",
                     help="Bars before a candidate that must not exceed it. "
                          "On a 1-minute chart, 15 is a quarter-hour.")
             with c2:
-                right = st.number_input(
-                    "Right bars", min_value=2, max_value=60,
-                    value=int(cur["right"]), step=1, key="hv_right",
+                st.number_input(
+                    "Right bars", min_value=2, max_value=60, step=1, key="hv_right",
                     help="Bars after it. A pivot is only confirmed once these "
                          "have printed, so a larger value means fewer, later "
                          "pivots — never earlier ones.")
             with c3:
-                filt = st.number_input(
-                    "Volume filter", min_value=0.0, max_value=6.0,
-                    value=float(cur["filter_vol"]), step=0.1, key="hv_filter",
+                st.number_input(
+                    "Volume filter", min_value=0.0, max_value=6.0, step=0.1,
+                    key="hv_filter",
                     help="On the normalised scale: the pivot's rolling volume "
                          "÷ the session's 95th percentile × 5. Lower keeps more "
                          "pivots. It is relative, so one value works on NIFTY "
                          "and on a ₹90 leg alike.")
-            st.session_state["_hv_settings"] = {
-                "left": int(left), "right": int(right),
-                "filter_vol": float(filt)}
-            # ⚠️ The cached per-panel profiles carry the OLD pivots, and they key on
-            # bar count — which does not change when a setting does. Cleared here so
-            # a changed threshold takes effect on this rerun rather than at the next
-            # bar close.
-            if {"left": int(left), "right": int(right),
-                    "filter_vol": float(filt)} != cur:
+
+            pending = {"left": int(st.session_state["hv_left"]),
+                       "right": int(st.session_state["hv_right"]),
+                       "filter_vol": float(st.session_state["hv_filter"])}
+            changed = pending != applied
+
+            if st.button("Apply", type="primary", disabled=not changed,
+                         key="hv_apply"):
+                st.session_state["_hv_settings"] = pending
                 st.session_state.pop("_panel_profiles", None)
-            st.caption(
-                f"defaults {d['left']}/{d['right']} bars · filter "
-                f"{d['filter_vol']}. A strongly trending series has no swing "
-                f"pivots at any setting — the window's extreme sits at its edge.")
+                st.rerun()
+
+            if changed:
+                st.caption(
+                    f"⏳ pending — click Apply to redraw at {pending['left']}/"
+                    f"{pending['right']} bars · filter {pending['filter_vol']:g}. "
+                    f"Now showing {applied['left']}/{applied['right']} · "
+                    f"{applied['filter_vol']:g}.")
+            else:
+                st.caption(
+                    f"defaults {d['left']}/{d['right']} bars · filter "
+                    f"{d['filter_vol']:g}. A strongly trending series has no swing "
+                    f"pivots at any setting — the window's extreme sits at its edge.")
     except Exception as err:
         _dbg_caption(st, "hv_settings", f"settings unavailable: {err}")
 

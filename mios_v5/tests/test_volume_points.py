@@ -406,9 +406,12 @@ def test_the_computation_reads_the_settings_and_falls_back_to_defaults():
     assert {"left", "right", "filter_vol"} <= keys
 
 
-def test_changing_a_setting_takes_effect_now_not_at_the_next_bar_close():
-    """⚠️ `_panel_profiles` keys on BAR COUNT, which does not change when a setting
-    does — so a new threshold would sit unused until the next bar closed."""
+def test_apply_commits_the_settings_pops_the_cache_and_reruns():
+    """⚠️ Reported: changing a setting did not change the chart. The expander renders
+    AFTER the chart in `_charts_screen`, so writing settings on every keystroke took a
+    whole extra rerun to show. Apply commits `_hv_settings`, drops `_panel_profiles`
+    (which key on BAR COUNT, so a changed threshold alone would not invalidate them)
+    and calls `st.rerun()` — the chart above redraws with the new values at once."""
     d6 = (_ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
     fn = next(n for n in ast.walk(ast.parse(d6))
               if isinstance(n, ast.FunctionDef) and n.name == "_hv_settings")
@@ -417,7 +420,17 @@ def test_changing_a_setting_takes_effect_now_not_at_the_next_bar_close():
     assert "_hv_settings" in keys and "_panel_profiles" in keys
     calls = {getattr(c.func, "attr", "") for c in ast.walk(fn)
              if isinstance(c, ast.Call)}
-    assert "pop" in calls, "the stale cached profiles are never cleared"
-    # the control offers exactly the three knobs and computes nothing
-    assert "number_input" in calls
+    assert {"button", "rerun", "pop", "number_input", "setdefault"} <= calls, calls
+    # ⚠️ The commit — writing `_hv_settings`, popping the cache, rerunning — must live
+    # INSIDE the Apply button's branch, or it fires on every keystroke and there was
+    # no point to the button. Find the `if st.button(...)` and check its body.
+    apply_if = next(
+        n for n in ast.walk(fn) if isinstance(n, ast.If)
+        and any(isinstance(c, ast.Call)
+                and getattr(c.func, "attr", "") == "button"
+                for c in ast.walk(n.test)))
+    body_calls = {getattr(c.func, "attr", "") for c in ast.walk(apply_if)
+                  if isinstance(c, ast.Call)}
+    assert "rerun" in body_calls and "pop" in body_calls
+    # still computes nothing
     assert not {"high_volume_pivots", "pivots"} & calls
