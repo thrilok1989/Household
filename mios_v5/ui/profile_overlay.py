@@ -188,7 +188,8 @@ def draw(fig, row: int, col: int,
          profile: Optional[Mapping[str, Any]] = None,
          shape: Optional[Any] = None,
          max_opacity: float = MAX_OPACITY,
-         labels_inside: bool = False) -> Dict[str, int]:
+         labels_inside: bool = False,
+         x: Optional[Sequence[Any]] = None) -> Dict[str, int]:
     """Add the profile to one panel. Returns what was drawn.
 
     `labels_inside` turns the POC/VAH/VAL text back into the panel instead of
@@ -206,7 +207,7 @@ def draw(fig, row: int, col: int,
     never take the chart down. A terminal that fails to render because one
     overlay was wrong is worse than a terminal with no overlay.
     """
-    drawn = {"bands": 0, "levels": 0, "badge": 0}
+    drawn = {"bands": 0, "levels": 0, "badge": 0, "dyn_poc": 0}
     if fig is None:
         return drawn
     try:
@@ -226,6 +227,34 @@ def draw(fig, row: int, col: int,
                                       else None),
                           annotation_font=dict(size=8, color=lv["colour"]))
             drawn["levels"] += 1
+
+        # 📈 The dynamic PoC as a STEPLINE, when the caller supplied an x axis.
+        #
+        # ⚠️ A stepline, not a smooth line: the PoC is the busiest price BIN, so it
+        # holds a level and then relocates a whole bin at a time. Interpolating
+        # between two bins draws prices that were never the point of control. This is
+        # the same reason the daily multi-window curves use `shape="hv"`.
+        #
+        # The horizontal `dynamic_poc` level above marks where it is NOW and is
+        # labelled; this shows how it got there. Both come from the one
+        # `compute_dynamic_poc`.
+        series = (profile or {}).get("dynamic_poc_series")
+        if x is not None and series:
+            n = min(len(x), len(series))
+            ys = [_f(v) for v in series[:n]]
+            if any(v is not None for v in ys):
+                colour = LEVEL_STYLE["dynamic_poc"][0]
+                # ⚠️ `fig.add_scatter`, NOT `go.Scatter` — this module imports no
+                # plotly at all (a guard test enforces it) and only ever calls
+                # methods on the figure it was handed. `add_scatter` is the same
+                # trace with no import, which is why the guard can stay strict.
+                fig.add_scatter(
+                    x=list(x)[:n], y=ys, mode="lines", name="Dyn PoC",
+                    showlegend=False, connectgaps=False,
+                    hovertemplate="Dyn PoC %{y:,.2f}<extra></extra>",
+                    line=dict(color=colour, width=1.2, shape="hv", dash="dot"),
+                    row=row, col=col)
+                drawn["dyn_poc"] = 1
 
         badge = shape_badge(shape)
         if badge:

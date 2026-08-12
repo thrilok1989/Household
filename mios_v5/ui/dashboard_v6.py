@@ -2337,6 +2337,49 @@ def _panel_profile(st, tag, df=None, ready: Optional[Dict[str, Any]] = None):
     except Exception:
         pass
 
+    # 📈 The dynamic PoC for THIS panel, on this panel's own series.
+    #
+    # ⚠️ `profile_overlay` has drawn `dynamic_poc` since it was written and nothing
+    # ever set the key, so the line has never appeared — on NIFTY or on either leg.
+    # Set here, through the `_premium_builders` bridge the app publishes, because
+    # `mios_v5` may not import the app and `compute_dynamic_poc` must stay the one
+    # implementation.
+    #
+    # Per panel, never copied across: an index PoC on a premium axis marks a price
+    # that leg cannot trade — the same rule the money-flow profile above follows.
+    if df is not None and not getattr(df, "empty", True) and len(df) >= 3:
+        try:
+            _dyn = (st.session_state.get("_premium_builders") or {}).get(
+                "dynamic_poc")
+            if _dyn is not None:
+                _line = _dyn(df)
+                # A list of None is not a PoC — leave the keys absent so the
+                # overlay draws nothing rather than an empty trace.
+                if _line and any(v is not None for v in _line):
+                    # ⚠️ TWO keys, because they are two different reads and the
+                    # existing branch wanted the first one. `profile_overlay.levels`
+                    # runs `_f()` over `dynamic_poc`, and `_f(a_list)` is None — so
+                    # even had anything set the key, handing it the series would have
+                    # drawn nothing. The scalar is the current level it labels; the
+                    # series is the curve that makes it DYNAMIC, which is the whole
+                    # point of the indicator.
+                    profile["dynamic_poc"] = next(
+                        (v for v in reversed(_line) if v is not None), None)
+                    profile["dynamic_poc_series"] = _line
+        except Exception:
+            pass
+        # 📍 High-volume pivots for this panel, on this panel's own volume
+        # distribution — see `_hv_points`.
+        try:
+            _hv = (st.session_state.get("_premium_builders") or {}).get(
+                "hv_points")
+            if _hv is not None:
+                _pts = _hv(df)
+                if _pts:
+                    profile["hv_points"] = _pts
+        except Exception:
+            pass
+
     if not ready:
         st.session_state.setdefault("_panel_profiles", {})[tag] = profile
     return profile

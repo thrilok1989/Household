@@ -6474,6 +6474,28 @@ def _poc_lines_cached(highs, lows, vols):
     return _ps.lines(highs, lows, vols)
 
 
+def _hv_points(frame):
+    """📍 One panel's high-volume pivots, from its own frame.
+
+    A thin adapter: the frame's columns become the plain sequences
+    `volume_points.high_volume_pivots` takes, so that module stays pure and the
+    thresholds live in one place rather than being re-picked per caller.
+
+    Volume is judged against the panel's OWN distribution — a rolling sum over a high
+    percentile of itself — so NIFTY and a ₹90 premium leg can share one threshold
+    honestly. An absolute lot count could not.
+    """
+    if frame is None or getattr(frame, 'empty', True) or len(frame) < 40:
+        return []
+    try:
+        from mios_v5.volume_points import high_volume_pivots
+        return high_volume_pivots(
+            list(frame['high']), list(frame['low']), list(frame['close']),
+            list(frame['volume']) if 'volume' in frame.columns else None)
+    except Exception:
+        return []
+
+
 def _publish_poc_series():
     """🏛 Publish the rolling POC curves + the layered read for the daily view.
 
@@ -14197,6 +14219,25 @@ def _publish_atm_legs(api, spot, option_data, render_id):
         'mfp': lambda f: calculate_money_flow_profile(f, num_rows=25,
                                                       source='Money Flow'),
         'ignition': detect_ignition,
+        # 📈 The BigBeluga dynamic PoC, per panel.
+        #
+        # ⚠️ `profile_overlay` has had a `dynamic_poc` branch — colour, dash style,
+        # "Dyn POC" label and all — since it was written, and NOTHING EVER SET THE
+        # KEY. `compute_dynamic_poc` was called for the liquidity context, for a
+        # bias push and for the daily read, but never onto the profile dicts the
+        # chart draws, so `p.get("dynamic_poc")` was always None and the line has
+        # never appeared on any panel. A reader with no writer, which is the pattern
+        # this repo keeps catching.
+        #
+        # Published as a BUILDER rather than a value because each panel needs its
+        # own: the index PoC on a premium axis marks a price that leg can never
+        # trade, which is the same rule `_panel_profile` already follows for the
+        # money-flow profile. And through this bridge rather than a second port —
+        # `compute_dynamic_poc` is the existing one and stays the only one.
+        'dynamic_poc': lambda f: (compute_dynamic_poc(f, bins=20) or ([],))[0],
+        # 📍 High-volume pivots, per panel. ~2 ms on a session's bars, so it needs
+        # no cache of its own beyond `_panel_profile`'s.
+        'hv_points': _hv_points,
     }
     st.session_state['_atm_leg_api'] = api
 

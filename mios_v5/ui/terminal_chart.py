@@ -305,10 +305,14 @@ def terminal_chart(nifty_df=None, call_df=None, put_df=None,
     # the index one. Stage 71.8's audit settled that: a premium profile is
     # computed natively per leg, and drawing the index's POC on a premium panel
     # would mark a price that series can never trade.
-    for prof, (r, c) in zip((nifty_profile, call_profile, put_profile),
-                            positions):
+    # The panel's own x axis goes with it, so the dynamic-PoC stepline is drawn
+    # against the same timeline as that panel's candles. `parsed` is already
+    # aligned onto `timeline`, so all three share one clock.
+    for prof, (r, c), (_nm, _p) in zip(
+            (nifty_profile, call_profile, put_profile), positions, parsed):
         if prof:
-            _profile_overlay(fig, prof, r, c)
+            _profile_overlay(fig, prof, r, c,
+                             x=(_p or {}).get("x") if _p else None)
 
     # ── levels: NIFTY panel only ──
     for key, price in (levels or {}).items():
@@ -415,7 +419,8 @@ ZONE_TONE = {
 }
 
 
-def _profile_overlay(fig, profile: Dict[str, Any], row: int, col: int) -> None:
+def _profile_overlay(fig, profile: Dict[str, Any], row: int, col: int,
+                     x: Optional[Sequence[Any]] = None) -> None:
     """One panel's liquidity & sentiment profile.
 
     `profile` is whatever `calculate_money_flow_profile` returned, optionally
@@ -430,7 +435,17 @@ def _profile_overlay(fig, profile: Dict[str, Any], row: int, col: int) -> None:
     """
     from .profile_overlay import draw
     draw(fig, row, col, rows=profile.get("rows"), profile=profile,
-         shape=profile.get("shape"), labels_inside=(col == LEG_COL))
+         shape=profile.get("shape"), labels_inside=(col == LEG_COL), x=x)
+
+    # 📍 High-volume pivots and their levels, on the same panel and the same axis.
+    # A separate module because it draws per-bar geometry rather than horizontal
+    # profile levels, and mixing the two would put bar indices into a function whose
+    # whole contract is prices.
+    try:
+        from .volume_points_overlay import draw as _hv_draw
+        _hv_draw(fig, row, col, points=profile.get("hv_points"), x=x)
+    except Exception:
+        pass
 
 
 def _leg_overlay(fig, levels, zones, row: int, col: int) -> None:

@@ -306,7 +306,7 @@ def test_no_badge_tone_is_a_retired_grey():
 
 def test_drawing_never_raises_without_plotly():
     assert PO.draw(None, 1, 1, rows=_p_shape()) == {"bands": 0, "levels": 0,
-                                                    "badge": 0}
+                                                    "badge": 0, "dyn_poc": 0}
 
 
 # ══════════════════════════════════════════════════════════════════════
