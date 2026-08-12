@@ -663,7 +663,7 @@ def test_the_charts_tab_computes_nothing():
     # tabulation was drawn here because it belongs under the charts it explains —
     # it reads `_leg_bias_cache`, which `_render_main_analyzer` fills.
     _render = {"markdown", "caption", "get", "leg_table_html", "_feed_reason",
-               "_dbg_caption"}
+               "_dbg_caption", "_strike_oi_charts"}
     assert called <= {"_leg_reads", "dominance", "_terminal_chart"} | _render, (
         f"unexpected calls in _charts_screen: {called}")
     # ⚠️ The property that actually matters: no BUILDER is invoked here.
