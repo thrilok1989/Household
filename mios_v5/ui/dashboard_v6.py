@@ -1011,6 +1011,29 @@ def _charts_screen(st, fr: Dict[str, Any]) -> None:
     call, put, call_tag, put_tag = _leg_reads(st, fr)
     _terminal_chart(st, fr, call_tag, put_tag, dominance(call, put))
 
+    # 🧮 The ATM±1 leg tabulation, directly under the charts it explains.
+    #
+    # ⚠️ `build_leg_bias_table` has computed these 19 per-signal columns every
+    # cycle and NOTHING ever drew them. The rows reached `_leg_bias_cache`, whose
+    # consumers — Stage 14, three alert paths, a gate check — all take the
+    # VERDICTS and discard the detail, so the trader was told "Leg Fast Verdict:
+    # BEARISH" with no way to see which signal voted that way.
+    #
+    # Read from the published cache, not rebuilt: `_render_main_analyzer` owns the
+    # call and re-running it here would be a second set of 6 leg computations per
+    # cycle, and two answers to one question.
+    try:
+        from .leg_table_panel import leg_table_html
+        _lt = st.session_state.get("_leg_bias_cache") or (None, None)
+        _html = leg_table_html(_lt[0], _lt[1])
+        if _html:
+            st.markdown(_html, unsafe_allow_html=True)
+        else:
+            st.caption("🧮 ATM±1 leg tabulation — " + _feed_reason(st)
+                       + " It needs the six ATM±1 leg candle series.")
+    except Exception as err:
+        _dbg_caption(st, "leg_table_panel", f"Leg tabulation unavailable: {err}")
+
 
 # ── 1 · DECISION ────────────────────────────────────────────────────────
 def _run_execution_chain(st) -> None:
