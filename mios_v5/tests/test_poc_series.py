@@ -373,3 +373,50 @@ def test_the_module_is_not_a_second_price_chart():
     assert not list((_ROOT / "mios_v5" / "ui").glob("poc*chart*.py"))
     src = (_ROOT / "mios_v5" / "ui" / "poc_structure.py").read_text()
     assert "Candlestick" not in src and "add_candlestick" not in src
+
+
+# ── the daily frame, which had one silent source ───────────────────────
+
+def test_the_daily_history_has_two_sources_and_records_which_failed():
+    """⚠️ REPORTED AS "not displayed in chart", and this was why. The daily frame
+    came from ONE `yfinance` download inside `except Exception: pass`. When it
+    failed there was no error, no caption and no frame — so Stage 45's Daily /
+    Weekly / Monthly / Yearly profiles were never built, the stage still reported
+    OK on its 1H and 4H profiles alone, and nothing on any screen said so. A silent
+    single point of failure under the whole higher-timeframe layer.
+    """
+    src = (_ROOT / "vob_minimal.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "build_htf_profiles")
+    body = ast.get_source_segment(src, fn) or ""
+    assert "get_daily_data" in body, "Dhan is not tried for daily bars"
+    assert "yfinance" in body, "the yfinance fallback was removed rather than kept"
+    assert body.index("get_daily_data") < body.index("import yfinance"), \
+        "Dhan should be tried first — the app is already authenticated with it"
+    assert "_htf_daily_error" in body, "a failure must be recorded, not swallowed"
+
+
+def test_dhan_owns_a_daily_endpoint_alongside_its_intraday_one():
+    src = (_ROOT / "vob_minimal.py").read_text()
+    tree = ast.parse(src)
+    fn = next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+               and n.name == "get_daily_data"), None)
+    assert fn is not None, "no daily endpoint on the Dhan client"
+    body = ast.get_source_segment(src, fn) or ""
+    assert "charts/historical" in body
+    # the daily sibling of the intraday call, framed the same way
+    assert "fromDate" in body and "toDate" in body
+
+
+def test_the_absence_names_the_source_that_failed():
+    """⚠️ "daily history not fetched yet" is the honest truth about the data and
+    tells the reader nothing they can act on. The panel now names what each source
+    said, and says the same frame is what Stage 45's slow profiles need."""
+    src = (_ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_poc_structure")
+    body = ast.get_source_segment(src, fn) or ""
+    assert "_htf_daily_error" in body
+    # loud, not a caption: an absent higher-timeframe layer is not a footnote
+    assert "st.warning" in body
+    assert "Stage 45" in body
