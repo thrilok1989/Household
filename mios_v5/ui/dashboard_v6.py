@@ -112,6 +112,25 @@ def _dbg_caption(st, source: str, message) -> None:
             pass
 
 
+def _feed_reason(st) -> str:
+    """Why there is no data, in `feed_status`' words.
+
+    ⚠️ One owner for the answer. Three panels stand by on a missing chain and each
+    used to explain it differently — none of them mentioning that before 09:15
+    there simply is no chain to fetch, which made a healthy morning look broken.
+    """
+    try:
+        from datetime import datetime
+
+        import pytz
+
+        from ..feed_status import sentence
+        return sentence(st.session_state,
+                        datetime.now(pytz.timezone("Asia/Kolkata")))
+    except Exception:
+        return "the option chain has not arrived yet."
+
+
 def _spot_price(state):
     """NIFTY spot from the one owner — `mios_v5.spot`.
 
@@ -328,9 +347,9 @@ def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
     })
 
     if not blocks:
-        st.info("🧭 NIFTY cockpit standing by — it reads the Market Picture, "
-                "the volume profile and the chain. Those land once the option "
-                "chain and candles are both in.")
+        st.info("🧭 NIFTY cockpit standing by — " + _feed_reason(st)
+                + " It reads the Market Picture, the volume profile and the "
+                  "chain.")
         return
 
     left, right = st.columns(2)
@@ -447,9 +466,14 @@ def _options_cockpit(st, fr: Dict[str, Any]) -> None:
     })
 
     if not blocks:
-        st.info("📈 Options cockpit standing by — it reads Stage 71.7's premium "
-                "energy and Stage 71.8's premium structure. Those land once the "
-                "chain and the ATM legs are both in.")
+        # ⚠️ The old text named the two stages and left the trader to guess
+        # whether the app was broken. At 08:25 it appears on a healthy app,
+        # because there is no option chain before 09:15 — and everything here
+        # hangs off the chain. `feed_status` gives the same answer the Trade Card
+        # gives, so one silence cannot get two explanations.
+        st.info("📈 Options cockpit standing by — " + _feed_reason(st)
+                + " Premium energy (71.7) and premium structure (71.8) both "
+                  "need the chain and the ATM legs.")
         return
 
     st.markdown(blocks.get("option_header", ""), unsafe_allow_html=True)

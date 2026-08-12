@@ -1489,6 +1489,11 @@ def _dhan_post(url, payload, max_retries=4):
                                      timeout=min(6.0, remaining))
             if response.status_code == 401:
                 st.session_state['_dhan_token_expired'] = True
+                # ⚠️ Record the reason too. Every standing-by panel falls back to
+                # "chain fetch returned nothing" when `_dhan_last_error` is unset,
+                # so a token expiry — the one cause only the user can fix — was
+                # being reported as an unexplained empty fetch.
+                st.session_state['_dhan_last_error'] = 'Dhan token expired (401)'
                 st.error("🔑 **Dhan token expired.** Open **Refresh Dhan Token** in the sidebar and paste your new token.")
                 return None
             if response.status_code == 429:
@@ -1507,6 +1512,8 @@ def _dhan_post(url, payload, max_retries=4):
                     st.warning(f"⏳ Rate limited by Dhan API. Retrying in {d}s... (Attempt {attempt+1}/{max_retries})")
                     time.sleep(d)
                     continue
+                st.session_state['_dhan_last_error'] = (
+                    f"rate limited (429) after {max_retries} retries")
                 st.error("❌ Rate limit exceeded after multiple retries. Please wait a moment and refresh.")
                 return None
             # ── 5xx: Dhan is broken, not us — and it is usually transient ──
@@ -3603,11 +3610,18 @@ def analyze_option_chain(selected_expiry=None, pivot_data=None, vob_data=None):
 
     expiry_data = get_dhan_expiry_list_cached(NIFTY_UNDERLYING_SCRIP, NIFTY_UNDERLYING_SEG)
     if not expiry_data or 'data' not in expiry_data:
+        # ⚠️ Record WHICH fetch failed. Returning None here made every downstream
+        # panel say "no option chain", when the chain was never requested — the
+        # EXPIRY LIST is what failed, and it is a different endpoint.
+        st.session_state.setdefault('_dhan_last_error',
+                                    'expiry list unavailable (Dhan /optionchain/expirylist)')
         st.error("Failed to get expiry list from Dhan API")
         return None
 
     expiry_dates = expiry_data['data']
     if not expiry_dates:
+        st.session_state.setdefault('_dhan_last_error',
+                                    'Dhan returned an empty expiry list')
         st.error("No expiry dates available")
         return None
 
@@ -14677,14 +14691,34 @@ def _render_main_analyzer():
             except Exception as err:
                 st.caption(f"Trade Card unavailable: {err}")
         else:
-            _why = ("no option chain — " + (st.session_state.get('_dhan_last_error')
-                                            or "chain fetch returned nothing")
-                    if not option_data else
-                    "no spot price" if not underlying else
-                    "Market Picture has not produced a read yet")
-            st.info(f"🎯 **Trade Card** standing by — {_why}. "
-                    "It needs the Market Picture, which the bias dashboard "
-                    "publishes once the chain and candles are both in.")
+            # ⚠️ Say WHY, not just "nothing arrived".
+            #
+            # This used to read "no option chain — chain fetch returned nothing"
+            # whenever `_dhan_last_error` was unset — which is most of the time,
+            # because the 401 and 429 paths never recorded one. Worse, it says it
+            # at 08:25 on a perfectly healthy app: NSE publishes no chain before
+            # 09:15, so the single most common reason for this message was "the
+            # market is not open yet" and it read like a fault.
+            #
+            # `feed_status` owns the answer so the Trade Card, the two cockpits
+            # and anything else that stands by cannot give three different
+            # explanations of one silence.
+            # ⚠️ No calm glyph for a clock state. Dhan serves the chain outside
+            # market hours — figures freeze, they do not vanish — and there is no
+            # market-hours gate on the fetch, so an EMPTY chain at 08:25 is a real
+            # fetch failure. Showing a reassuring 🕒 for it would be the same
+            # mistake as the old "chain fetch returned nothing".
+            try:
+                from mios_v5.feed_status import read as _feed_read
+                _code, _feed = _feed_read(
+                    st.session_state,
+                    datetime.now(pytz.timezone('Asia/Kolkata')))
+            except Exception:
+                _code, _feed = None, "no option chain"
+            _why = (_feed if not option_data else
+                    "no spot price yet" if not underlying else
+                    "the Market Picture has not produced a read yet")
+            st.info(f"🎯 **Trade Card** standing by — {_why}")
 
     # ── 11 · the MIOS pass — every input above is now current ───────────
     try:
