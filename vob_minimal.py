@@ -1557,6 +1557,26 @@ def get_dhan_option_chain(underlying_scrip: int, underlying_seg: str, expiry: st
                       max_retries)
 
 
+@st.cache_resource(show_spinner=False)
+def iv_store():
+    """📈 The ATM IV history, one store for the whole process.
+
+    ⚠️ `st.cache_resource`, not `st.cache_data` and not `session_state`:
+
+    * **not `session_state`** — that is per browser session, so a restart or a
+      second tab began with no history and `volatility_state`, which needs two
+      samples, reported "not reporting". Losing the history on every reload was
+      the whole complaint.
+    * **not `cache_data`** — it returns a COPY, so appends would be discarded.
+      `cache_resource` hands back the same mutable object every time, which is
+      exactly what a growing series needs.
+
+    Bounded by `iv_history.CAP`, so sharing it across sessions cannot grow
+    without limit. `mios_v5.iv_history` owns what goes in.
+    """
+    return {"samples": []}
+
+
 def get_index_spot_ltp(scrip: int = NIFTY_UNDERLYING_SCRIP, seg: str = NIFTY_UNDERLYING_SEG):
     """Live index spot from Dhan's marketfeed/ltp endpoint (NIFTY 50 = 13/IDX_I).
 
@@ -14609,10 +14629,26 @@ def _render_main_analyzer():
         try:
             _atm_row = df_summary.iloc[(df_summary['Strike'] - underlying).abs().argsort()[:1]]
             _iv = float(_atm_row.get('CE_IV', pd.Series([0])).iloc[0] or 0)
-            if _iv > 0:
-                _ivh = st.session_state.setdefault('_iv_history', [])
-                _ivh.append(_iv)
-                st.session_state['_iv_history'] = _ivh[-120:]
+            # 📈 Into the cache_resource store, not session_state.
+            #
+            # ⚠️ `_iv_history` lived in session_state, which is PER BROWSER
+            # SESSION — so every restart and every new tab started empty and the
+            # Adaptive Greeks card said "IV: not reporting" until two samples
+            # accumulated. `volatility_state` needs two.
+            #
+            # It also appended on EVERY rerun with no timestamp, so a stalled
+            # chain pushed the same number repeatedly and `vals[-1] - vals[0]`
+            # compared two readings of unknown — possibly identical — age.
+            # `iv_history.record` dedups and stamps; see its module docstring.
+            from mios_v5 import iv_history as _ivmod
+            _ivs = iv_store()
+            # One-time bridge so an already-running session keeps its history
+            # instead of restarting the warm-up at deploy.
+            _ivmod.adopt(_ivs, st.session_state.get('_iv_history'))
+            _ivmod.record(_ivs, _iv)
+            # Still published for any reader that has not moved over yet — but
+            # sourced from the store, so there is one owner of the series.
+            st.session_state['_iv_history'] = _ivmod.series(_ivs)
         except Exception:
             pass
 
