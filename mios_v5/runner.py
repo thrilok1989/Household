@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Optional
 
 import pytz
 
@@ -46,22 +46,6 @@ def run_mios_pass(session_state, db=None,
         "prev_report": session_state.get("_mios_prev_report"),
         # previous-pass snapshot for the Evolution engine (Stage 29)
         "prev_snapshot": session_state.get("_mios_prev_snapshot"),
-        # ⚠️ Stage 33's gap signal, which had never once fired.
-        #
-        # `stage33_event_impact` tests
-        #     (raw.get("gap_today") or {}).get("type") in ("GAP-UP", "GAP-DOWN")
-        # and nothing ever put `gap_today` into `raw`. The data was there the
-        # whole time: `capture_day_open_and_gap` publishes `_gap_today` as
-        # `{'type', 'pct', 'open', 'prev_close'}` — the exact `type` key the
-        # engine checks — and the app header reads it for the previous close.
-        # Forwarded, not recomputed; the producer stays the only owner.
-        "gap_today": session_state.get("_gap_today"),
-        # Stage 4's expiry fallback, for the cycle where `option_data` has no
-        # `expiry` but the raw chain payload does.
-        "cached_raw_chain_latest": session_state.get("_cached_raw_chain_latest"),
-        # Stage 52's position state — see `_open_position` for the contract and
-        # why this is a rename rather than an adapter.
-        "open_position": _open_position(session_state),
         # persist the per-error throttle cache across passes
         "_err_log_seen": session_state.setdefault("_mios_err_seen", {}),
         # Stage-40 prediction-log throttle state (persists across passes)
@@ -344,80 +328,6 @@ def _fnum(v):
     except (TypeError, ValueError):
         return None
     return None if x != x else x
-
-
-#: Stage 52's `position` contract, derived from what `decision_v2` actually reads
-#: — not from what a position dict could plausibly contain.
-#:
-#: `decide()` and `_manage()` between them read exactly THREE fields, and nothing
-#: else. Enumerated from the AST, then verified against the arithmetic:
-#:
-#:     side    "CALL" | "PUT". Its PRESENCE is the in-a-position flag —
-#:             `if pos.get("side"): return _manage(...)` (decision_v2:143).
-#:             There is no `is_open` field and adding one would do nothing.
-#:     entry   a SPOT/INDEX level, not an option premium. Proven by the
-#:             arithmetic: `gain = (spot - entry) if side == "CALL" else
-#:             (entry - spot)` (decision_v2:187).
-#:     target  a SPOT level too — compared directly against spot
-#:             (decision_v2:199).
-#:
-#: `strike`, `quantity`, `entry_time`, `signal_id` and `source` are NOT read by
-#: anything. They are not part of this contract.
-_POSITION_FIELDS = ("side", "entry", "target")
-
-
-def _open_position(session_state) -> Dict[str, Any]:
-    """Stage 52's `open_position`, from the app's own live-trade state.
-
-    ## Why `_entry_gate_active` and not `_entry_signal_open`
-
-    `_entry_signal_open` is keyed by leg tag and its `entry` is an OPTION PREMIUM
-    — `_leg_levels` draws it as an overlay line on the leg's own price chart.
-    Feeding a premium into `decide()` would compute `gain = 24,500 - 120` and
-    drive TRAIL / SCALE_IN off a meaningless number. That is the shape-matched
-    adapter this deliberately is not.
-
-    `_entry_gate_active` is the app's position-level state, and its arithmetic is
-    already **identical** to `_manage`'s:
-
-        vob_minimal.py:8266   (spot_price - _act['entry_spot']) if side == 'CALL'
-                              else (_act['entry_spot'] - spot_price)
-        decision_v2.py:187    (st - entry) if up else (entry - st)
-
-    So this is a boundary rename of ONE field — `entry_spot` → `entry` — of the
-    same kind `_mios_market_read` already does, not a new interpretation.
-
-    ## The lifecycle is real, which is what makes this safe
-
-    A position dict that is never cleared would trap Stage 52 in `_manage`
-    forever — worse than the flat-forever bug it replaces. `_entry_gate_active`
-    is set only under `if _st_a in ('CALL', 'PUT')` (vob_minimal.py:8091),
-    superseded when a new entry arms (:8155), and **popped on exit** (:8374 and
-    :8600).
-
-    ⚠️ Returns `{}` — never a partial dict — when `side` is missing or is not one
-    of CALL/PUT. `side`'s presence IS the in-a-position flag, so a dict carrying
-    `entry` but no `side` would put Stage 52 in a state the engine has no branch
-    for.
-    """
-    try:
-        act = session_state.get("_entry_gate_active")
-    except Exception:
-        return {}
-    if not isinstance(act, Mapping):
-        return {}
-    side = str(act.get("side") or "").strip().upper()
-    if side not in ("CALL", "PUT"):
-        return {}
-    out: Dict[str, Any] = {"side": side}
-    # `entry_spot` → `entry`: the rename this whole function exists for.
-    entry = _fnum(act.get("entry_spot"))
-    if entry is not None:
-        out["entry"] = entry
-    target = _fnum(act.get("target"))
-    if target is not None:
-        out["target"] = target
-    return out
 
 
 def _day_metrics(session_state, raw: Dict[str, Any]) -> Dict[str, Any]:

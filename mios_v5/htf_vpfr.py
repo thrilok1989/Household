@@ -296,19 +296,7 @@ def migration_summary(reads: Optional[Dict[str, Dict[str, Any]]]) -> Dict[str, s
     """Short / Medium / Long value migration — 'short-term rally inside a longer
     bearish market' at a glance."""
     def _grp(tfs):
-        # ⚠️ `or {}` on the migration node, NOT `.get("migration", {})`.
-        #
-        # `tf_read` stores `"migration": migration` verbatim and its parameter
-        # defaults to `None`, so a timeframe whose migration was never computed
-        # holds the key with a `None` VALUE — and `.get(k, default)` returns that
-        # `None`, never the default. The chained `.get("direction")` then raised
-        # `AttributeError: 'NoneType' object has no attribute 'get'` and took the
-        # WHOLE of Stage 45 to ERROR with it, which in turn degrades Stage 51
-        # (validity) and Stage 68 (day type) that depend on it.
-        #
-        # `tf_read` itself gets this right at line ~242 — `(migration or {})` —
-        # so this was the one place in the module that trusted the default.
-        dirs = [(((reads or {}).get(t) or {}).get("migration") or {}).get("direction")
+        dirs = [((reads or {}).get(t) or {}).get("migration", {}).get("direction")
                 for t in tfs]
         dirs = [d for d in dirs if d and d != "unknown"]
         if not dirs:
