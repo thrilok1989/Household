@@ -35,12 +35,17 @@ from ..thesis import build_thesis, market_controller, recent_changes
 #: 📊 Charts leads, so the synchronised NIFTY ‖ CALL ‖ PUT figure sits directly
 #: under the price header instead of four blocks down the Trading tab.
 #:
-#: ⚠️ Being FIRST is load-bearing, not cosmetic. `_terminal_chart` is the only
-#: producer of `_leg_profiles` (see `docs/AUDIT_FOCUS_MODE.md` — it is one of the
-#: four CRITICAL panels), and `_trading_screen` reads that key for its per-leg
-#: liquidity bars. Streamlit executes tab bodies in order, so the chart must be
-#: drawn in a tab that runs BEFORE Trading. Moving it to a later tab would leave
-#: the heatmaps reading the previous cycle's profiles.
+#: ⚠️ This list is the STRIP's layout only — it does not decide what runs first.
+#:
+#: Streamlit executes each tab body when its container is FILLED, and
+#: `render_dashboard_v6` fills them in dependency order, not in this order. So
+#: moving a label here is safe; what matters is the fill sequence, and
+#: `test_screen_order.py` checks that against the real producer/consumer graph.
+#:
+#: Charts still has to execute before Trading — `_terminal_chart` is the only
+#: producer of `_leg_profiles` (one of the four CRITICAL panels, see
+#: `docs/AUDIT_FOCUS_MODE.md`) and `_trading_screen` reads it for the per-leg
+#: liquidity bars — but that is enforced by the fill order, not by this list.
 _TABS = ["📊 Charts", "🧭 NIFTY", "📈 OPTIONS", "🎯 Decision", "📈 Trading",
          "🧭 Intelligence", "📒 History", "🎓 Learning", "⏪ Replay",
          "🔧 Debug"]
@@ -107,6 +112,25 @@ def _dbg_caption(st, source: str, message) -> None:
             pass
 
 
+def _feed_reason(st) -> str:
+    """Why there is no data, in `feed_status`' words.
+
+    ⚠️ One owner for the answer. Three panels stand by on a missing chain and each
+    used to explain it differently — none of them mentioning that before 09:15
+    there simply is no chain to fetch, which made a healthy morning look broken.
+    """
+    try:
+        from datetime import datetime
+
+        import pytz
+
+        from ..feed_status import sentence
+        return sentence(st.session_state,
+                        datetime.now(pytz.timezone("Asia/Kolkata")))
+    except Exception:
+        return "the option chain has not arrived yet."
+
+
 def _spot_price(state):
     """NIFTY spot from the one owner — `mios_v5.spot`.
 
@@ -162,16 +186,41 @@ def render_dashboard_v6(state=None, db=None) -> None:
                 unsafe_allow_html=True)
 
     tabs = st.tabs(_TABS)
+
+    # ⚠️ FILLED IN DEPENDENCY ORDER, NOT TAB ORDER.
+    #
+    # `st.tabs()` returns containers that may be filled in any sequence — the
+    # strip's left-to-right order is fixed by `_TABS` and does not change here.
+    # What changes is the order the bodies EXECUTE in during one rerun, and that
+    # is a real dependency:
+    #
+    #     _charts_screen      writes  _leg_profiles
+    #     _trading_screen     reads   _leg_profiles
+    #                         writes  _sr_levels · _premium_energy
+    #                                 _premium_structures · _entry_decision
+    #     _nifty_cockpit      reads   _sr_levels · _entry_decision
+    #     _options_cockpit    reads   _premium_energy · _premium_structures
+    #
+    # Filled in tab order the three cockpits ran BEFORE their producer, so:
+    #   · on the first render of a session those keys did not exist and the
+    #     blocks drew nothing — the "⚪ Not reporting yet: sr table / premium
+    #     energy / premium structure / option flow" captions;
+    #   · on every render after, they silently showed the PREVIOUS cycle's data,
+    #     20 seconds behind the panels beside them.
+    #
+    # This is a consequence of moving the new dashboards to the front of the
+    # strip: the layout moved, the producers did not. Nothing is recomputed here
+    # and no engine is touched — only the sequence the tab bodies run in.
     with tabs[0]:
         _charts_screen(st, fr)
+    with tabs[4]:
+        _trading_screen(st, fr, state)
     with tabs[1]:
         _nifty_cockpit(st, fr)
     with tabs[2]:
         _options_cockpit(st, fr)
     with tabs[3]:
         _decision_center(st, fr)
-    with tabs[4]:
-        _trading_screen(st, fr, state)
     with tabs[5]:
         _intelligence(st, fr, state)
     with tabs[6]:
@@ -205,12 +254,19 @@ def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
         S/R ranking            sr_intel.rank_levels         → _sr_levels
         battle zone            Stage 35                     → final_read
 
-    ⚠️ `_sr_levels` is published by `_sr_intelligence`, which runs on the
-    Intelligence tab — a LATER tab than this one. So on the very first rerun of
-    a session this table is empty and fills on the next; `sr_table_html` returns
-    `""` rather than an empty frame, and the note below says so. Reordering the
-    tabs to fix that would move a CRITICAL producer, which is the mistake the
-    Charts move was careful not to make.
+    ⚠️ FIXED — this note used to describe the bug as expected behaviour, and was
+    wrong about where the producer lives.
+
+    `_sr_levels` is published by `_sr_intelligence`, which `_trading_screen`
+    calls — NOT the Intelligence tab, as this said. Because the tab bodies were
+    filled in tab order, this cockpit (tab 1) ran before that producer (tab 4):
+    the table was empty on the first rerun of a session and showed the PREVIOUS
+    cycle's levels on every rerun after.
+
+    The old note concluded that fixing it would mean moving a CRITICAL producer.
+    It would not: `st.tabs()` containers may be filled in any sequence and the
+    strip's layout is unaffected, so `render_dashboard_v6` now fills Trading
+    before the cockpits and nothing moved on screen. See `test_screen_order.py`.
     """
     from .nifty_cockpit import BLOCK_ORDER, cockpit_blocks
 
@@ -291,9 +347,9 @@ def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
     })
 
     if not blocks:
-        st.info("🧭 NIFTY cockpit standing by — it reads the Market Picture, "
-                "the volume profile and the chain. Those land once the option "
-                "chain and candles are both in.")
+        st.info("🧭 NIFTY cockpit standing by — " + _feed_reason(st)
+                + " It reads the Market Picture, the volume profile and the "
+                  "chain.")
         return
 
     left, right = st.columns(2)
@@ -363,12 +419,19 @@ def _options_cockpit(st, fr: Dict[str, Any]) -> None:
         Stage 71.7 `_premium_energy`      energy · spike · strength · preferred
         the chain  `df_summary`           LTP · OI · ΔOI · volume · bid/ask
 
-    ⚠️ `_premium_structures` is keyed by `(side, strike)` TUPLES, and Stage 71.8
-    publishes it from `_strike_validation` on the Trading tab — a LATER tab than
-    this one. So on the first rerun of a session the structure and flow blocks
-    are empty and fill on the next. Re-keying is done here rather than asking the
-    pure module to understand a tuple key, which is the same boundary rename
-    `_mios_market_read` does.
+    `_premium_structures` is keyed by `(side, strike)` TUPLES. Re-keying is done
+    here rather than asking the pure module to understand a tuple key, which is
+    the same boundary rename `_mios_market_read` does.
+
+    ⚠️ FIXED — this note used to end "So on the first rerun of a session the
+    structure and flow blocks are empty and fill on the next", which recorded a
+    real bug as accepted behaviour. Stage 71.8 publishes `_premium_structures`
+    from `_strike_validation` on the Trading tab, and filling the tabs in tab
+    order ran this cockpit first, so those blocks showed nothing on the first
+    rerun and the PREVIOUS cycle's data on every one after.
+    `render_dashboard_v6` now fills Trading before the cockpits — the strip is
+    unchanged, since `st.tabs()` containers may be filled in any sequence. See
+    `test_screen_order.py`.
     """
     from .options_cockpit import (BLOCK_ORDER, cockpit_blocks,
                                  greeks_table_html)
@@ -403,9 +466,14 @@ def _options_cockpit(st, fr: Dict[str, Any]) -> None:
     })
 
     if not blocks:
-        st.info("📈 Options cockpit standing by — it reads Stage 71.7's premium "
-                "energy and Stage 71.8's premium structure. Those land once the "
-                "chain and the ATM legs are both in.")
+        # ⚠️ The old text named the two stages and left the trader to guess
+        # whether the app was broken. At 08:25 it appears on a healthy app,
+        # because there is no option chain before 09:15 — and everything here
+        # hangs off the chain. `feed_status` gives the same answer the Trade Card
+        # gives, so one silence cannot get two explanations.
+        st.info("📈 Options cockpit standing by — " + _feed_reason(st)
+                + " Premium energy (71.7) and premium structure (71.8) both "
+                  "need the chain and the ATM legs.")
         return
 
     st.markdown(blocks.get("option_header", ""), unsafe_allow_html=True)

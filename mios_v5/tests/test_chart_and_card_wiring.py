@@ -128,8 +128,14 @@ def test_the_atm_legs_are_already_today_only():
 # ── the Trade Card call site ────────────────────────────────────────────
 
 def _card_block():
+    """The Trade Card's own block, bounded by the section that follows it.
+
+    ⚠️ Was a fixed 2200-character slice, which silently truncated when the
+    standing-by reason grew and made two assertions pass on absence.
+    """
     start = _SRC.index("# 🎯 The Trade Card")
-    return _SRC[start:start + 2200]
+    end = _SRC.index("# ── 11 · the MIOS pass", start)
+    return _SRC[start:end]
 
 
 def test_the_card_is_not_nested_behind_the_chain_fetch():
@@ -151,15 +157,42 @@ def test_a_missing_market_picture_is_reported_not_left_blank():
 
 def test_the_reason_distinguishes_the_three_causes():
     """"no chain", "no spot" and "Market Picture not ready yet" need different
-    reactions — reporting them identically is how a stale read gets acted on."""
+    reactions — reporting them identically is how a stale read gets acted on.
+
+    The no-chain branch now defers to `mios_v5.feed_status`, which answers the
+    question the old text could not: is this broken, or is the market shut?
+    """
     block = _card_block()
-    for reason in ("no option chain", "no spot price",
-                   "Market Picture has not produced a read yet"):
-        assert reason in block, reason
+    assert "no spot price" in block
+    assert "Market Picture has not produced a read yet" in block
+    assert "feed_status" in block, "the chain reason lost its owner"
 
 
-def test_the_chain_failure_reason_names_the_dhan_error():
-    assert "_dhan_last_error" in _card_block()
+def test_the_chain_failure_reason_comes_from_the_one_owner():
+    """⚠️ It used to read `_dhan_last_error` directly and fall back to "chain fetch
+    returned nothing" — which was the fallback on the 401 and 429 paths, i.e. the
+    two failures the app knew most about, and also the message it showed at 08:25
+    when nothing was wrong at all.
+
+    `feed_status` is now the single answer, shared with both cockpits.
+    """
+    block = _card_block()
+    assert "feed_status" in block
+    # ⚠️ On the st.info ARGUMENTS, not the block text — the retired phrase still
+    # appears in the comment explaining why it went, and a raw grep matching my
+    # own prose has now happened seven times in this work.
+    import ast
+    for node in ast.walk(ast.parse(_SRC)):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("info", "caption", "markdown")):
+            for piece in ast.walk(node):
+                if isinstance(piece, ast.Constant) and isinstance(piece.value, str):
+                    assert "chain fetch returned nothing" not in piece.value
+
+    # and the owner really does consult the token / rate-limit / clock state
+    src = (_ROOT / "mios_v5" / "feed_status.py").read_text()
+    for key in ("_dhan_token_expired", "_dhan_429_until", "_dhan_last_error"):
+        assert key in src, key
 
 
 def test_the_card_still_renders_into_its_own_slot_at_the_top():
