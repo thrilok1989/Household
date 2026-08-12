@@ -208,11 +208,29 @@ what `position` should contain.
 design**: each engine computes a real default from the IST clock and the raw key
 exists so a test can move it. `stage30_calendar` says so in a comment.
 
-### Published but never read — dead inputs
+### Published but never read — one input, not three
 
-`composite_profile`, `value_alignment`, `value_migration` are forwarded into
-`raw` every cycle and no engine reads them. Harmless, but they are assembly work
-per cycle for nothing, and they imply a consumer that was never written.
+⚠️ **Corrected.** An earlier revision of this document claimed `composite_profile`,
+`value_alignment` and `value_migration` were all dead. Two of the three are read:
+
+| key | read by |
+|---|---|
+| `value_alignment` | `narrative.py:175` |
+| `value_migration` | `final_read.py:227`, `narrative.py:157` |
+| `composite_profile` | **nothing** — genuinely unread as an engine input |
+
+The false positives came from scanning only `mios_v5/engines/` for `raw` reads.
+`narrative.py`, `final_read.py` and `trading_context.py` take `state` and read
+`state.raw` too. Re-scanned across the whole package, exactly one input is dead.
+
+Two other apparent gaps were also name collisions, not bugs:
+
+* `close` / `high` / `low` / `open` / `timestamp` / `volume` — `runner.coerce_frame`
+  takes a Dhan payload parameter that is *also* called `raw`;
+* `_run_report` — written by `orchestrator.py` into `raw`, not by `runner.py`, so a
+  runner-only publish scan cannot see it;
+* `_err_log_seen` — read by `stage00_health` via `raw.setdefault(...)`, a mutation
+  rather than a `.get`.
 
 `fii_deriv` is read only by the new UI panel, not by Stage 23 — which is why that
 panel labels its verdict **"STAGE 23 FLOWS (cash)"**.
@@ -304,15 +322,73 @@ not re-checked against the real producer should be assumed wrong.
 
 ---
 
-## 8 · Open, by decision — not a bug to patch
+## 8 · Stage 52's two inputs — one wired, one deliberately not
 
-`stage52_decision` consumes `open_position` and `zone_extremes`; neither has an
-authoritative producer, so it decides as though the book is flat every cycle.
+### `open_position` — ✅ wired, as a one-field rename
 
-**Deliberately unresolved.** `_entry_signal_open` is per-leg state and is not
-semantically equivalent to the position-level contract `decide()` expects, so
-adapting it by shape would invent semantics for a trading decision. The next
-change is a contract-definition task.
+The contract turned out to be **derivable**, so it needed no guess. `decide()` and
+`_manage()` read exactly three fields — `side`, `entry`, `target` — and nothing
+else. `is_open`, `strike`, `quantity`, `entry_time` and `signal_id` are read by
+nothing; `side`'s presence already *is* the in-a-position flag.
 
-Full reasoning, the fields to derive rather than assume, and the four possible
-meanings of `zone_extremes`: **`docs/CONTRACT_POSITION_STATE.md`**.
+`_entry_gate_active` was already the authoritative producer, and the arithmetic
+proves the mapping rather than assuming it:
+
+```
+vob_minimal.py:8266   (spot_price - _act['entry_spot']) if side == 'CALL'
+decision_v2.py:187    (st - entry) if up else (entry - st)
+```
+
+So `entry_spot` → `entry` is a boundary rename of the same kind
+`_mios_market_read` performs. `_entry_signal_open` would have been a genuine bug:
+it is per-leg and its `entry` is an option **premium**, so `gain = 24,500 − 120`
+would drive TRAIL / SCALE_IN off a meaningless number.
+
+Safe because the lifecycle is real — set only under `if _st_a in ('CALL','PUT')`,
+superseded on a new entry, **popped on exit** at two sites — and because Stage 52
+is display-only: the dispatch path uses `_entry_decision` from `entry_engine`.
+
+### `zone_extremes` — ⛔ still open, and the finding is worse than reported
+
+Earlier this said "decides as if flat". The truth is stronger: **Stage 52 can
+never issue an ENTER at all.**
+
+```
+detect_refusal([], floor)                   → {"proven": False}
+checks["refusal"]                           → False
+confirmed = all(checks[c] for c in CHECKS)  → False   (CHECKS includes refusal)
+decide():  if pf.get("confirmed")           → the ONLY path to ENTER
+```
+
+`stage52_decision.py:72` defines the input precisely — *"the sequence of lows/highs
+made while price sat at the zone"* — and adds *"without it the refusal check cannot
+pass, which is correct"*. As fail-safe design that is right; it also means the entry
+half of the "final brain" has never run.
+
+Producing it is a new computation, not a rename, and it would take a trade-entry
+path from *never fires* to *fires*. Four sampling questions have to be answered
+first. Full reasoning: **`docs/CONTRACT_POSITION_STATE.md`**.
+
+---
+
+## 9 · Scanner false positives — the running count
+
+Every one came from an under-scoped scan, and each would have been a confident
+wrong bug report:
+
+| # | claim | reality |
+|---|---|---|
+| 1–4 | 5 stages in ERROR | four were my fixture's shapes (§1) |
+| 5 | `calibration` (Stage 57) dead | `from . import X` has `node.module is None` |
+| 6 | `dispatch_validation` dead | same cause; it is correctly test-only |
+| 7 | `value_alignment` dead | read by `narrative.py:175` |
+| 8 | `value_migration` dead | read by `final_read.py:227` |
+
+Plus three name collisions that looked like gaps: `close`/`high`/`low`/`open`/
+`timestamp`/`volume` (`coerce_frame` has a payload parameter also called `raw`),
+`_run_report` (written by `orchestrator.py`, not `runner.py`), and `_err_log_seen`
+(read via `raw.setdefault`, a mutation rather than a `.get`).
+
+**Lesson: scan the whole package, handle every import and access form, and
+re-verify against the real producer before calling anything a bug.** Eight of my
+own findings did not survive that step.

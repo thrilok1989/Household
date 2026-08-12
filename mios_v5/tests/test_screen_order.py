@@ -365,14 +365,28 @@ KNOWN_UNPUBLISHED = {
     "calendar_today": "test injection; stage30 defaults to the IST clock",
     "now_ist_time": "test injection; stage06/38/39 default to the IST clock",
     "now_ist_dt": "test injection; stage40 defaults to the IST clock",
-    "open_position": "NOT WIRED — no such key exists in the app; stage52 "
-                     "always decides as if flat. "
-                     "See docs/CONTRACT_POSITION_STATE.md",
-    "zone_extremes": "NOT WIRED — no such key exists in the app, and its "
-                     "MEANING is undefined (liquidity extremes? S/R zone "
-                     "extremes? entry-zone bounds? extremes at entry?). "
-                     "See docs/CONTRACT_POSITION_STATE.md",
+    # ⛔ `zone_extremes` stays. Its meaning turned out to be unambiguous —
+    # `stage52_decision.py:72` defines it as "the sequence of lows/highs made
+    # while price sat at the zone" — but the consequence is worse than first
+    # reported: `floor_ceiling.detect_refusal([])` can never prove, `refusal` is
+    # in `CHECKS`, so `confirmed` is never True, so `decide()` can never reach
+    # ENTER. Stage 52 is structurally incapable of an entry, not merely flat.
+    #
+    # Supplying it is therefore a STRATEGY change, not a wiring fix: it takes a
+    # trade-entry path from never-fires to fires, and needs four sampling
+    # decisions nobody has made (what counts as "at" the zone, when the sequence
+    # resets, one extreme per candle/touch/tick, and which sampling
+    # `_MIN_ATTEMPTS`/`_FLAT_PCT` were calibrated against).
+    "zone_extremes": "NOT WIRED — meaning is known, consequence is that Stage 52 "
+                     "can never ENTER. Supplying it unblocks a dead trade-entry "
+                     "path. See docs/CONTRACT_POSITION_STATE.md",
 }
+
+#: ✅ `open_position` was on the list above and is now WIRED — `runner._open_position`
+#: maps it from `_entry_gate_active` with `entry_spot` → `entry`. The contract was
+#: derivable from evidence (three fields, verified against identical arithmetic at
+#: `vob_minimal.py:8266` and `decision_v2.py:187`), so it needed no guess.
+#: `test_open_position.py` owns it.
 
 
 def test_the_position_contract_gap_is_documented_not_just_excused():
