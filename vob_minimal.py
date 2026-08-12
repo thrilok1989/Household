@@ -8819,9 +8819,18 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
         else:
             # idle — no trade being guarded: keep the Guardian visibly present
             # so it's always in the Market Picture (arms on a CONFIRMED entry)
-            st.caption("🛡 Position Guardian — idle · no active trade. Arms on a "
-                       "CONFIRMED entry, then watches ON TRACK ⇄ STAY PATIENT ⇄ "
-                       "REVERSAL WARNING → EXIT FAST.")
+            #
+            # ⚠️ `st.caption` was the wrong element for it: caption is always
+            # rendered in Streamlit's muted grey, so the one line that says the
+            # Guardian exists and is watching read as disabled chrome. Bright pink,
+            # like the other Guardian states, which all carry their own colour.
+            st.markdown(
+                "<div style='margin:2px 0 8px;font-size:13px;font-weight:700;"
+                "color:#ff2d95;'>"
+                "🛡 Position Guardian — idle · no active trade. Arms on a "
+                "CONFIRMED entry, then watches ON TRACK ⇄ STAY PATIENT ⇄ "
+                "REVERSAL WARNING → EXIT FAST.</div>",
+                unsafe_allow_html=True)
         # 📋 Execution Plan — display-only R-based template for the OPEN trade
         # (entry / stop / T1 / T2 / trail / partial / size). No auto-execution.
         if _guard and (_guard.get('state') in ('ON_TRACK', 'PATIENT', 'WARNING')):
