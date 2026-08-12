@@ -99,7 +99,15 @@ def strike_read(store: Any, strike: Any) -> Dict[str, Any]:
         # ⚠️ The same two thresholds the reference layout used, stated once.
         out["strength"] = ("STRONG" if out["ratio"] >= 2.0 else
                            "MODERATE" if out["ratio"] >= 1.3 else "WEAK")
-        out["level"] = ("support" if out["heavier"] == "PE" else "resistance")
+        # ⚠️ Only when one side really IS heavier. `"support" if heavier == "PE"
+        # else "resistance"` sent the None case — CE and PE exactly equal — down the
+        # else branch, and the render showed "WEAK RESISTANCE · 1.0×" on a strike
+        # with 9.0L against 9.0L. Equal OI is neither; a balanced strike says so.
+        if out["heavier"]:
+            out["level"] = "support" if out["heavier"] == "PE" else "resistance"
+        else:
+            out["level"], out["strength"] = None, None
+            out["balanced"] = True
         # ⚠️ A level is made by WRITERS. The ratio only says which side is heavier,
         # and the render showed "STRONG RESISTANCE · 6.0×" sitting directly above
         # "CE: LONG BUILDING" — 6× the call OI, but accumulated by BUYERS, which is
@@ -141,14 +149,20 @@ def figures(store: Any, measure: str = "oi"):
         ce, pe = SH.series(store, k, ce_f), SH.series(store, k, pe_f)
         if not ce["v"] and not pe["v"]:
             continue
+        # ⚠️ A single stored point needs a marker you can SEE and no time axis. At
+        # size 3 the first snapshot rendered as a speck, under four x-ticks all
+        # reading the same minute — which looked like an empty chart with clutter
+        # rather than one honest observation.
+        lone = max(len(ce["v"]), len(pe["v"])) < 2
         fig = go.Figure()
         for s, name, colour in ((ce, "Call", CE_COLOUR), (pe, "Put", PE_COLOUR)):
             if s["v"]:
                 fig.add_trace(go.Scatter(
                     x=[_ts(t) for t in s["t"]],
                     y=[v / div for v in s["v"]],
-                    mode="lines+markers", name=name,
-                    line=dict(color=colour, width=2), marker=dict(size=3)))
+                    mode="markers" if lone else "lines+markers", name=name,
+                    line=dict(color=colour, width=2),
+                    marker=dict(size=11 if lone else 3, color=colour)))
         if measure == "chg":
             fig.add_hline(y=0, line_dash="dash", line_color="white",
                           line_width=0.5)
@@ -173,7 +187,8 @@ def figures(store: Any, measure: str = "oi"):
                 font=dict(size=12), x=0.5, xanchor="center"),
             template="plotly_dark", height=280, showlegend=False,
             margin=dict(l=10, r=10, t=54, b=30),
-            xaxis=dict(tickformat="%H:%M", title=""),
+            xaxis=dict(tickformat="%H:%M", title="",
+                       showticklabels=not lone),
             yaxis=dict(title=unit),
             plot_bgcolor="#1e1e1e", paper_bgcolor="#1e1e1e")
         out.append((k, lab.get(k, ""), fig))
@@ -194,17 +209,19 @@ def _ts(t: Any):
 def caption(store: Any) -> str:
     """How much history there is — never a bare chart with no provenance.
 
-    ⚠️ Three states, because the render showed the middle one wrong: with a single
-    snapshot it read "1 snapshot(s) · ATM±2 · OI in lakhs, ΔOI in thousands" —
-    repeating the ATM±2 the heading already carried, quoting units for charts that
-    were not drawn, and never saying WHY. A series needs two points; say that.
+    ⚠️ Three states, because the render showed the middle one wrong twice. First it
+    read "1 snapshot(s) · ATM±2 · OI in lakhs, ΔOI in thousands" — repeating the
+    ATM±2 the heading already carried and quoting units for charts that were not
+    drawn. Then it said a series needs two points and nothing was plotted, which
+    was true of the code and wrong as a design: one snapshot IS the current level at
+    each strike. Now it says what one snapshot can and cannot tell you.
     """
     r = SH.read(store)
     n = r["n"]
     if not n:
         return "no snapshots yet — the series builds as the chain refreshes"
     if n < 2:
-        return ("one snapshot so far — a series needs two, so nothing is "
-                "plotted yet")
+        return ("first snapshot — current levels only, the build direction needs "
+                "a second · OI in lakhs, ΔOI in thousands")
     span = (f" over {r['span_s'] / 60:.0f} min" if r.get("span_s") else "")
     return f"{n} snapshots{span} · OI in lakhs, ΔOI in thousands"
