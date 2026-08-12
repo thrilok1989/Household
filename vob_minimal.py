@@ -15233,6 +15233,25 @@ def _chrome_extras():
             out.append(_line)
     except Exception:
         pass
+    # 🎯 The entry gate's verdict and its confidence, asked for on the strip.
+    #
+    # ⚠️ From `_entry_verdict`, the pair `dashboard_v6._guardian_read` already
+    # resolved — NOT by reading `_entry_decision` and the gate again here. A second
+    # resolution is how the strip and the card end up showing different verdicts for
+    # the same cycle, and `apply_to` has already been applied to the confidence
+    # exactly once. The chrome runs after the cycle, so the pair is current.
+    #
+    # It carries its own label: on the strip it sits near the Position Guardian's
+    # line, and an unlabelled "ENTER · 100/100" beside "Position Guardian — idle"
+    # is precisely the collision that got reported.
+    try:
+        from mios_v5.ui.greeks_panel import verdict_micro as _vm
+        _pair = st.session_state.get('_entry_verdict') or (None, None)
+        _line = _vm(_pair[0], _pair[1])
+        if _line:
+            out.append(_line)
+    except Exception:
+        pass
     return out
 
 

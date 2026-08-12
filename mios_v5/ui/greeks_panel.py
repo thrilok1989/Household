@@ -9,11 +9,15 @@ Not twenty Greek numbers — eight readings a trader acts on:
     VOLATILITY        expanding / contracting / neutral
     BREAKOUT RISK     LOW / MEDIUM / HIGH
     FADE RISK         LOW / MEDIUM / HIGH
-    GUARDIAN          the verdict + confidence, READ from the decision
+    ENTRY GATE        the verdict + confidence, READ from the decision
 
-⚠️ The Guardian line is **read, never produced here**. `adaptive_greeks` emits no
-side (`assert_no_recommendation` enforces it), so the verdict and its confidence
-arrive as parameters from whatever already decided them. This panel shows the
+⚠️ That last row is **read, never produced here**. `adaptive_greeks` emits no side
+(`assert_no_recommendation` enforces it), so the verdict and its confidence arrive as
+parameters from whatever already decided them.
+
+⚠️ It is the ENTRY GATE's verdict, not the Position Guardian — those are two
+different things, and calling both "Guardian" put "Position Guardian — idle · no
+active trade" and "GUARDIAN ENTER · 100/100" on one screen. This panel shows the
 greeks *next to* that verdict — that is the whole point of the layer, and a panel
 that minted its own BUY would undo it.
 
@@ -56,6 +60,31 @@ PRESSURE_ARROW = {"UPWARD": "↑", "DOWNWARD": "↓", "NEUTRAL": "↔"}
 #: does to movement, which is exactly what gamma's sign already says.
 AMPLIFICATION = {"AMPLIFYING": "amplifying moves",
                  "STABILISING": "dampening moves"}
+
+#: Verdict words that mean "act". Everything else — WAIT, HOLD, CHOP_WAIT,
+#: AT_ZONE_WAIT, PINNED, BLOCKED, or nothing at all — means "do not act yet".
+ACTIONABLE = ("ENTER", "BUY", "SELL", "LONG", "SHORT")
+
+#: How the fade counterweight ends, per verdict. Under a WAIT it explains the wait;
+#: under an ENTER it qualifies the entry. Saying "wait for confirmation" under an
+#: ENTER told the trader to wait for the entry the card had just issued.
+WAIT_CLAUSE = "wait for confirmation"
+ACT_CLAUSE = "the greeks do not confirm this entry"
+
+#: What this row is actually showing.
+#:
+#: ⚠️ It said "GUARDIAN", and the Market Picture has a **Position Guardian** that
+#: tracks an OPEN trade and reads "idle · no active trade" when there is none. So one
+#: screen carried "Position Guardian — idle · no active trade" and "GUARDIAN ENTER ·
+#: 100/100" at the same time, and a reader had no way to know those are two different
+#: things. `_guardian_read` supplies this from `_entry_decision` / `entry_gate` — it
+#: is the ENTRY GATE's verdict, so that is what it is called. No value changed.
+VERDICT_LABEL = "ENTRY GATE"
+
+
+def _is_actionable(verdict: Any) -> bool:
+    w = str(verdict or "").strip().upper()
+    return any(a in w for a in ACTIONABLE)
 
 
 def _risk(word: Any) -> str:
@@ -202,7 +231,7 @@ def greeks_card_html(out: Any = None, guardian: Any = None,
             f"border-top:1px solid {CARD_BORDER};display:flex;"
             f"justify-content:space-between;align-items:baseline'>"
             f"<span style='font-size:11px;letter-spacing:.12em;font-weight:700;"
-            f"color:{MUTED}'>GUARDIAN</span>"
+            f"color:{MUTED}'>{VERDICT_LABEL}</span>"
             f"<span style='font-size:26px;font-weight:900;line-height:1.1;"
             f"color:{gt}'>"
             f"{_esc(word)}"
@@ -216,13 +245,13 @@ def greeks_card_html(out: Any = None, guardian: Any = None,
     # ── the reason, from the layer's own words ───────────────────────
     # Brought up from 10.5px/MUTED: this sentence is what explains the verdict
     # above it, and it was set smaller than the rows it was explaining.
-    reason = _reason_line(o)
+    reason = _reason_line(o, word)
     note = (f"<div style='font-size:12.5px;font-weight:600;color:{INK};"
             f"margin-top:6px'>{_esc(reason)}</div>" if reason else "")
 
     foot = (f"<div style='font-size:10px;color:{MICRO};margin-top:6px'>"
             f"Context and confirmation — greeks modify confidence, they do not "
-            f"make the call. Regime: "
+            f"make the call. Greek weighting: "
             f"{_esc(str(_get(o, 'regime') or '—'))}</div>")
 
     missing = [str(m).replace("_", " ") for m in (_get(o, "missing") or ())]
@@ -234,7 +263,7 @@ def greeks_card_html(out: Any = None, guardian: Any = None,
                  "".join(rows) + verdict + note + foot)
 
 
-def _reason_line(out: Mapping[str, Any]) -> str:
+def _reason_line(out: Mapping[str, Any], verdict: Any = None) -> str:
     """One sentence, taken from the layer's own conflict verdicts.
 
     A conflict is the most actionable thing the layer produces, so it leads. With
@@ -273,12 +302,21 @@ def _reason_line(out: Mapping[str, Any]) -> str:
     # The percentage is `_modifiers`' own `fade_probability`, quoted not derived,
     # and "wait for confirmation" describes the greeks' limitation — it does not
     # manufacture a side. The Guardian's verdict is untouched either way.
+    # ⚠️ The tail depends on WHAT WAS DECIDED. It read "wait for confirmation"
+    # whatever the verdict, so a cycle with `ENTER · 100/100` printed
+    # "Fade risk 55%; wait for confirmation" directly beneath it — the card telling
+    # the trader to wait for the entry it had just issued. Reported, and it is the
+    # same contradiction as the WAIT case in mirror image.
+    #
+    # Under an actionable verdict the greeks' honest role is to flag the risk ON
+    # that entry, not to countermand it: they modify confidence, they do not make
+    # the call. The fade figure is quoted either way; only the clause changes.
     risk = str(_get(mods, "risk_level") or "").strip().upper()
     fade = _f(_get(mods, "fade_probability"))
     if risk in ("HIGH", "MEDIUM") and "fade" not in line.lower():
-        tail = (f"fade risk {fade:.0f}%; wait for confirmation"
-                if fade is not None else
-                f"{risk.lower()} fade/pin risk; wait for confirmation")
+        clause = ACT_CLAUSE if _is_actionable(verdict) else WAIT_CLAUSE
+        tail = (f"fade risk {fade:.0f}%; {clause}" if fade is not None else
+                f"{risk.lower()} fade/pin risk; {clause}")
         line = f"{line} — {tail}" if line else tail.capitalize()
     return line
 
@@ -351,3 +389,21 @@ def one_line(out: Any = None) -> str:
     if fade in ("MEDIUM", "HIGH"):
         parts.append(f"{fade.lower()} fade risk")
     return " · ".join(parts) + "."
+
+
+def verdict_micro(word: Any = None, confidence: Any = None) -> str:
+    """`ENTRY GATE · ENTER · 100/100` for the header strip. `""` with no verdict.
+
+    ⚠️ The label is carried, not dropped. On the header this sits a few centimetres
+    from the Position Guardian's own line, which is exactly the collision that made
+    "GUARDIAN ENTER · 100/100" read as the Position Guardian changing its mind.
+
+    Plain text, no markup: `_chrome_extras` collects strings and the header owns the
+    styling. Nothing is decided here — both values arrive already decided.
+    """
+    w = str(word or "").strip()
+    if not w:
+        return ""
+    conf = _f(confidence)
+    tail = f" · {conf:.0f}/100" if conf is not None else ""
+    return f"{VERDICT_LABEL} {w.upper()}{tail}"

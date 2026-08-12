@@ -37,7 +37,7 @@ def test_the_card_shows_the_eight_readings_the_spec_asks_for():
     read apart, and the row is named for what produced it."""
     html = GP.greeks_card_html(_OUT, "BUY", 72)
     for label in ("Dealer position", "Gamma", "Magnet pull", "Volatility",
-                  "Breakout risk", "Fade risk", "GUARDIAN"):
+                  "Breakout risk", "Fade risk", GP.VERDICT_LABEL):
         assert label in html, label
     assert "Hedging pressure" not in html, (
         "the unbased arrow is back — it reads as a dealer-flow measurement")
@@ -84,7 +84,8 @@ def test_no_guardian_verdict_means_no_guardian_row():
     """The greeks context is useful on its own. Inventing a verdict to fill the
     row is the one thing this module must not do."""
     html = GP.greeks_card_html(_OUT, None, None)
-    assert "GUARDIAN" not in html
+    assert GP.VERDICT_LABEL not in html
+    assert "GUARDIAN" not in html.upper()
     assert "Dealer position" in html
 
 
@@ -548,3 +549,113 @@ def test_the_greeks_still_never_manufacture_a_side():
     up = GP.greeks_card_html(out, None, None).upper()
     for banned in ("BUY", "SELL", "ENTER", "PUT ENTRY"):
         assert banned not in up
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  the verdict row: what it is called, and what the reason says under it
+# ══════════════════════════════════════════════════════════════════════
+
+def test_an_actionable_verdict_is_not_told_to_wait_for_itself():
+    """⚠️ Reported: `ENTER · 100/100` with "Fade risk 55%; wait for confirmation"
+    printed directly beneath it — the card telling the trader to wait for the entry
+    it had just issued. Same contradiction as the WAIT case, in mirror image.
+
+    Under an actionable verdict the greeks' role is to flag the risk ON that entry,
+    not to countermand it: they modify confidence, they do not make the call. The
+    fade figure is quoted either way; only the clause changes.
+    """
+    out = _down_cycle()
+    for word in ("ENTER", "BUY", "SELL", "enter long"):
+        line = GP._reason_line(out, word)
+        assert "55%" in line, word
+        assert "wait for confirmation" not in line, word
+        assert GP.ACT_CLAUSE in line, word
+    # …and a WAIT still gets the clause that explains the wait
+    for word in ("WAIT", "AT_ZONE_WAIT", "CHOP_WAIT", "HOLD", None, ""):
+        line = GP._reason_line(out, word)
+        assert "wait for confirmation" in line, word
+        assert GP.ACT_CLAUSE not in line, word
+
+
+def test_the_card_carries_the_verdict_aware_reason():
+    """The whole card, not just the helper — the contradiction was on screen."""
+    out = _down_cycle()
+    enter = GP.greeks_card_html(out, "ENTER", 100)
+    assert "wait for confirmation" not in enter
+    assert GP.ACT_CLAUSE in enter
+    assert "wait for confirmation" in GP.greeks_card_html(out, "WAIT", 100)
+
+
+def test_the_row_is_not_called_guardian():
+    """⚠️ The Market Picture has a **Position Guardian** that tracks an OPEN trade
+    and reads "idle · no active trade" when there is none. Calling this row GUARDIAN
+    too put "Position Guardian — idle · no active trade" and "GUARDIAN ENTER ·
+    100/100" on one screen with nothing to say they are different things.
+
+    `_guardian_read` supplies this from `_entry_decision` / `entry_gate`, so it is
+    the entry gate's verdict and that is what it is called. No value changed.
+    """
+    html = GP.greeks_card_html(_OUT, "ENTER", 100)
+    assert "GUARDIAN" not in html.upper()
+    assert GP.VERDICT_LABEL in html
+    assert "ENTER" in html and "100/100" in html
+
+
+def test_the_footer_does_not_call_the_weighting_regime_the_regime():
+    """⚠️ Two different fields were both labelled "regime" on one screen: the chip's
+    `market_picture['regime']` (UP · DOWN · SIDEWAYS — what price is doing) and this
+    card's weighting regime (TREND_UP · PINNED · EXPIRY · FAKEOUT — which weight set
+    `adaptive_greeks` chose). "regime UP" above "Regime: TREND_UP" read as one value
+    that kept changing."""
+    html = GP.greeks_card_html(_OUT, "WAIT", 60)
+    assert "Greek weighting:" in html
+    assert "Regime:" not in html
+
+
+def test_the_verdict_micro_carries_its_label_and_its_confidence():
+    assert GP.verdict_micro("ENTER", 100) == "ENTRY GATE ENTER · 100/100"
+    assert GP.verdict_micro("wait", 77) == "ENTRY GATE WAIT · 77/100"
+    # no confidence is not confidence 0
+    assert GP.verdict_micro("ENTER", None) == "ENTRY GATE ENTER"
+    assert "0/100" not in GP.verdict_micro("ENTER", None)
+    # nothing decided → no chip, rather than a placeholder on a frozen strip
+    for junk in (None, "", "   ", 0):
+        assert GP.verdict_micro(junk, 90) == ""
+    # plain text: the header owns the styling
+    assert "<" not in GP.verdict_micro("ENTER", 100)
+
+
+def test_the_header_reads_the_resolved_pair_not_the_gate_again():
+    """⚠️ ONE bridge. Resolving `_entry_decision` and the gate a second time in
+    `_chrome_extras` is how the strip and the card end up showing different verdicts
+    for the same cycle — and `apply_to` must be applied to the confidence exactly
+    once, which `_guardian_read` already did."""
+    import ast
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[2]
+    src = (root / "vob_minimal.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_chrome_extras")
+    # ⚠️ On the AST, not the text. Comments are not AST nodes, and the note in
+    # `_chrome_extras` explaining WHY it must not re-resolve the gate mentions
+    # `_entry_decision` and `apply_to` by name — a raw grep matched my own prose, for
+    # the tenth time this session.
+    keys = {n.value for n in ast.walk(fn)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    names = {getattr(n, "id", "") or getattr(n, "attr", "") for n in ast.walk(fn)}
+    for a in ast.walk(fn):
+        if isinstance(a, ast.ImportFrom):
+            # both, since it is imported `as _vm`
+            names |= {x.name for x in a.names} | {x.asname for x in a.names}
+    assert "verdict_micro" in names
+    assert "_entry_verdict" in keys
+    assert "_entry_decision" not in keys, "the header is resolving the gate itself"
+    assert "apply_to" not in names, "the confidence would be adjusted twice"
+
+    # …and the bridge is actually written
+    d6 = (root / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
+    gr = next(n for n in ast.walk(ast.parse(d6))
+              if isinstance(n, ast.FunctionDef) and n.name == "_guardian_read")
+    gk = {n.value for n in ast.walk(gr)
+          if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "_entry_verdict" in gk
