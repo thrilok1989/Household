@@ -6366,7 +6366,72 @@ def build_htf_profiles(df, spot=None):
         pass
 
     st.session_state['_htf_profiles'] = out
+    # 🏛 The rolling POC curves, off the same daily history — see below.
+    try:
+        _publish_poc_series()
+    except Exception:
+        pass
     return out
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _poc_lines_cached(highs, lows, vols):
+    """The four rolling POC curves. Cached — 1250 daily bars costs ~420 ms.
+
+    ⚠️ Arguments are TUPLES, not the frame: `cache_data` hashes its inputs and a
+    DataFrame is not hashable. They are also the whole cache key, so a new daily
+    bar (or the hourly refetch) invalidates it and nothing else does.
+
+    `cache_data` and not `cache_resource` here on purpose: the result is a plain
+    read-only value, nobody appends to it, and a per-call copy is exactly what a
+    caller should get.
+    """
+    from mios_v5 import poc_series as _ps
+    return _ps.lines(highs, lows, vols)
+
+
+def _publish_poc_series():
+    """🏛 Publish the rolling POC curves + the layered read for the daily view.
+
+    Built from `_htf_daily_df` — the SAME 5-year daily history Stage 45 already
+    fetches, so this adds no network call and no second source of daily bars.
+
+    Published to session_state rather than returned, because `mios_v5` may not
+    import this file and the panel needs to reach the result.
+    """
+    daily = st.session_state.get('_htf_daily_df')
+    if daily is None or getattr(daily, 'empty', True):
+        return
+    need = {'high', 'low', 'datetime'}
+    if not need <= set(daily.columns):
+        return
+    hs = tuple(float(x) for x in daily['high'])
+    ls = tuple(float(x) for x in daily['low'])
+    vs = tuple(float(x or 0) for x in daily.get('volume', [0] * len(hs)))
+    series = _poc_lines_cached(hs, ls, vs)
+    if not series:
+        return
+    from mios_v5 import poc_series as _ps
+    from mios_v5 import spot as _spotmod
+    # ⚠️ Through `spot.price`, the app's ONE owner of the current price. Four
+    # conflicting precedences across three files is what that module was built to
+    # end; a fifth read here would reopen it.
+    spot = _spotmod.price(st.session_state)
+    rows = _ps.stack(series, spot)
+    st.session_state['_poc_series'] = {
+        'dates': [str(d)[:10] for d in daily['datetime']],
+        'series': series,
+        'rows': rows,
+        'align': _ps.alignment(rows),
+        'caption': _ps.caption(series, len(hs)),
+        'spot': spot,
+        # 1H and 4H are finer than a daily bar — their CURRENT POC only, from the
+        # profiles Stage 45 already built. Never as a curve; see poc_series.
+        'subdaily': {
+            tf: ((st.session_state.get('_htf_profiles') or {})
+                 .get(tf, {}).get('profile') or {}).get('poc')
+            for tf in _ps.SUBDAILY},
+    }
 
 
 def _htf_levels_for_zones():
