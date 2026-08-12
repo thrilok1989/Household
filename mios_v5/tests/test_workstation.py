@@ -659,8 +659,17 @@ def test_the_charts_tab_computes_nothing():
               if isinstance(n, ast.FunctionDef) and n.name == "_charts_screen")
     called = {getattr(c.func, "id", "") or getattr(c.func, "attr", "")
               for c in ast.walk(fn) if isinstance(c, ast.Call)}
-    assert called <= {"_leg_reads", "dominance", "_terminal_chart"}, (
+    # Reading a published cache and rendering it is not computing. The ATM±1 leg
+    # tabulation was drawn here because it belongs under the charts it explains —
+    # it reads `_leg_bias_cache`, which `_render_main_analyzer` fills.
+    _render = {"markdown", "caption", "get", "leg_table_html", "_feed_reason",
+               "_dbg_caption"}
+    assert called <= {"_leg_reads", "dominance", "_terminal_chart"} | _render, (
         f"unexpected calls in _charts_screen: {called}")
+    # ⚠️ The property that actually matters: no BUILDER is invoked here.
+    for builder in ("build_leg_bias_table", "compute_vpfr", "analyze_vob_volume",
+                    "calculate_money_flow_profile", "calculate_vidya"):
+        assert builder not in called, f"_charts_screen now computes {builder}"
 
 
 def test_the_trading_tab_kept_the_bars_that_measure_the_chart():
