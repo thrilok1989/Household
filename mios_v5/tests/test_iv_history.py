@@ -208,3 +208,38 @@ def test_the_writer_uses_the_store_and_the_module():
     assert "iv_store()" in block
     assert "iv_history" in block
     assert ".record(" in block
+
+
+def test_the_writer_reads_a_column_that_actually_exists():
+    """⚠️ THE reason the card said "⚪ not reporting · no IV history published"
+    forever. The write was `_atm_row.get('CE_IV', pd.Series([0]))` — and `CE_IV`
+    appears NOWHERE else in the app. Because it was a `.get()` with a default it
+    never raised: it yielded 0 every cycle, `valid(0)` refused it, and the store
+    stayed permanently empty. The engine was right, the frame had the number, and
+    the lookup asked for a column nothing writes.
+
+    Same bug class as the `CE_OI_Change` guess in `strike_history`, caught the same
+    way: assert the name against the frame's real producer.
+    """
+    src = (_ROOT / "vob_minimal.py").read_text()
+    i = src.index("_atm_row = df_summary.iloc[")
+    block = src[i:src.index("# ── 7 · the ATM legs", i)]
+    assert "impliedVolatility_CE" in block, \
+        "the IV write must read the column analyze_option_chain really merges"
+    # …and that column is genuinely the one the chain publishes
+    merge = src[src.index("merge_cols = ["):src.index("merge_cols = [col for col")]
+    assert "'impliedVolatility_CE'" in merge
+    assert "'CE_IV'" not in merge, "CE_IV is not a column this app produces"
+
+
+def test_a_missing_iv_column_stays_missing_rather_than_arriving_as_zero():
+    """Principle 9: MISSING is not 0. The old `.get(col, pd.Series([0]))` turned an
+    absent column into the number 0, which `valid()` then had to reject — the
+    absence was laundered into a bad reading before anything could notice."""
+    src = (_ROOT / "vob_minimal.py").read_text()
+    i = src.index("_atm_row = df_summary.iloc[")
+    block = src[i:src.index("# ── 7 · the ATM legs", i)]
+    assert "_iv = None" in block
+    assert "pd.Series([0])" not in block
+    # and the store still refuses a 0 if one ever reaches it
+    assert H.valid(0.0) is None and H.record(_store(), 0.0, NOW) is False

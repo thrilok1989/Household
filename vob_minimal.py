@@ -14654,7 +14654,26 @@ def _render_main_analyzer():
             pass
         try:
             _atm_row = df_summary.iloc[(df_summary['Strike'] - underlying).abs().argsort()[:1]]
-            _iv = float(_atm_row.get('CE_IV', pd.Series([0])).iloc[0] or 0)
+            # ⚠️ `CE_IV` DOES NOT EXIST. It appeared nowhere else in this file, and
+            # because the read was a `.get()` with a default it never raised — it
+            # just yielded 0 on every cycle, `iv_history.valid(0)` refused it, and
+            # the store stayed empty forever. That is why the Adaptive Greeks card
+            # said "⚪ not reporting · no IV history published" indefinitely: the
+            # engine was right, the frame had the number, and the lookup asked for a
+            # column name nothing writes.
+            #
+            # `analyze_option_chain` merges `impliedVolatility_CE` (vob:3855). Both
+            # spellings are accepted so a rename in either direction still reports,
+            # and MISSING now stays missing instead of arriving as 0.
+            _iv = None
+            for _ivcol in ('impliedVolatility_CE', 'CE_IV'):
+                if _ivcol in getattr(_atm_row, 'columns', ()):
+                    try:
+                        _iv = float(_atm_row[_ivcol].iloc[0])
+                    except (TypeError, ValueError):
+                        _iv = None
+                    if _iv:
+                        break
             # 📈 Into the cache_resource store, not session_state.
             #
             # ⚠️ `_iv_history` lived in session_state, which is PER BROWSER

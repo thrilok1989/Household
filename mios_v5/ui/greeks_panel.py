@@ -29,7 +29,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Optional
 
 from .nifty_cockpit import _card, _esc, _f, _get, _n, _row
-from .theme import BEAR, BULL, CARD_BORDER, INK, MICRO, MUTED, VIOLET, WARN
+from .theme import (ALERT, BEAR, BULL, CARD_BORDER, INK, MICRO, MUTED, VIOLET,
+                    WARN)
 
 #: Posture → (emoji, tone). One map, so the chip and the card agree.
 POSTURE = {
@@ -189,27 +190,37 @@ def greeks_card_html(out: Any = None, guardian: Any = None,
     word = str(guardian or "").strip().upper()
     if word:
         conf = _f(confidence)
+        # ⚠️ WAIT used to be drawn in MUTED grey — the same tone as a secondary
+        # label. WAIT is a DECISION, not an absence of one, and rendering the
+        # Guardian's actual call dimmer than the rows above it made the one line
+        # that matters the hardest to read. Amber: visible, and still not the green
+        # of an entry.
         gt = (BULL if "BUY" in word else BEAR if "SELL" in word
-              else MUTED if "HOLD" in word or "WAIT" in word else WARN)
+              else WARN if "HOLD" in word or "WAIT" in word else ALERT)
         verdict = (
-            f"<div style='margin-top:7px;padding-top:6px;"
+            f"<div style='margin-top:9px;padding-top:8px;"
             f"border-top:1px solid {CARD_BORDER};display:flex;"
             f"justify-content:space-between;align-items:baseline'>"
-            f"<span style='font-size:9px;letter-spacing:.12em;color:{MICRO}'>"
-            f"GUARDIAN</span>"
-            f"<span style='font-size:15px;font-weight:800;color:{gt}'>"
+            f"<span style='font-size:11px;letter-spacing:.12em;font-weight:700;"
+            f"color:{MUTED}'>GUARDIAN</span>"
+            f"<span style='font-size:26px;font-weight:900;line-height:1.1;"
+            f"color:{gt}'>"
             f"{_esc(word)}"
-            + (f"<span style='font-size:11px;color:{MICRO};font-weight:600;"
-               f"margin-left:6px'>{conf:.0f}/100</span>"
+            # ⚠️ A separator, not just a margin — extracted as text the two ran
+            # together and read as "WAIT100/100".
+            + (f"<span style='font-size:14px;color:{MUTED};font-weight:700;"
+               f"margin-left:8px'>· {conf:.0f}/100</span>"
                if conf is not None else "")
             + "</span></div>")
 
     # ── the reason, from the layer's own words ───────────────────────
+    # Brought up from 10.5px/MUTED: this sentence is what explains the verdict
+    # above it, and it was set smaller than the rows it was explaining.
     reason = _reason_line(o)
-    note = (f"<div style='font-size:10.5px;color:{MUTED};margin-top:5px'>"
-            f"{_esc(reason)}</div>" if reason else "")
+    note = (f"<div style='font-size:12.5px;font-weight:600;color:{INK};"
+            f"margin-top:6px'>{_esc(reason)}</div>" if reason else "")
 
-    foot = (f"<div style='font-size:9px;color:{MICRO};margin-top:5px'>"
+    foot = (f"<div style='font-size:10px;color:{MICRO};margin-top:6px'>"
             f"Context and confirmation — greeks modify confidence, they do not "
             f"make the call. Regime: "
             f"{_esc(str(_get(o, 'regime') or '—'))}</div>")
