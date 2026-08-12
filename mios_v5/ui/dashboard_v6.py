@@ -35,17 +35,12 @@ from ..thesis import build_thesis, market_controller, recent_changes
 #: 📊 Charts leads, so the synchronised NIFTY ‖ CALL ‖ PUT figure sits directly
 #: under the price header instead of four blocks down the Trading tab.
 #:
-#: ⚠️ This list is the STRIP's layout only — it does not decide what runs first.
-#:
-#: Streamlit executes each tab body when its container is FILLED, and
-#: `render_dashboard_v6` fills them in dependency order, not in this order. So
-#: moving a label here is safe; what matters is the fill sequence, and
-#: `test_screen_order.py` checks that against the real producer/consumer graph.
-#:
-#: Charts still has to execute before Trading — `_terminal_chart` is the only
-#: producer of `_leg_profiles` (one of the four CRITICAL panels, see
-#: `docs/AUDIT_FOCUS_MODE.md`) and `_trading_screen` reads it for the per-leg
-#: liquidity bars — but that is enforced by the fill order, not by this list.
+#: ⚠️ Being FIRST is load-bearing, not cosmetic. `_terminal_chart` is the only
+#: producer of `_leg_profiles` (see `docs/AUDIT_FOCUS_MODE.md` — it is one of the
+#: four CRITICAL panels), and `_trading_screen` reads that key for its per-leg
+#: liquidity bars. Streamlit executes tab bodies in order, so the chart must be
+#: drawn in a tab that runs BEFORE Trading. Moving it to a later tab would leave
+#: the heatmaps reading the previous cycle's profiles.
 _TABS = ["📊 Charts", "🧭 NIFTY", "📈 OPTIONS", "🎯 Decision", "📈 Trading",
          "🧭 Intelligence", "📒 History", "🎓 Learning", "⏪ Replay",
          "🔧 Debug"]
@@ -112,178 +107,6 @@ def _dbg_caption(st, source: str, message) -> None:
             pass
 
 
-def _strike_oi_charts(st) -> None:
-    """📊 Five ATM±2 strikes × (OI · ΔOI), CE against PE, with each strike's read.
-
-    ⚠️ The history is ACCUMULATED by `vob_minimal.strike_store()`, not fetched —
-    the reference layout read `session_state.oi_history`, which does not exist in
-    this app.
-
-    ⚠️ **Drawn from the FIRST snapshot, not the second.** The first version waited
-    for two, and since the store starts empty at every app restart, opening the app
-    showed one line of caption where ten charts were expected — reported as "not
-    visible", which is exactly what it was. One snapshot is a real observation:
-    it gives the current CE-vs-PE level at each strike, which is most of the value.
-    Only the BUILD DIRECTION needs two points, and `side_read` already withholds
-    that on its own rather than being gated from out here.
-
-    Nothing is recomputed here: `strike_oi_series` builds the figures and the
-    per-strike verdicts from the stored series, and this only lays them out.
-    """
-    try:
-        from .. import strike_history as SH
-        from . import strike_oi_series as SC
-    except Exception as err:
-        _dbg_caption(st, "strike_oi_series", f"unavailable: {err}")
-        return
-    try:
-        # ⚠️ Read from session state, NOT by importing `vob_minimal` — `mios_v5`
-        # may not import the app, and `test_no_mios_module_imports_the_app`
-        # caught the attempt. `strike_store()` publishes the same mutable dict
-        # under `_strike_hist`, so this is the identical object.
-        store = st.session_state.get("_strike_hist") or {"snaps": []}
-        # ⚠️ The basis line is UNCONDITIONAL, and it comes before the conclusions.
-        # Tucking it inside the drawing loop meant that if `figures()` returned
-        # nothing the whole panel vanished with no explanation — the swallowed
-        # failure this repo's loud-chrome rule exists to prevent, reintroduced by
-        # the fix that moved the caption up.
-        st.caption(f"📊 Per-strike OI / ΔOI (ATM±{SH.WINGS}) · "
-                   + SC.caption(store))
-        if not SH.read(store)["n"]:
-            return
-        drew = False
-        for measure, title in (("oi", "Per-Strike Call vs Put OI"),
-                               ("chg", "Per-Strike Change in Call vs Put OI")):
-            figs = SC.figures(store, measure)
-            if not figs:
-                continue
-            st.markdown(f"**📊 {title} · ATM±{SH.WINGS}**")
-            cols = st.columns(len(figs))
-            for col, (strike, _label, fig) in zip(cols, figs):
-                with col:
-                    st.plotly_chart(fig, use_container_width=True,
-                                    key=f"soi_{measure}_{strike}")
-                    if measure == "oi":
-                        _strike_verdict(st, SC.strike_read(store, strike))
-            drew = True
-        if not drew:
-            # Snapshots stored but nothing plottable — say so instead of
-            # leaving a heading-less gap that reads as "never built".
-            st.caption("📊 …the snapshots carry no OI columns to plot — "
-                       "the chain arrived without them.")
-    except Exception as err:
-        _dbg_caption(st, "strike_oi_series", f"charts unavailable: {err}")
-
-
-def _strike_verdict(st, r) -> None:
-    """One strike's read, in the words `strike_oi_series` produced.
-
-    Support/resistance strength first — it is the level statement — then what each
-    side's OI is doing, which is what makes the level credible or fading.
-    """
-    if not isinstance(r, dict):
-        return
-    if r.get("balanced"):
-        # ⚠️ Equal CE and PE OI is NOT a level. The render showed "WEAK RESISTANCE
-        # · 1.0×" on a strike sitting at 9.0L against 9.0L.
-        st.markdown("<div style='font-size:11px;font-weight:700;color:#8f9bab'>"
-                    "BALANCED · neither side heavier</div>",
-                    unsafe_allow_html=True)
-    level, strength = r.get("level"), r.get("strength")
-    if level and strength:
-        tone = {"STRONG": "#00ff88", "MODERATE": "#00cc66",
-                "WEAK": "#88aa44"}.get(strength, "#cfd9e6")
-        if level == "resistance":
-            tone = {"STRONG": "#ff4444", "MODERATE": "#cc4444",
-                    "WEAK": "#aa6644"}.get(strength, "#cfd9e6")
-        st.markdown(f"<div style='font-size:11px;font-weight:700;color:{tone}'>"
-                    f"{strength} {level.upper()} · {r.get('ratio', 0):.1f}×</div>",
-                    unsafe_allow_html=True)
-        # The caveat rides with the claim it qualifies, not in a footnote.
-        if r.get("level_note"):
-            st.markdown(f"<div style='font-size:10px;color:#ffb000'>⚠️ "
-                        f"{r['level_note']}</div>", unsafe_allow_html=True)
-    for side in ("ce", "pe"):
-        d = r.get(side) or {}
-        if not d.get("state"):
-            continue
-        bits = [f"{side.upper()}: {d['state']}"]
-        if d.get("means"):
-            bits.append(d["means"])
-        st.markdown(f"<div style='font-size:10px;color:#b3c2d4'>"
-                    f"{' · '.join(bits)}</div>", unsafe_allow_html=True)
-
-
-def _poc_structure(st) -> None:
-    """🏛 Four rolling POCs on a daily axis, then the layered read as a table.
-
-    ⚠️ Everything here is READ. `vob_minimal._publish_poc_series` builds the curves
-    off the 5-year daily history Stage 45 already fetches (cached hourly — 1250 bars
-    costs ~420 ms, which is not a per-rerun expense), and this lays them out.
-
-    ⚠️ No candles and no close line. With bars drawn the eye follows the bars and
-    the POCs become decoration; a close line would make this a second price chart,
-    which `terminal_chart` already is. Spot is one horizontal marker, which is all
-    the reference price these curves need.
-    """
-    try:
-        from . import poc_structure as PC
-    except Exception as err:
-        _dbg_caption(st, "poc_structure", f"unavailable: {err}")
-        return
-    try:
-        d = st.session_state.get("_poc_series") or {}
-        st.markdown("**🏛 Multi-window POC · daily · rolling**")
-        if not d.get("series"):
-            # ⚠️ Name the SOURCE that failed, not just the absence. "daily history
-            # not fetched yet" was reported as the panel not being displayed — and
-            # it was the honest truth about the data while telling the reader
-            # nothing they could act on. The daily frame has two sources now and
-            # `_htf_daily_error` records what each one said.
-            why = (st.session_state.get("_htf_daily_error")
-                   or d.get("error")
-                   or "daily history not fetched yet — it arrives with Stage 45's "
-                      "hourly refresh")
-            st.warning(f"🏛 Multi-window POC — no daily bars, so no curves. "
-                       f"Tried: {why}. Stage 45's Daily/Weekly/Monthly/Yearly "
-                       f"profiles need the same frame.")
-            return
-        st.caption(d.get("caption") or "")
-        fig = PC.figure(d.get("dates") or [], d.get("series") or {},
-                        d.get("spot"), d.get("subdaily"))
-        if fig is not None:
-            st.plotly_chart(fig, use_container_width=True, key="poc_structure")
-        html = PC.table_html(d.get("rows") or [], d.get("align"))
-        if html:
-            st.markdown(html, unsafe_allow_html=True)
-        # The 1H / 4H POCs as a sentence — see poc_structure.figure for why they
-        # are not lines on this axis.
-        sub = PC.subdaily_line(d.get("subdaily"), d.get("spot"))
-        if sub:
-            st.markdown(sub, unsafe_allow_html=True)
-    except Exception as err:
-        _dbg_caption(st, "poc_structure", f"unavailable: {err}")
-
-
-def _feed_reason(st) -> str:
-    """Why there is no data, in `feed_status`' words.
-
-    ⚠️ One owner for the answer. Three panels stand by on a missing chain and each
-    used to explain it differently — none of them mentioning that before 09:15
-    there simply is no chain to fetch, which made a healthy morning look broken.
-    """
-    try:
-        from datetime import datetime
-
-        import pytz
-
-        from ..feed_status import sentence
-        return sentence(st.session_state,
-                        datetime.now(pytz.timezone("Asia/Kolkata")))
-    except Exception:
-        return "the option chain has not arrived yet."
-
-
 def _spot_price(state):
     """NIFTY spot from the one owner — `mios_v5.spot`.
 
@@ -339,41 +162,16 @@ def render_dashboard_v6(state=None, db=None) -> None:
                 unsafe_allow_html=True)
 
     tabs = st.tabs(_TABS)
-
-    # ⚠️ FILLED IN DEPENDENCY ORDER, NOT TAB ORDER.
-    #
-    # `st.tabs()` returns containers that may be filled in any sequence — the
-    # strip's left-to-right order is fixed by `_TABS` and does not change here.
-    # What changes is the order the bodies EXECUTE in during one rerun, and that
-    # is a real dependency:
-    #
-    #     _charts_screen      writes  _leg_profiles
-    #     _trading_screen     reads   _leg_profiles
-    #                         writes  _sr_levels · _premium_energy
-    #                                 _premium_structures · _entry_decision
-    #     _nifty_cockpit      reads   _sr_levels · _entry_decision
-    #     _options_cockpit    reads   _premium_energy · _premium_structures
-    #
-    # Filled in tab order the three cockpits ran BEFORE their producer, so:
-    #   · on the first render of a session those keys did not exist and the
-    #     blocks drew nothing — the "⚪ Not reporting yet: sr table / premium
-    #     energy / premium structure / option flow" captions;
-    #   · on every render after, they silently showed the PREVIOUS cycle's data,
-    #     20 seconds behind the panels beside them.
-    #
-    # This is a consequence of moving the new dashboards to the front of the
-    # strip: the layout moved, the producers did not. Nothing is recomputed here
-    # and no engine is touched — only the sequence the tab bodies run in.
     with tabs[0]:
         _charts_screen(st, fr)
-    with tabs[4]:
-        _trading_screen(st, fr, state)
     with tabs[1]:
         _nifty_cockpit(st, fr)
     with tabs[2]:
         _options_cockpit(st, fr)
     with tabs[3]:
         _decision_center(st, fr)
+    with tabs[4]:
+        _trading_screen(st, fr, state)
     with tabs[5]:
         _intelligence(st, fr, state)
     with tabs[6]:
@@ -407,19 +205,12 @@ def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
         S/R ranking            sr_intel.rank_levels         → _sr_levels
         battle zone            Stage 35                     → final_read
 
-    ⚠️ FIXED — this note used to describe the bug as expected behaviour, and was
-    wrong about where the producer lives.
-
-    `_sr_levels` is published by `_sr_intelligence`, which `_trading_screen`
-    calls — NOT the Intelligence tab, as this said. Because the tab bodies were
-    filled in tab order, this cockpit (tab 1) ran before that producer (tab 4):
-    the table was empty on the first rerun of a session and showed the PREVIOUS
-    cycle's levels on every rerun after.
-
-    The old note concluded that fixing it would mean moving a CRITICAL producer.
-    It would not: `st.tabs()` containers may be filled in any sequence and the
-    strip's layout is unaffected, so `render_dashboard_v6` now fills Trading
-    before the cockpits and nothing moved on screen. See `test_screen_order.py`.
+    ⚠️ `_sr_levels` is published by `_sr_intelligence`, which runs on the
+    Intelligence tab — a LATER tab than this one. So on the very first rerun of
+    a session this table is empty and fills on the next; `sr_table_html` returns
+    `""` rather than an empty frame, and the note below says so. Reordering the
+    tabs to fix that would move a CRITICAL producer, which is the mistake the
+    Charts move was careful not to make.
     """
     from .nifty_cockpit import BLOCK_ORDER, cockpit_blocks
 
@@ -483,26 +274,15 @@ def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
         "htf": ss.get("_htf_profiles"),
         # ── the outside world ────────────────────────────────────────
         "external_rows": _external_rows(mp, ss),
-        # ── 🏛 institutional flows · Stage 23 ─────────────────────────
-        # Fetched every cycle into `_fii_dii_cash` / `_fii_deriv_stats` and,
-        # until now, drawn nowhere — the one display site read the wrong key
-        # shape, so the row was permanently a dash.
-        #
-        # The verdict is Stage 23's, passed through: it owns the ₹-crore
-        # thresholds and the absorption-battle test, and re-deciding them here
-        # would put two answers to one question on one screen.
-        "fii_dii_cash": ss.get("_fii_dii_cash"),
-        "fii_deriv": ss.get("_fii_deriv_stats"),
-        **{f"flows_{k}": v for k, v in _flows_read(ss).items()},
         # ── so what ──────────────────────────────────────────────────
         "regime": mp.get("regime"),
         "need": _gate_needs(mp.get("entry_gate")),
     })
 
     if not blocks:
-        st.info("🧭 NIFTY cockpit standing by — " + _feed_reason(st)
-                + " It reads the Market Picture, the volume profile and the "
-                  "chain.")
+        st.info("🧭 NIFTY cockpit standing by — it reads the Market Picture, "
+                "the volume profile and the chain. Those land once the option "
+                "chain and candles are both in.")
         return
 
     left, right = st.columns(2)
@@ -523,11 +303,6 @@ def _nifty_cockpit(st, fr: Dict[str, Any]) -> None:
     with ro:
         st.markdown(blocks.get("liquidity", ""), unsafe_allow_html=True)
         st.markdown(blocks.get("external", ""), unsafe_allow_html=True)
-        # 🏛 Under the external context, because it is the same kind of reading:
-        # slow, outside the chain, and daily. Deliberately NOT beside the live
-        # intraday panels on the left, where a ₹-crore figure from yesterday
-        # sits among ticking numbers and reads as current.
-        st.markdown(blocks.get("fii_dii", ""), unsafe_allow_html=True)
     st.markdown(blocks.get("htf", ""), unsafe_allow_html=True)
     # The state closes the dashboard, because it is the only line that is worth
     # anything after reading the nine above it.
@@ -572,19 +347,12 @@ def _options_cockpit(st, fr: Dict[str, Any]) -> None:
         Stage 71.7 `_premium_energy`      energy · spike · strength · preferred
         the chain  `df_summary`           LTP · OI · ΔOI · volume · bid/ask
 
-    `_premium_structures` is keyed by `(side, strike)` TUPLES. Re-keying is done
-    here rather than asking the pure module to understand a tuple key, which is
-    the same boundary rename `_mios_market_read` does.
-
-    ⚠️ FIXED — this note used to end "So on the first rerun of a session the
-    structure and flow blocks are empty and fill on the next", which recorded a
-    real bug as accepted behaviour. Stage 71.8 publishes `_premium_structures`
-    from `_strike_validation` on the Trading tab, and filling the tabs in tab
-    order ran this cockpit first, so those blocks showed nothing on the first
-    rerun and the PREVIOUS cycle's data on every one after.
-    `render_dashboard_v6` now fills Trading before the cockpits — the strip is
-    unchanged, since `st.tabs()` containers may be filled in any sequence. See
-    `test_screen_order.py`.
+    ⚠️ `_premium_structures` is keyed by `(side, strike)` TUPLES, and Stage 71.8
+    publishes it from `_strike_validation` on the Trading tab — a LATER tab than
+    this one. So on the first rerun of a session the structure and flow blocks
+    are empty and fill on the next. Re-keying is done here rather than asking the
+    pure module to understand a tuple key, which is the same boundary rename
+    `_mios_market_read` does.
     """
     from .options_cockpit import (BLOCK_ORDER, cockpit_blocks,
                                  greeks_table_html)
@@ -619,14 +387,9 @@ def _options_cockpit(st, fr: Dict[str, Any]) -> None:
     })
 
     if not blocks:
-        # ⚠️ The old text named the two stages and left the trader to guess
-        # whether the app was broken. At 08:25 it appears on a healthy app,
-        # because there is no option chain before 09:15 — and everything here
-        # hangs off the chain. `feed_status` gives the same answer the Trade Card
-        # gives, so one silence cannot get two explanations.
-        st.info("📈 Options cockpit standing by — " + _feed_reason(st)
-                + " Premium energy (71.7) and premium structure (71.8) both "
-                  "need the chain and the ATM legs.")
+        st.info("📈 Options cockpit standing by — it reads Stage 71.7's premium "
+                "energy and Stage 71.8's premium structure. Those land once the "
+                "chain and the ATM legs are both in.")
         return
 
     st.markdown(blocks.get("option_header", ""), unsafe_allow_html=True)
@@ -1057,48 +820,14 @@ def _external_rows(mp: Dict[str, Any], ss) -> List[Tuple[str, Any]]:
             rows.append(("India VIX", None))
     except Exception:
         rows.append(("India VIX", None))
-    # 🏛 FII / DII — ⚠️ this row read `fd.get("fii_net")`, which is
-    # `stage23_flows`' OUTPUT shape, not the raw NSE payload's. `_fii_dii_cash`
-    # is `{"FII": {buy, sell, net, date}, "DII": {...}}`, so the lookup always
-    # missed and the row has shown a dash since the day it was written — fetched
-    # every cycle, published, and never once displayed.
-    #
-    # Both sides, not just FII: `FII −4,200` is a rout or a non-event depending
-    # entirely on what DII did against it, and one number invites the first
-    # reading.
     try:
-        from .fii_dii_panel import micro as _fii_micro
-        _fl = _flows_read(ss)
-        rows.append(("FII / DII (EOD)",
-                     _fii_micro(ss.get("_fii_dii_cash"),
-                                _fl.get("conflict")) or None))
+        fd = ss.get("_fii_dii_cash") or {}
+        net = fd.get("fii_net") if isinstance(fd, dict) else None
+        rows.append(("FII cash",
+                     f"{float(net):+,.0f} Cr" if net is not None else None))
     except Exception:
-        rows.append(("FII / DII (EOD)", None))
+        rows.append(("FII cash", None))
     return rows
-
-
-def _flows_read(state) -> Dict[str, Any]:
-    """Stage 23's verdict on the institutional flows, or an empty read.
-
-    ⚠️ READ, not re-derived. `stage23_flows` owns the ₹-crore thresholds
-    (`_STRONG = 2500`, `_MILD = 800`), the bias and the absorption-battle
-    detection. Answering "is ₹2,500cr a lot?" a second time in the display layer
-    would put two answers to one question on the same screen.
-    """
-    out: Dict[str, Any] = {}
-    try:
-        res = (state.get("_mios_state") or {}).get("stage23_flows")
-        if res is None:
-            return out
-        out["bias"] = getattr(getattr(res, "bias", None), "name", None) or \
-            getattr(res, "bias", None)
-        out["confidence"] = getattr(res, "confidence", None)
-        out["evidence"] = list(getattr(res, "evidence", None) or ())
-        out["conflict"] = bool((getattr(res, "data", None) or {})
-                               .get("conflict"))
-    except Exception:
-        return {}
-    return out
 
 
 def _gate_needs(gate) -> List[str]:
@@ -1163,35 +892,6 @@ def _charts_screen(st, fr: Dict[str, Any]) -> None:
 
     call, put, call_tag, put_tag = _leg_reads(st, fr)
     _terminal_chart(st, fr, call_tag, put_tag, dominance(call, put))
-
-    # 🧮 The ATM±1 leg tabulation, directly under the charts it explains.
-    #
-    # ⚠️ `build_leg_bias_table` has computed these 19 per-signal columns every
-    # cycle and NOTHING ever drew them. The rows reached `_leg_bias_cache`, whose
-    # consumers — Stage 14, three alert paths, a gate check — all take the
-    # VERDICTS and discard the detail, so the trader was told "Leg Fast Verdict:
-    # BEARISH" with no way to see which signal voted that way.
-    #
-    # Read from the published cache, not rebuilt: `_render_main_analyzer` owns the
-    # call and re-running it here would be a second set of 6 leg computations per
-    # cycle, and two answers to one question.
-    try:
-        from .leg_table_panel import leg_table_html
-        _lt = st.session_state.get("_leg_bias_cache") or (None, None)
-        _html = leg_table_html(_lt[0], _lt[1])
-        if _html:
-            st.markdown(_html, unsafe_allow_html=True)
-        else:
-            st.caption("🧮 ATM±1 leg tabulation — " + _feed_reason(st)
-                       + " It needs the six ATM±1 leg candle series.")
-    except Exception as err:
-        _dbg_caption(st, "leg_table_panel", f"Leg tabulation unavailable: {err}")
-
-    # 📊 Per-strike Call vs Put OI and ΔOI, ATM±2 — below the tabulation.
-    _strike_oi_charts(st)
-
-    # 🏛 The layered POC picture on a daily axis — no candles, POC only.
-    _poc_structure(st)
 
 
 # ── 1 · DECISION ────────────────────────────────────────────────────────
