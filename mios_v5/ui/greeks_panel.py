@@ -251,9 +251,23 @@ def _reason_line(out: Mapping[str, Any]) -> str:
     # `_modifiers` from the same fade figure, and it reached no surface at all
     # (principle 12: a computed decision must be inspectable). Appended, not
     # re-worded — the counterweight is the engine's, not this panel's.
+    # ⚠️ MEDIUM as well as HIGH, and it names the number.
+    #
+    # This fired only on HIGH (fade ≥ 60), so a cycle reading **fade 55%** —
+    # MEDIUM — showed the positive half alone: "Dealer hedging supports…" sitting
+    # directly under a GUARDIAN WAIT, which was reported as the card contradicting
+    # itself. 55% favours a failed move, and that is the reason the Guardian is
+    # waiting; it has to appear in the sentence that explains the wait.
+    #
+    # The percentage is `_modifiers`' own `fade_probability`, quoted not derived,
+    # and "wait for confirmation" describes the greeks' limitation — it does not
+    # manufacture a side. The Guardian's verdict is untouched either way.
     risk = str(_get(mods, "risk_level") or "").strip().upper()
-    if risk == "HIGH" and "risk" not in line.lower():
-        tail = "high fade/pin risk regardless"
+    fade = _f(_get(mods, "fade_probability"))
+    if risk in ("HIGH", "MEDIUM") and "fade" not in line.lower():
+        tail = (f"fade risk {fade:.0f}%; wait for confirmation"
+                if fade is not None else
+                f"{risk.lower()} fade/pin risk; wait for confirmation")
         line = f"{line} — {tail}" if line else tail.capitalize()
     return line
 

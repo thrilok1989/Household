@@ -671,12 +671,21 @@ def _modifiers(adaptive: float, flow_sign: int, dealer: Mapping[str, Any],
     delta = 0.0
     why: List[str] = []
 
+    # ⚠️ "movement, not an entry". These read "supports/opposes the move", which
+    # was reported as the confusing part of the card: beneath a GUARDIAN WAIT it
+    # looked like the greeks endorsing a trade the Guardian had refused.
+    #
+    # What the posture actually says is whether dealer hedging AMPLIFIES or DAMPS
+    # movement (relative to flow — see `dealer_posture.relative_to`). It says
+    # nothing about whether there is a valid entry, and with negative gamma it
+    # amplifies in EITHER direction. The delta is unchanged; only the sentence is
+    # more precise about its own scope.
     if dealer.get("posture") == "SUPPORTIVE":
         delta += 6.0
-        why.append("dealer hedging supports the move")
+        why.append("dealer hedging supports movement, not an entry")
     elif dealer.get("posture") == "OPPOSING":
         delta -= 6.0
-        why.append("dealer hedging opposes the move")
+        why.append("dealer hedging damps movement")
     if vol.get("confirmation") == "CONFIRMING":
         delta += 6.0
         why.append("volatility confirms")

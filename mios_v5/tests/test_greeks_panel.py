@@ -432,11 +432,12 @@ def test_a_high_risk_cycle_never_reads_as_purely_supportive():
     risk HIGH 65%". `risk_level` was already computed and reached no surface."""
     out = _his_cycle()
     assert out["modifiers"]["confidence_why"] == [
-        "dealer hedging supports the move"], "fixture drifted"
+        "dealer hedging supports movement, not an entry"], "fixture drifted"
     assert not out["conflicts"], "fixture drifted — a conflict would lead instead"
 
     reason = GP._reason_line(out)
-    assert "supports the move" in reason
+    assert "supports movement" in reason
+    assert "not an entry" in reason, "the scope of 'supports' must be stated"
     assert "risk" in reason.lower(), "the reason is still one-sided"
     assert reason in GP.greeks_card_html(out, "WAIT", 77)
 
@@ -478,3 +479,72 @@ def test_no_reason_at_all_still_returns_a_string():
     for out in ({}, {"conflicts": [], "modifiers": {}},
                 {"conflicts": [], "modifiers": {"risk_level": "LOW"}}):
         assert GP._reason_line(out) == ""
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  the reported PUT · DOWN cycle — "why WAIT if everything is supportive?"
+# ══════════════════════════════════════════════════════════════════════
+
+def _down_cycle():
+    """PUT · DOWN · BREAKOUT: negative gamma flip ₹24,315, magnet ₹24,200 eighty
+    points below spot, no IV history. Reproduces breakout 45% / fade 55%."""
+    return AG.read(flow={"regime": "DOWN", "order_flow": "Bear", "cvd": -1.0},
+                   gex={"total": -210.0, "flip": 24315.0, "magnet": 24200.0},
+                   dex={"bias": "BEAR"},
+                   vc={"net_vanna": -8.0, "net_charm": -120.0},
+                   iv_series=None, spot=24280.0, magnet=24200.0,
+                   market_picture={"regime": "DOWN"})
+
+
+def test_the_reported_down_cycle_reproduces():
+    m = _down_cycle()["modifiers"]
+    assert (m["breakout_probability"], m["fade_probability"]) == (45, 55)
+    assert m["risk_level"] == "MEDIUM"
+
+
+def test_the_reason_no_longer_reads_as_endorsing_a_trade():
+    """⚠️ The report: "🟢 SUPPORTIVE of flow" over "GUARDIAN WAIT" over "Dealer
+    hedging supports the move" read as *everything is supportive, so why WAIT?*
+
+    Two things were wrong. The engine's sentence did not say what it supported —
+    MOVEMENT, not an entry — and the fade counterweight fired only at HIGH
+    (≥60), so a 55% cycle showed the positive half alone.
+    """
+    out = _down_cycle()
+    reason = GP._reason_line(out)
+    assert "not an entry" in reason, "the scope of 'supports' is unstated"
+    assert "55%" in reason, "the fade figure explaining the WAIT is missing"
+    assert "wait for confirmation" in reason
+    assert reason in GP.greeks_card_html(out, "WAIT", 100)
+
+
+def test_the_counterweight_fires_at_medium_not_just_high():
+    base = _down_cycle()
+    for level, fade in (("MEDIUM", 55), ("HIGH", 72)):
+        out = dict(base, modifiers=dict(base["modifiers"],
+                                        risk_level=level,
+                                        fade_probability=fade))
+        assert f"{fade}%" in GP._reason_line(out), level
+    calm = dict(base, modifiers=dict(base["modifiers"], risk_level="LOW",
+                                     fade_probability=22))
+    assert "wait for confirmation" not in GP._reason_line(calm)
+
+
+def test_the_engine_says_movement_not_the_move():
+    """Only `greeks_panel` reads `confidence_why`, so the wording is safe to make
+    precise — and the imprecision was the whole complaint."""
+    why = _down_cycle()["modifiers"]["confidence_why"]
+    assert any("movement, not an entry" in w for w in why)
+    assert not any(w.endswith("supports the move") for w in why)
+
+
+def test_the_greeks_still_never_manufacture_a_side():
+    """⚠️ The line the user drew: the Greeks explain why confidence is limited;
+    they do not turn a DOWN regime into a PUT entry."""
+    out = _down_cycle()
+    AG.assert_no_recommendation(out)
+    assert GP.greeks_card_html(out, "WAIT", 100).count("WAIT") >= 1
+    # handed no verdict, no verdict word appears
+    up = GP.greeks_card_html(out, None, None).upper()
+    for banned in ("BUY", "SELL", "ENTER", "PUT ENTRY"):
+        assert banned not in up
