@@ -682,13 +682,17 @@ def test_the_idle_guardian_line_is_not_a_muted_caption():
 
     ⚠️ It was an `st.caption`, which Streamlit ALWAYS renders in muted grey — so
     the standing-watch message read as disabled chrome next to the Guardian's
-    other states, which each carry their own colour. Bright pink, and asserted on
-    the AST so it cannot quietly go back to a caption.
+    other states, which each carry their own colour. A pink FILL with white
+    letters, in the padded/rounded shape those states use, and asserted on the
+    source so it cannot quietly go back to a caption.
     """
     src = (ROOT / "vob_minimal.py").read_text()
     i = src.index("🛡 Position Guardian — idle")
     call_start = src.rindex("st.", 0, i)
     block = src[call_start:src.index("EXIT FAST.", i)]
     assert block.startswith("st.markdown("), block[:40]
-    assert "#ff2d95" in block, "the idle line lost its bright pink"
+    assert "background:#ff2d95" in block, "the idle line lost its pink fill"
+    assert "color:#ffffff" in block, "the letters must be bright white"
     assert "st.caption" not in block
+    # a fill needs padding or the text sits flush against the colour edge
+    assert "padding:" in block and "border-radius:" in block

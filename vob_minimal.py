@@ -8822,11 +8822,15 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
             #
             # ⚠️ `st.caption` was the wrong element for it: caption is always
             # rendered in Streamlit's muted grey, so the one line that says the
-            # Guardian exists and is watching read as disabled chrome. Bright pink,
-            # like the other Guardian states, which all carry their own colour.
+            # Guardian exists and is watching read as disabled chrome.
+            #
+            # Pink FILL with white letters, in the same padded/rounded shape the
+            # other Guardian states use — so idle is a state that looks like a
+            # state, not a footnote under them.
             st.markdown(
-                "<div style='margin:2px 0 8px;font-size:13px;font-weight:700;"
-                "color:#ff2d95;'>"
+                "<div style='margin:2px 0 8px;padding:8px 13px;"
+                "background:#ff2d95;border-radius:8px;font-size:13px;"
+                "font-weight:800;color:#ffffff;'>"
                 "🛡 Position Guardian — idle · no active trade. Arms on a "
                 "CONFIRMED entry, then watches ON TRACK ⇄ STAY PATIENT ⇄ "
                 "REVERSAL WARNING → EXIT FAST.</div>",
