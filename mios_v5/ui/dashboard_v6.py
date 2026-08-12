@@ -214,6 +214,50 @@ def _strike_verdict(st, r) -> None:
                     f"{' · '.join(bits)}</div>", unsafe_allow_html=True)
 
 
+def _poc_structure(st) -> None:
+    """🏛 Four rolling POCs on a daily axis, then the layered read as a table.
+
+    ⚠️ Everything here is READ. `vob_minimal._publish_poc_series` builds the curves
+    off the 5-year daily history Stage 45 already fetches (cached hourly — 1250 bars
+    costs ~420 ms, which is not a per-rerun expense), and this lays them out.
+
+    ⚠️ No candles and no close line. With bars drawn the eye follows the bars and
+    the POCs become decoration; a close line would make this a second price chart,
+    which `terminal_chart` already is. Spot is one horizontal marker, which is all
+    the reference price these curves need.
+    """
+    try:
+        from . import poc_structure as PC
+    except Exception as err:
+        _dbg_caption(st, "poc_structure", f"unavailable: {err}")
+        return
+    try:
+        d = st.session_state.get("_poc_series") or {}
+        st.markdown("**🏛 Multi-window POC · daily · rolling**")
+        if not d.get("series"):
+            # Always a sentence: the daily history is fetched hourly and may not
+            # have landed on the first cycle, which is not the same as "not built".
+            st.caption("🏛 Multi-window POC · "
+                       + (d.get("caption") or "daily history not fetched yet — "
+                          "it arrives with Stage 45's hourly refresh."))
+            return
+        st.caption(d.get("caption") or "")
+        fig = PC.figure(d.get("dates") or [], d.get("series") or {},
+                        d.get("spot"), d.get("subdaily"))
+        if fig is not None:
+            st.plotly_chart(fig, use_container_width=True, key="poc_structure")
+        html = PC.table_html(d.get("rows") or [], d.get("align"))
+        if html:
+            st.markdown(html, unsafe_allow_html=True)
+        # The 1H / 4H POCs as a sentence — see poc_structure.figure for why they
+        # are not lines on this axis.
+        sub = PC.subdaily_line(d.get("subdaily"), d.get("spot"))
+        if sub:
+            st.markdown(sub, unsafe_allow_html=True)
+    except Exception as err:
+        _dbg_caption(st, "poc_structure", f"unavailable: {err}")
+
+
 def _feed_reason(st) -> str:
     """Why there is no data, in `feed_status`' words.
 
@@ -1138,6 +1182,9 @@ def _charts_screen(st, fr: Dict[str, Any]) -> None:
 
     # 📊 Per-strike Call vs Put OI and ΔOI, ATM±2 — below the tabulation.
     _strike_oi_charts(st)
+
+    # 🏛 The layered POC picture on a daily axis — no candles, POC only.
+    _poc_structure(st)
 
 
 # ── 1 · DECISION ────────────────────────────────────────────────────────
