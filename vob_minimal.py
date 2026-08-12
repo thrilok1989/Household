@@ -1558,6 +1558,23 @@ def get_dhan_option_chain(underlying_scrip: int, underlying_seg: str, expiry: st
 
 
 @st.cache_resource(show_spinner=False)
+def strike_store():
+    """📊 Per-strike OI / ΔOI history for ATM±2, one store for the process.
+
+    ⚠️ Built rather than wired: the reference charts read
+    `st.session_state.oi_history` / `.chgoi_history`, and NEITHER EXISTS in this
+    app. What exists is `df_summary`, rebuilt every cycle — so the time series has
+    to be accumulated from those snapshots.
+
+    `cache_resource` for the same reason as `iv_store`: `cache_data` returns a
+    copy, so appends would be discarded, and `session_state` is per browser
+    session, so the collection would restart on every reload and in every tab.
+    Bounded by `strike_history.CAP`.
+    """
+    return {"snaps": []}
+
+
+@st.cache_resource(show_spinner=False)
 def iv_store():
     """📈 The ATM IV history, one store for the whole process.
 
@@ -14640,6 +14657,22 @@ def _render_main_analyzer():
             # chain pushed the same number repeatedly and `vals[-1] - vals[0]`
             # compared two readings of unknown — possibly identical — age.
             # `iv_history.record` dedups and stamps; see its module docstring.
+            # 📊 One per-strike ATM±2 snapshot per cycle — OI, ΔOI and both
+            # LTPs. `strike_history` dedups on MIN_GAP_S so a rerun that brought
+            # no fresh chain cannot draw a flat line that looks settled.
+            try:
+                from mios_v5 import strike_history as _shmod
+                _sst = strike_store()
+                _shmod.record(_sst, df_summary, underlying)
+                # ⚠️ Published as a REFERENCE, not a copy. `mios_v5` may not
+                # import this file (the guard test enforces it), so the panel
+                # cannot reach `strike_store()` itself — and `cache_resource`
+                # returns the same object every time, so handing the same dict
+                # through session_state costs nothing and keeps the dependency
+                # pointing one way.
+                st.session_state['_strike_hist'] = _sst
+            except Exception:
+                pass
             from mios_v5 import iv_history as _ivmod
             _ivs = iv_store()
             # One-time bridge so an already-running session keeps its history

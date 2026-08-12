@@ -112,6 +112,90 @@ def _dbg_caption(st, source: str, message) -> None:
             pass
 
 
+def _strike_oi_charts(st) -> None:
+    """📊 Five ATM±2 strikes × (OI · ΔOI), CE against PE, with each strike's read.
+
+    ⚠️ The history is ACCUMULATED by `vob_minimal.strike_store()`, not fetched —
+    the reference layout read `session_state.oi_history`, which does not exist in
+    this app. Two snapshots are needed before anything can be plotted, so the
+    first cycle of a session says so rather than drawing empty axes.
+
+    Nothing is recomputed here: `strike_oi_series` builds the figures and the
+    per-strike verdicts from the stored series, and this only lays them out.
+    """
+    try:
+        from .. import strike_history as SH
+        from . import strike_oi_series as SC
+    except Exception as err:
+        _dbg_caption(st, "strike_oi_series", f"unavailable: {err}")
+        return
+    try:
+        # ⚠️ Read from session state, NOT by importing `vob_minimal` — `mios_v5`
+        # may not import the app, and `test_no_mios_module_imports_the_app`
+        # caught the attempt. `strike_store()` publishes the same mutable dict
+        # under `_strike_hist`, so this is the identical object.
+        store = st.session_state.get("_strike_hist") or {"snaps": []}
+        if not SH.read(store)["reporting"]:
+            st.caption(f"📊 Per-strike OI / ΔOI (ATM±{SH.WINGS}) · "
+                       + SC.caption(store))
+            return
+        drew = False
+        for measure, title in (("oi", "Per-Strike Call vs Put OI"),
+                               ("chg", "Per-Strike Change in Call vs Put OI")):
+            figs = SC.figures(store, measure)
+            if not figs:
+                continue
+            st.markdown(f"**📊 {title} · ATM±{SH.WINGS}**")
+            # ⚠️ The basis BEFORE the conclusions. It sat under both sections, so
+            # the "STRONG SUPPORT · 4.7×" verdicts were read with no idea whether
+            # they came from four snapshots or four hundred.
+            if not drew:
+                st.caption(SC.caption(store))
+                drew = True
+            cols = st.columns(len(figs))
+            for col, (strike, _label, fig) in zip(cols, figs):
+                with col:
+                    st.plotly_chart(fig, use_container_width=True,
+                                    key=f"soi_{measure}_{strike}")
+                    if measure == "oi":
+                        _strike_verdict(st, SC.strike_read(store, strike))
+    except Exception as err:
+        _dbg_caption(st, "strike_oi_series", f"charts unavailable: {err}")
+
+
+def _strike_verdict(st, r) -> None:
+    """One strike's read, in the words `strike_oi_series` produced.
+
+    Support/resistance strength first — it is the level statement — then what each
+    side's OI is doing, which is what makes the level credible or fading.
+    """
+    if not isinstance(r, dict):
+        return
+    level, strength = r.get("level"), r.get("strength")
+    if level and strength:
+        tone = {"STRONG": "#00ff88", "MODERATE": "#00cc66",
+                "WEAK": "#88aa44"}.get(strength, "#cfd9e6")
+        if level == "resistance":
+            tone = {"STRONG": "#ff4444", "MODERATE": "#cc4444",
+                    "WEAK": "#aa6644"}.get(strength, "#cfd9e6")
+        st.markdown(f"<div style='font-size:11px;font-weight:700;color:{tone}'>"
+                    f"{strength} {level.upper()} · {r.get('ratio', 0):.1f}×</div>",
+                    unsafe_allow_html=True)
+        # The caveat rides with the claim it qualifies, not in a footnote.
+        if r.get("level_note"):
+            st.markdown(f"<div style='font-size:10px;color:#ffb000'>⚠️ "
+                        f"{r['level_note']}</div>", unsafe_allow_html=True)
+    for side in ("ce", "pe"):
+        d = r.get(side) or {}
+        if not d.get("state"):
+            continue
+        bits = [f"{side.upper()}: {d['state']}"]
+        if d.get("means"):
+            bits.append(d["means"])
+        st.markdown(f"<div style='font-size:10px;color:#b3c2d4'>"
+                    f"{' · '.join(bits)}</div>", unsafe_allow_html=True)
+
+
 def _feed_reason(st) -> str:
     """Why there is no data, in `feed_status`' words.
 
@@ -1033,6 +1117,9 @@ def _charts_screen(st, fr: Dict[str, Any]) -> None:
                        + " It needs the six ATM±1 leg candle series.")
     except Exception as err:
         _dbg_caption(st, "leg_table_panel", f"Leg tabulation unavailable: {err}")
+
+    # 📊 Per-strike Call vs Put OI and ΔOI, ATM±2 — below the tabulation.
+    _strike_oi_charts(st)
 
 
 # ── 1 · DECISION ────────────────────────────────────────────────────────

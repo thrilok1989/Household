@@ -196,9 +196,15 @@ def test_the_store_is_cache_resource_not_cache_data_or_session_state():
 
 
 def test_the_writer_uses_the_store_and_the_module():
+    """⚠️ Bounded by the NEXT SECTION, not by a character count. The first version
+    sliced a fixed 1600 chars, so inserting the per-strike recorder ahead of the IV
+    write pushed `iv_store()` out of the window and failed a wiring that was fine
+    — the same fixed-length-slice trap already sprung once in
+    `test_chart_and_card_wiring.py`."""
     src = (_ROOT / "vob_minimal.py").read_text()
     i = src.index("_atm_row = df_summary.iloc[")
-    block = src[i:i + 1600]
+    j = src.index("# ── 7 · the ATM legs", i)
+    block = src[i:j]
     assert "iv_store()" in block
     assert "iv_history" in block
     assert ".record(" in block
