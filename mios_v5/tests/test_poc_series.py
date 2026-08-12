@@ -298,7 +298,6 @@ def test_junk_never_raises(junk):
     assert PS.lines(junk, junk, junk) == {}
     assert PS.stack(junk if isinstance(junk, dict) else {}, junk) == []
     assert PS.alignment(junk if isinstance(junk, (list, tuple)) else [])["n"] == 0
-    assert isinstance(PS.caption(junk if isinstance(junk, dict) else {}), str)
     assert isinstance(PC.table_html(junk if isinstance(junk, (list, tuple)) else []),
                       str)
 
@@ -406,6 +405,26 @@ def test_dhan_owns_a_daily_endpoint_alongside_its_intraday_one():
     assert "charts/historical" in body
     # the daily sibling of the intraday call, framed the same way
     assert "fromDate" in body and "toDate" in body
+
+
+def test_no_heading_or_provenance_caption_rides_above_the_curves():
+    """⚠️ Both were removed on request. The chart legend names all four windows and
+    the table carries its own column headers, so "Multi-window POC · daily · rolling"
+    and "1242 daily bars · rolling POC per window (…)" restated what the picture
+    already said. Asserted so neither creeps back, and so the `caption()` builder
+    stays deleted rather than computed for nobody."""
+    src = (_ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_poc_structure")
+    body = ast.get_source_segment(src, fn) or ""
+    assert "Multi-window POC · daily · rolling" not in body
+    assert 'd.get("caption")' not in body
+    assert not hasattr(PS, "caption"), "the unused builder is still there"
+    # the app must not compute it either
+    app = (_ROOT / "vob_minimal.py").read_text()
+    pub = next(n for n in ast.walk(ast.parse(app))
+               if isinstance(n, ast.FunctionDef) and n.name == "_publish_poc_series")
+    assert "caption" not in (ast.get_source_segment(app, pub) or "")
 
 
 def test_the_absence_names_the_source_that_failed():
