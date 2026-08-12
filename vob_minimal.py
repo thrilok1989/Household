@@ -6485,13 +6485,23 @@ def _hv_points(frame):
     percentile of itself — so NIFTY and a ₹90 premium leg can share one threshold
     honestly. An absolute lot count could not.
     """
-    if frame is None or getattr(frame, 'empty', True) or len(frame) < 40:
+    if frame is None or getattr(frame, 'empty', True) or len(frame) < 12:
         return []
     try:
-        from mios_v5.volume_points import high_volume_pivots
+        from mios_v5.volume_points import defaults, high_volume_pivots
+        # ⚙️ The trader's settings, or the module's defaults. `_hv_settings` is what
+        # the Charts tab's controls write; `defaults()` is the single place the
+        # fallbacks live, so a missing key cannot mean a different threshold here
+        # than the panel that offers it.
+        cfg = defaults()
+        cfg.update({k: v for k, v in
+                    (st.session_state.get('_hv_settings') or {}).items()
+                    if k in cfg})
         return high_volume_pivots(
             list(frame['high']), list(frame['low']), list(frame['close']),
-            list(frame['volume']) if 'volume' in frame.columns else None)
+            list(frame['volume']) if 'volume' in frame.columns else None,
+            left=int(cfg['left']), right=int(cfg['right']),
+            filter_vol=float(cfg['filter_vol']))
     except Exception:
         return []
 

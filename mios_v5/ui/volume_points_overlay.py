@@ -37,6 +37,11 @@ BROKEN_OPACITY = 0.35
 DOT_BASE, DOT_STEP = 5.0, 1.6
 
 
+def _esc(s: str) -> str:
+    """Plotly annotations accept a small HTML subset, so `<` must not pass through."""
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
 def _f(v: Any) -> Optional[float]:
     try:
         x = float(v)
@@ -123,14 +128,30 @@ def specs(points: Sequence[Mapping[str, Any]],
 
 def draw(fig, row: int, col: int,
          points: Optional[Sequence[Mapping[str, Any]]] = None,
-         x: Optional[Sequence[Any]] = None) -> Dict[str, int]:
-    """Add one panel's high-volume pivots. Returns what was drawn."""
-    drawn = {"levels": 0, "dots": 0}
+         x: Optional[Sequence[Any]] = None,
+         why: Optional[str] = None) -> Dict[str, int]:
+    """Add one panel's high-volume pivots. Returns what was drawn.
+
+    `why` is drawn as a corner note when there is nothing to plot. ⚠️ Reported as
+    "not displaying in the put ltp", and a strongly trending leg genuinely has NO
+    swing pivots — the window's extreme sits at its edge, never its centre, which is
+    exactly what a put does while the index falls. The overlay was right to draw
+    nothing and wrong to say nothing: an empty panel and a broken panel look
+    identical. `volume_points.read()` already produces the sentence.
+    """
+    drawn = {"levels": 0, "dots": 0, "note": 0}
     if fig is None:
         return drawn
     try:
         sp = specs(points or (), x)
         if not sp:
+            if why:
+                fig.add_annotation(
+                    row=row, col=col, xref="x domain", yref="y domain",
+                    x=0.02, y=0.03, showarrow=False, align="left",
+                    text=f"📍 {_esc(str(why))}",
+                    font=dict(size=8, color="#8f9bab"))
+                drawn["note"] = 1
             return drawn
         for s in sp:
             # ⚠️ `add_shape` with explicit x0/x1, not `add_hline`: a level starts at

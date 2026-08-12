@@ -61,6 +61,17 @@ NORM_SCALE = 5.0
 MIN_BARS = LEFT + RIGHT + 2
 
 
+def defaults() -> Dict[str, Any]:
+    """The settings a caller may override, and their values — in ONE place.
+
+    ⚠️ Returned as a fresh dict each call so a caller's `update()` cannot mutate the
+    module's own numbers. The UI offers exactly these keys, and `_hv_points` fills any
+    the user has not set from here — so the control panel and the computation cannot
+    disagree about what "default" means.
+    """
+    return {"left": LEFT, "right": RIGHT, "filter_vol": FILTER_VOL}
+
+
 def _percentile(vals: Sequence[float], pct: float) -> Optional[float]:
     """Nearest-rank percentile — no interpolation, no numpy.
 

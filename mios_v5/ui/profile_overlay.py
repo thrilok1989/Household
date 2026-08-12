@@ -65,7 +65,11 @@ LEVEL_STYLE = {
     "poc": ("#ff5252", "solid", 1.6, "POC"),
     "vah": ("#00bcd4", "dot", 1.1, "VAH"),
     "val": ("#00bcd4", "dot", 1.1, "VAL"),
-    "dynamic_poc": ("#ffb300", "dashdot", 1.3, "Dyn POC"),
+    # ⚠️ THICK and BRIGHT, and thicker than the static POC on purpose. Asked for,
+    # and it is the right weight: this is the line that MOVES, so it carries the
+    # session's story while POC/VAH/VAL are one frozen reading each. At 1.3px dashdot
+    # amber it was the faintest thing on a panel full of thin dotted levels.
+    "dynamic_poc": ("#ffbf00", "solid", 3.0, "Dyn PoC"),
 }
 
 #: Stage 71.86's shapes → the badge tone. `Neutral` is deliberately the faintest:
@@ -243,7 +247,7 @@ def draw(fig, row: int, col: int,
             n = min(len(x), len(series))
             ys = [_f(v) for v in series[:n]]
             if any(v is not None for v in ys):
-                colour = LEVEL_STYLE["dynamic_poc"][0]
+                colour, dash, width, _lbl = LEVEL_STYLE["dynamic_poc"]
                 # ⚠️ `fig.add_scatter`, NOT `go.Scatter` — this module imports no
                 # plotly at all (a guard test enforces it) and only ever calls
                 # methods on the figure it was handed. `add_scatter` is the same
@@ -252,7 +256,9 @@ def draw(fig, row: int, col: int,
                     x=list(x)[:n], y=ys, mode="lines", name="Dyn PoC",
                     showlegend=False, connectgaps=False,
                     hovertemplate="Dyn PoC %{y:,.2f}<extra></extra>",
-                    line=dict(color=colour, width=1.2, shape="hv", dash="dot"),
+                    # width and dash from LEVEL_STYLE, so the stepline and the
+                    # labelled level it ends at cannot drift apart
+                    line=dict(color=colour, width=width, shape="hv", dash=dash),
                     row=row, col=col)
                 drawn["dyn_poc"] = 1
 
