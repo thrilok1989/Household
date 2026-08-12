@@ -1292,6 +1292,47 @@ class DhanAPI:
             st.error(f"Error fetching data: {str(e)}")
             return None
 
+    def get_daily_data(self, security_id="13", exchange_segment="IDX_I",
+                       instrument="INDEX", years_back=5):
+        """Daily OHLCV from Dhan's own history endpoint.
+
+        ⚠️ Added because the higher-timeframe layer had exactly ONE source of daily
+        bars — a `yfinance` download inside a bare `except Exception: pass`. When it
+        failed there was no error, no caption and no daily frame, so Stage 45's
+        Daily / Weekly / Monthly / Yearly profiles were never built and nothing on
+        screen said so. The app is already authenticated with Dhan for the chain,
+        the LTP and every intraday series; asking it for daily bars too removes a
+        third-party dependency from the one layer that had no fallback.
+
+        `/charts/historical` is the daily sibling of `/charts/intraday` this class
+        already calls. Returns the same `{open, high, low, close, volume,
+        timestamp}` shape, so callers frame it identically.
+        """
+        url = f"{self.base_url}/charts/historical"
+        ist = pytz.timezone('Asia/Kolkata')
+        _back = st.session_state.get('_dhan_429_until')
+        if _back and datetime.now(ist) < _back:
+            return None
+        end_date = datetime.now(ist)
+        start_date = end_date - timedelta(days=int(years_back) * 366)
+        payload = {
+            "securityId": str(security_id),
+            "exchangeSegment": exchange_segment,
+            "instrument": instrument,
+            "expiryCode": 0,
+            "oi": False,
+            "fromDate": start_date.strftime("%Y-%m-%d"),
+            "toDate": end_date.strftime("%Y-%m-%d"),
+        }
+        try:
+            response = requests.post(url, headers=self.headers, json=payload)
+            return self._handle_response(response)
+        except Exception as e:
+            # Recorded, not printed: this runs inside the cycle and the panel that
+            # needs it says so itself. Silence is what broke this in the first place.
+            st.session_state['_htf_daily_error'] = f"Dhan history: {e}"
+            return None
+
     def get_ltp_data(self, security_id="13", exchange_segment="IDX_I"):
         url = f"{self.base_url}/marketfeed/ltp"
         payload = {
@@ -6329,19 +6370,62 @@ def build_htf_profiles(df, spot=None):
     try:
         daily = st.session_state.get('_htf_daily_df')
         if daily is None or (time.time() - float(cache_at.get('_daily_fetch', 0))) > 3600:
+            # ⚠️ TWO sources, and the failure is RECORDED. This was one `yfinance`
+            # download inside `except Exception: pass` — so when it failed there was
+            # no error, no caption, and no daily frame, and Stage 45's Daily /
+            # Weekly / Monthly / Yearly profiles were simply never built. Nothing on
+            # any screen said so; the stage still reported OK on its 1H and 4H
+            # profiles alone. A silent single point of failure under the whole
+            # higher-timeframe layer.
+            #
+            # Dhan first: the app is already authenticated with it for the chain,
+            # the LTP and every intraday series, so it is one fewer third party in
+            # the path. yfinance stays as the fallback rather than being removed.
+            _tries = []
+            _fresh = None
             try:
-                import yfinance as yf
-                _d = yf.download('^NSEI', period='5y', interval='1d',
-                                 progress=False, auto_adjust=False)
-                if _d is not None and not _d.empty:
-                    _d = _d.reset_index()
-                    _d.columns = [str(c[0] if isinstance(c, tuple) else c).lower()
-                                  for c in _d.columns]
-                    daily = _d.rename(columns={'date': 'datetime'})
-                    st.session_state['_htf_daily_df'] = daily
-                    cache_at['_daily_fetch'] = time.time()
-            except Exception:
+                _api = st.session_state.get('_atm_leg_api')
+                if _api is not None and hasattr(_api, 'get_daily_data'):
+                    _raw = _api.get_daily_data()
+                    if _raw and _raw.get('open') and _raw.get('timestamp'):
+                        _ist = pytz.timezone('Asia/Kolkata')
+                        _fresh = pd.DataFrame({
+                            'datetime': [datetime.fromtimestamp(t, _ist)
+                                         for t in _raw['timestamp']],
+                            'open': _raw['open'], 'high': _raw['high'],
+                            'low': _raw['low'], 'close': _raw['close'],
+                            'volume': _raw.get('volume',
+                                               [0] * len(_raw['open']))})
+                        _tries.append('dhan ok')
+                    else:
+                        _tries.append('dhan returned no bars')
+                else:
+                    _tries.append('dhan api not published yet')
+            except Exception as _e:
+                _tries.append(f'dhan failed ({_e})')
+            if _fresh is None or _fresh.empty:
+                try:
+                    import yfinance as yf
+                    _d = yf.download('^NSEI', period='5y', interval='1d',
+                                     progress=False, auto_adjust=False)
+                    if _d is not None and not _d.empty:
+                        _d = _d.reset_index()
+                        _d.columns = [str(c[0] if isinstance(c, tuple) else c).lower()
+                                      for c in _d.columns]
+                        _fresh = _d.rename(columns={'date': 'datetime'})
+                        _tries.append('yfinance ok')
+                    else:
+                        _tries.append('yfinance returned no bars')
+                except Exception as _e:
+                    _tries.append(f'yfinance failed ({_e})')
+            if _fresh is not None and not _fresh.empty:
+                daily = _fresh
+                st.session_state['_htf_daily_df'] = daily
+                cache_at['_daily_fetch'] = time.time()
+                st.session_state.pop('_htf_daily_error', None)
+            else:
                 daily = st.session_state.get('_htf_daily_df')
+                st.session_state['_htf_daily_error'] = ' · '.join(_tries)
         if daily is not None and not daily.empty:
             didx = daily.set_index('datetime')
             agg = {'open': 'first', 'high': 'max', 'low': 'min',
@@ -6425,6 +6509,7 @@ def _publish_poc_series():
         'align': _ps.alignment(rows),
         'caption': _ps.caption(series, len(hs)),
         'spot': spot,
+        'error': st.session_state.get('_htf_daily_error'),
         # 1H and 4H are finer than a daily bar — their CURRENT POC only, from the
         # profiles Stage 45 already built. Never as a curve; see poc_series.
         'subdaily': {

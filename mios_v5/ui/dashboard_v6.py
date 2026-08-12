@@ -235,11 +235,18 @@ def _poc_structure(st) -> None:
         d = st.session_state.get("_poc_series") or {}
         st.markdown("**🏛 Multi-window POC · daily · rolling**")
         if not d.get("series"):
-            # Always a sentence: the daily history is fetched hourly and may not
-            # have landed on the first cycle, which is not the same as "not built".
-            st.caption("🏛 Multi-window POC · "
-                       + (d.get("caption") or "daily history not fetched yet — "
-                          "it arrives with Stage 45's hourly refresh."))
+            # ⚠️ Name the SOURCE that failed, not just the absence. "daily history
+            # not fetched yet" was reported as the panel not being displayed — and
+            # it was the honest truth about the data while telling the reader
+            # nothing they could act on. The daily frame has two sources now and
+            # `_htf_daily_error` records what each one said.
+            why = (st.session_state.get("_htf_daily_error")
+                   or d.get("error")
+                   or "daily history not fetched yet — it arrives with Stage 45's "
+                      "hourly refresh")
+            st.warning(f"🏛 Multi-window POC — no daily bars, so no curves. "
+                       f"Tried: {why}. Stage 45's Daily/Weekly/Monthly/Yearly "
+                       f"profiles need the same frame.")
             return
         st.caption(d.get("caption") or "")
         fig = PC.figure(d.get("dates") or [], d.get("series") or {},
