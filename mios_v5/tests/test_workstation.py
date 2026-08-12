@@ -589,28 +589,14 @@ def test_charts_is_the_first_tab():
 def test_every_tab_is_wired_to_a_body():
     """⚠️ The failure this catches is silent: `st.tabs` renders a label whatever
     happens, so a mis-numbered index leaves a tab that opens onto nothing, or
-    two labels drawing the same screen.
-
-    ⚠️ COVERAGE, not ascending order. This asserted `indices == list(range(n))`,
-    which also froze the fill sequence — and the fill sequence has to differ from
-    the tab sequence, because the bodies have a dependency the strip's layout does
-    not: `_trading_screen` (tab 4) publishes `_sr_levels`, `_premium_energy`,
-    `_premium_structures` and `_entry_decision`, which the cockpits at tabs 1 and
-    2 read. Filled in tab order they ran before their producer.
-
-    `st.tabs()` containers may be filled in any order and the strip is unaffected,
-    so what matters here is that every index is filled exactly once.
-    `test_screen_order.py` owns the dependency rule itself.
-    """
+    two labels drawing the same screen."""
     import re
     src = _v6_src()
     block = src[src.index("tabs = st.tabs(_TABS)"):src.index("# ── 0 · CHARTS")]
     indices = [int(n) for n in re.findall(r"with tabs\[(\d+)\]:", block)]
     from mios_v5.ui.dashboard_v6 import _TABS
-    assert len(indices) == len(set(indices)), (
-        f"a tab is filled twice — two labels draw the same screen: {indices}")
-    assert set(indices) == set(range(len(_TABS))), (
-        f"tab bodies {sorted(indices)} do not cover 0..{len(_TABS) - 1}")
+    assert indices == list(range(len(_TABS))), (
+        f"tab bodies {indices} do not cover 0..{len(_TABS) - 1}")
 
 
 def test_the_charts_tab_runs_before_the_panel_that_reads_its_output():
@@ -659,21 +645,8 @@ def test_the_charts_tab_computes_nothing():
               if isinstance(n, ast.FunctionDef) and n.name == "_charts_screen")
     called = {getattr(c.func, "id", "") or getattr(c.func, "attr", "")
               for c in ast.walk(fn) if isinstance(c, ast.Call)}
-    # Reading a published cache and rendering it is not computing. The ATM±1 leg
-    # tabulation was drawn here because it belongs under the charts it explains —
-    # it reads `_leg_bias_cache`, which `_render_main_analyzer` fills.
-    # ⚠️ `_strike_oi_charts` and `_poc_structure` are RENDERERS: each reads a cache
-    # the app published (`_strike_hist`, `_poc_series`) and lays it out. The
-    # rolling-POC build itself costs ~420 ms over 1250 daily bars and runs in
-    # `vob_minimal._publish_poc_series`, hourly-cached — deliberately NOT here.
-    _render = {"markdown", "caption", "get", "leg_table_html", "_feed_reason",
-               "_dbg_caption", "_strike_oi_charts", "_poc_structure"}
-    assert called <= {"_leg_reads", "dominance", "_terminal_chart"} | _render, (
+    assert called <= {"_leg_reads", "dominance", "_terminal_chart"}, (
         f"unexpected calls in _charts_screen: {called}")
-    # ⚠️ The property that actually matters: no BUILDER is invoked here.
-    for builder in ("build_leg_bias_table", "compute_vpfr", "analyze_vob_volume",
-                    "calculate_money_flow_profile", "calculate_vidya"):
-        assert builder not in called, f"_charts_screen now computes {builder}"
 
 
 def test_the_trading_tab_kept_the_bars_that_measure_the_chart():
