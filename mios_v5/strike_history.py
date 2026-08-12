@@ -115,8 +115,13 @@ def record(store: Any, df_summary: Any = None, spot: Any = None,
     at = time.time() if now is None else float(now)
 
     snaps: List[Dict[str, Any]] = store.setdefault("snaps", [])
-    if snaps and (at - _f(snaps[-1].get("t")) or 0) < MIN_GAP_S:
-        return False
+    # ⚠️ `(at - x or 0)` was `((at - x) or 0)` — the `or` binds looser than the
+    # subtraction, so it guarded nothing and would have raised on a None `t`
+    # instead of falling back to 0. Checked explicitly.
+    if snaps:
+        last = _f(snaps[-1].get("t"))
+        if last is not None and at - last < MIN_GAP_S:
+            return False
     if df_summary is None or getattr(df_summary, "empty", True):
         return False
     try:

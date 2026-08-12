@@ -317,6 +317,57 @@ def test_the_delta_chart_carries_a_zero_line():
 def test_nothing_stored_draws_no_axes():
     assert SC.figures({"snaps": []}, "oi") == []
     assert SC.figures(None, "oi") == []
+
+
+def test_equal_oi_is_not_a_level():
+    """⚠️ Rendered defect: `"support" if heavier == "PE" else "resistance"` sent the
+    None case — CE and PE exactly equal — down the else branch, so a strike at 9.0L
+    against 9.0L printed "WEAK RESISTANCE · 1.0×". Equal OI is neither."""
+    r = SC.strike_read(_store(2, ce_oi=9e6, pe_oi=9e6), 24600)
+    assert r["heavier"] is None
+    assert r["level"] is None and r["strength"] is None
+    assert r["balanced"] is True
+
+
+def test_a_balanced_strike_says_so_on_screen():
+    src = (_ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_strike_verdict")
+    consts = {n.value for n in ast.walk(fn)
+              if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "balanced" in consts
+    assert any("BALANCED" in c for c in consts)
+
+
+def test_a_lone_point_is_visible_and_carries_no_time_axis():
+    """⚠️ Rendered defect: at marker size 3 the first snapshot was a speck, under
+    four x-ticks all reading the same minute — an empty-looking chart with clutter
+    instead of one honest observation."""
+    pytest.importorskip("plotly")
+    _k, _l, one = SC.figures(_store(1), "oi")[2]
+    assert all(tr.mode == "markers" for tr in one.data)
+    assert all(tr.marker.size >= 8 for tr in one.data)
+    assert one.layout.xaxis.showticklabels is False
+    # …and a real series keeps its line and its axis
+    _k2, _l2, many = SC.figures(_store(4), "oi")[2]
+    assert all(tr.mode == "lines+markers" for tr in many.data)
+    assert many.layout.xaxis.showticklabels is True
+
+
+def test_one_snapshot_already_draws_the_current_levels():
+    """⚠️ Reported as "not visible", and it was: the panel waited for TWO snapshots
+    and the store starts empty at every app restart, so opening the app showed one
+    line of caption where ten charts belonged. One snapshot is a real observation —
+    the CE-vs-PE level at each strike — and only the build direction needs two."""
+    pytest.importorskip("plotly")
+    for measure in ("oi", "chg"):
+        figs = SC.figures(_store(1), measure)
+        assert len(figs) == 5, measure
+        assert all(len(tr.x) == 1 for _k, _l, f in figs for tr in f.data)
+    # …and the level read works off it, while the build direction stays silent
+    r = SC.strike_read(_store(1, ce_oi=9e6, pe_oi=2e6), 24600)
+    assert r["level"] == "resistance" and r["strength"] == "STRONG"
+    assert r["ce"]["state"] is None and r["pe"]["state"] is None
     assert SC.figures(_store(3), "nope") == []
 
 
@@ -326,14 +377,17 @@ def test_the_caption_reports_how_much_history_there_is():
     assert "4 snapshots" in cap and "OI in lakhs" in cap
 
 
-def test_one_snapshot_says_why_nothing_is_plotted():
-    """⚠️ Rendered defect: it read "1 snapshot(s) · ATM±2 · OI in lakhs, ΔOI in
-    thousands" — the ATM±2 duplicated the heading, the units described charts that
-    were not on screen, and the actual reason (a series needs two points) was
-    nowhere."""
+def test_one_snapshot_says_what_it_can_and_cannot_tell_you():
+    """⚠️ Two rendered defects in one line. It first read "1 snapshot(s) · ATM±2 ·
+    OI in lakhs, ΔOI in thousands" — duplicating the heading and quoting units for
+    charts that were not drawn. The fix then said a series needs two points and
+    nothing was plotted, which was true of the code and wrong as a design: one
+    snapshot IS the current level at each strike."""
     cap = SC.caption(_store(1))
-    assert "needs two" in cap
-    assert "lakhs" not in cap and "ATM±" not in cap
+    assert "current levels only" in cap and "needs a second" in cap
+    assert "ATM±" not in cap
+    # the units apply now, because one snapshot DOES draw
+    assert "lakhs" in cap
 
 
 def test_the_caption_does_not_repeat_the_heading():
@@ -401,17 +455,50 @@ def test_the_buyers_caveat_reaches_the_screen():
     assert "level_note" in keys
 
 
+def _panel_fn():
+    src = (_ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_strike_oi_charts")
+    return src, fn
+
+
 def test_the_basis_is_captioned_before_the_verdicts():
     """⚠️ Rendered defect: the "60 snapshot(s) over 59 min" line sat UNDER both
     sections, so "STRONG SUPPORT · 4.7×" was read with no idea whether it came from
     four snapshots or four hundred."""
-    src = (_ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
-    fn = next(n for n in ast.walk(ast.parse(src))
-              if isinstance(n, ast.FunctionDef) and n.name == "_strike_oi_charts")
+    src, fn = _panel_fn()
     body = ast.get_source_segment(src, fn) or ""
-    # inside the drawing loop, the caption comes before the per-strike verdicts
-    assert body.index("SC.caption(store)", body.index("for measure")) \
-        < body.index("_strike_verdict")
+    assert body.index("SC.caption(store)") < body.index("_strike_verdict")
+
+
+def test_the_basis_line_is_not_inside_the_drawing_loop():
+    """⚠️ The fix that moved the caption up put it INSIDE `for measure`, so when
+    `figures()` returned nothing the entire panel vanished with no explanation —
+    the swallowed failure the loud-chrome rule exists to prevent, reintroduced by
+    the fix for the previous defect. On the AST: the caption call must not be a
+    descendant of any loop."""
+    _src, fn = _panel_fn()
+
+    def captions(node):
+        return [c for c in ast.walk(node) if isinstance(c, ast.Call)
+                and getattr(c.func, "attr", "") == "caption"
+                and getattr(getattr(c.func, "value", None), "id", "") == "st"]
+
+    assert captions(fn), "the basis caption is gone entirely"
+    for loop in ast.walk(fn):
+        if isinstance(loop, (ast.For, ast.While)):
+            assert not captions(loop), (
+                "an st.caption() inside the drawing loop is skipped whenever the "
+                "loop body is skipped — that is how the panel went silent")
+
+
+def test_snapshots_that_plot_nothing_still_say_so():
+    """A heading-less gap reads as "never built". If there are snapshots but no
+    figures, the panel must name the reason."""
+    src, fn = _panel_fn()
+    body = ast.get_source_segment(src, fn) or ""
+    assert "if not drew" in body
+    assert body.index("drew = True") < body.index("if not drew")
 
 
 def test_both_column_spellings_are_accepted():

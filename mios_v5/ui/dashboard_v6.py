@@ -117,8 +117,15 @@ def _strike_oi_charts(st) -> None:
 
     ⚠️ The history is ACCUMULATED by `vob_minimal.strike_store()`, not fetched —
     the reference layout read `session_state.oi_history`, which does not exist in
-    this app. Two snapshots are needed before anything can be plotted, so the
-    first cycle of a session says so rather than drawing empty axes.
+    this app.
+
+    ⚠️ **Drawn from the FIRST snapshot, not the second.** The first version waited
+    for two, and since the store starts empty at every app restart, opening the app
+    showed one line of caption where ten charts were expected — reported as "not
+    visible", which is exactly what it was. One snapshot is a real observation:
+    it gives the current CE-vs-PE level at each strike, which is most of the value.
+    Only the BUILD DIRECTION needs two points, and `side_read` already withholds
+    that on its own rather than being gated from out here.
 
     Nothing is recomputed here: `strike_oi_series` builds the figures and the
     per-strike verdicts from the stored series, and this only lays them out.
@@ -135,9 +142,14 @@ def _strike_oi_charts(st) -> None:
         # caught the attempt. `strike_store()` publishes the same mutable dict
         # under `_strike_hist`, so this is the identical object.
         store = st.session_state.get("_strike_hist") or {"snaps": []}
-        if not SH.read(store)["reporting"]:
-            st.caption(f"📊 Per-strike OI / ΔOI (ATM±{SH.WINGS}) · "
-                       + SC.caption(store))
+        # ⚠️ The basis line is UNCONDITIONAL, and it comes before the conclusions.
+        # Tucking it inside the drawing loop meant that if `figures()` returned
+        # nothing the whole panel vanished with no explanation — the swallowed
+        # failure this repo's loud-chrome rule exists to prevent, reintroduced by
+        # the fix that moved the caption up.
+        st.caption(f"📊 Per-strike OI / ΔOI (ATM±{SH.WINGS}) · "
+                   + SC.caption(store))
+        if not SH.read(store)["n"]:
             return
         drew = False
         for measure, title in (("oi", "Per-Strike Call vs Put OI"),
@@ -146,12 +158,6 @@ def _strike_oi_charts(st) -> None:
             if not figs:
                 continue
             st.markdown(f"**📊 {title} · ATM±{SH.WINGS}**")
-            # ⚠️ The basis BEFORE the conclusions. It sat under both sections, so
-            # the "STRONG SUPPORT · 4.7×" verdicts were read with no idea whether
-            # they came from four snapshots or four hundred.
-            if not drew:
-                st.caption(SC.caption(store))
-                drew = True
             cols = st.columns(len(figs))
             for col, (strike, _label, fig) in zip(cols, figs):
                 with col:
@@ -159,6 +165,12 @@ def _strike_oi_charts(st) -> None:
                                     key=f"soi_{measure}_{strike}")
                     if measure == "oi":
                         _strike_verdict(st, SC.strike_read(store, strike))
+            drew = True
+        if not drew:
+            # Snapshots stored but nothing plottable — say so instead of
+            # leaving a heading-less gap that reads as "never built".
+            st.caption("📊 …the snapshots carry no OI columns to plot — "
+                       "the chain arrived without them.")
     except Exception as err:
         _dbg_caption(st, "strike_oi_series", f"charts unavailable: {err}")
 
@@ -171,6 +183,12 @@ def _strike_verdict(st, r) -> None:
     """
     if not isinstance(r, dict):
         return
+    if r.get("balanced"):
+        # ⚠️ Equal CE and PE OI is NOT a level. The render showed "WEAK RESISTANCE
+        # · 1.0×" on a strike sitting at 9.0L against 9.0L.
+        st.markdown("<div style='font-size:11px;font-weight:700;color:#8f9bab'>"
+                    "BALANCED · neither side heavier</div>",
+                    unsafe_allow_html=True)
     level, strength = r.get("level"), r.get("strength")
     if level and strength:
         tone = {"STRONG": "#00ff88", "MODERATE": "#00cc66",
