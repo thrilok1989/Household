@@ -14192,6 +14192,45 @@ def render_clean_card(spot_price, option_data=None):
         except Exception:
             _gb_html = ""
 
+        # ── ⚔️ Level Acceptance / Rejection strip (context-only) ─────────
+        # Observation of what price DID after reaching a level — reuses the
+        # Stage-42 reaction engine (evaluate_reaction) across the wider level
+        # set, mapped to six words and clustered into battle zones. It touches
+        # no verdict: the predictive breakout/rejection % stays as-is; this
+        # reports separately. Never sends Telegram, never feeds Guardian.
+        _la_html = ""
+        try:
+            from mios_v5.acceptance import evaluate_reaction as _eval_reaction
+            from mios_v5.level_acceptance import observe_levels as _observe_levels
+            from mios_v5.ui.level_acceptance_panel import acceptance_html as _lahtml
+            # reuse the SAME follow-through metrics Stage-42 already assembled
+            _la_metrics = {}
+            _mst = st.session_state.get('_mios_state') or {}
+            _st42 = _mst.get('stage42_acceptance') if hasattr(_mst, 'get') else None
+            if _st42 is not None and getattr(_st42, 'ok', False):
+                _la_metrics = (_st42.data or {}).get('metrics') or {}
+            # gather the levels from producers the app already owns (no new calc)
+            _la_levels = []
+            if _plevel is not None:
+                _la_levels.append({'label': 'Dealer magnet', 'price': _plevel})
+            _gflip = _gx.get('gamma_flip_level')
+            if _gflip is not None:
+                _la_levels.append({'label': 'Gamma flip', 'price': _gflip})
+            _rsr_la = st.session_state.get('_reaction_sr') or {}
+            for _sd, _lbl in (('resistance', 'Resistance'), ('support', 'Support')):
+                _zz = _rsr_la.get(_sd) or {}
+                if _zz.get('price') is not None:
+                    _la_levels.append({'label': _lbl, 'price': _zz.get('price'),
+                                       'strength': _zz.get('strength'),
+                                       'lifecycle': _zz.get('lifecycle')})
+            if _la_levels:
+                _la_store = st.session_state.setdefault('_level_accept_mem', {})
+                _la_read = _observe_levels(_la_levels, spot_price, _la_metrics,
+                                           _la_store, _eval_reaction)
+                _la_html = _lahtml(_la_read)
+        except Exception:
+            _la_html = ""
+
         # ── ⚙️ dealer & volatility context, in one line ─────────────────
         # The Adaptive Greeks read, from the object Dashboard V6 published this
         # cycle. Read-only and short by design: the card already carries three
@@ -14451,7 +14490,7 @@ def render_clean_card(spot_price, option_data=None):
                f"{_sr_intel_html}</div>" if _sr_intel_html else
                f"<div style='text-align:center;font-size:16px;margin-top:4px;"
                f"font-weight:800;'>{_sr_line}</div>")
-            + _wz_html + _pe_html + _charm_html + _gb_html + _ag_html
+            + _wz_html + _la_html + _pe_html + _charm_html + _gb_html + _ag_html
             + _fs_html + _zh_html),
             unsafe_allow_html=True)
     except Exception:
