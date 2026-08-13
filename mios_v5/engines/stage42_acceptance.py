@@ -136,5 +136,9 @@ class AcceptanceEngine(Engine):
             evidence=evidence, risks=risks,
             data={"support": out.get("support"), "resistance": out.get("resistance"),
                   "active": active, "memory": memory,
+                  # published so the context-only Level-Acceptance strip can reuse
+                  # the SAME follow-through inputs across the wider level set
+                  # instead of recomputing them (no duplicate calculation).
+                  "metrics": metrics,
                   "actionable": bool(active and active["actionable"])},
             provenance=A.prov("mios:acceptance", Tier.DERIVED))
