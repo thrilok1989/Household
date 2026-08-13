@@ -692,6 +692,13 @@ WRITING_TG_DEFAULT = True
 # whose dynamic POC steps up or down only alerts once this is switched on. Routed
 # to Discord, the app's channel for informational (non-entry) alerts.
 POC_SHIFT_ALERTS_DEFAULT = False
+
+# ── 📐 Formation alerts → Telegram: a new high-volume pivot or a new VOB on any
+#    chart. ON by default (explicitly requested). Naturally low-rate: a pivot
+#    needs `RIGHT` bars to confirm and a VOB forms occasionally, and each one is
+#    alerted ONCE — the existing structure at load is seeded silently, never
+#    replayed. `_notify_chart_formations` owns the memory and the send.
+FORMATION_ALERTS_DEFAULT = True
 _RETIRED_ALERT_CLASSES = frozenset({
     'leg_entry', 'confirmed_entry', 'entry_result', 'all_aligned_entry',
     'sr_confluence', 'fresh_entry', 'bias_enter',
@@ -11174,6 +11181,76 @@ def _notify_poc_shifts():
         pass  # an alert must never take the cycle down
 
 
+def _notify_chart_formations():
+    """📐 Telegram note when a new high-volume pivot or a new VOB forms.
+
+    Reads what the terminal already published — `_leg_profiles[chart].hv_points`
+    for the pivots (one owner, `volume_points.high_volume_pivots`) and
+    `_atm_leg_vob_volume[label]` for the blocks (one owner, `analyze_vob_volume`)
+    — turns each into a signature via `mios_v5.formation_alerts`, and sends the
+    ones this session has not seen before.
+
+    ⚠️ Seed, don't replay. On the FIRST time a (chart, kind) is observed, its
+    current pivots/zones are recorded as already-seen and NOTHING is sent — the
+    structure that existed when the app loaded is not "new". Only what forms
+    afterwards alerts, once each. That is the whole reason this cannot spam: it
+    is not re-announcing the session's history every 20 seconds.
+
+    Opt-out via the sidebar (`_formation_alerts_on`, default
+    `FORMATION_ALERTS_DEFAULT`). VOB is asked for on the legs only, because the
+    terminal draws order blocks on the CALL/PUT panels, not on NIFTY.
+    """
+    try:
+        if not st.session_state.get('_formation_alerts_on',
+                                    FORMATION_ALERTS_DEFAULT):
+            return
+        from mios_v5 import formation_alerts as _fa
+        profiles = st.session_state.get('_leg_profiles') or {}
+        if not profiles:
+            return
+        labels = {'NIFTY': 'NIFTY',
+                  'CALL': profiles.get('call_label') or 'ATM Call',
+                  'PUT': profiles.get('put_label') or 'ATM Put'}
+        vob_store = st.session_state.get('_atm_leg_vob_volume') or {}
+        seen = st.session_state.setdefault('_formation_seen', {})
+
+        def _emit(kind, chart, items, sig_of, msg_of, dp):
+            # (chart, kind) → the set of signatures already alerted (or seeded).
+            key = f"{kind}:{chart}"
+            item_by_sig = {}
+            order = []
+            for it in items or ():
+                if not isinstance(it, dict):
+                    continue
+                s = sig_of(it, dp) if kind == 'hvp' else sig_of(it)
+                if s is None:
+                    continue
+                order.append(s)
+                item_by_sig[s] = it          # last write wins per signature
+            # `diff` owns the seed-vs-diff rule: first observation seeds silently.
+            to_alert, updated = _fa.diff(order, seen.get(key))
+            seen[key] = updated
+            for s in to_alert:
+                try:
+                    send_telegram_message_sync(
+                        msg_of(chart, labels.get(chart), item_by_sig[s], dp),
+                        force=True)
+                except Exception:
+                    pass
+
+        for chart in _fa.CHARTS:
+            prof = profiles.get(chart) or {}
+            dp = 0 if chart == 'NIFTY' else 2
+            _emit('hvp', chart, prof.get('hv_points'),
+                  _fa.hvp_signature, _fa.hvp_message, dp)
+            if chart in ('CALL', 'PUT'):
+                zones = vob_store.get(labels.get(chart)) or []
+                _emit('vob', chart, zones,
+                      _fa.vob_signature, _fa.vob_message, dp)
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
 def capture_stage2_market_events(spot_price, df, option_data):
     """Feed the Market Event Engine (Discord feed + Supabase audit trail)
     from conditions this app already computes each cycle — the 6-8 event
@@ -14551,6 +14628,17 @@ def _render_main_analyzer():
              "new level, post which way it moved to Discord. Deduped per chart "
              "with a cooldown so it cannot spam.")
 
+    # ── 📐 new high-volume pivot / VOB on any chart → Telegram ─────────
+    # Fires once when a level or an order block first forms (the structure
+    # already on screen at load is seeded silently). Consumed in
+    # `_notify_chart_formations`.
+    st.session_state["_formation_alerts_on"] = st.sidebar.checkbox(
+        "📐 HVP / VOB formation → Telegram", value=FORMATION_ALERTS_DEFAULT,
+        help="A Telegram note when a new high-volume pivot forms on NIFTY, Call "
+             "or Put, or a new Volume Order Block forms on a leg. Each formation "
+             "is sent once; what already exists when the app loads is not "
+             "re-announced.")
+
     if _mios_tg:
         st.session_state["_mios_transport"] = mios_v6_transport
         st.sidebar.caption("🔴 Live — Stage 72.9 will send entry and exit "
@@ -15208,6 +15296,15 @@ def _render_main_analyzer():
     # not last cycle's. No-op unless the sidebar toggle is on.
     try:
         _notify_poc_shifts()
+    except Exception:
+        pass
+
+    # 📐 New high-volume pivot / VOB alerts. Same placement and reason as the
+    # POC-shift alert above — the terminal has published `_leg_profiles` and the
+    # leg VOB store by now, so a formation is detected against this cycle's
+    # structure. No-op unless the sidebar toggle is on.
+    try:
+        _notify_chart_formations()
     except Exception:
         pass
 
