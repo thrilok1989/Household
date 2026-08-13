@@ -13956,6 +13956,42 @@ def render_clean_card(spot_price, option_data=None):
         except Exception:
             _charm_html = ""
 
+        # ── 🧲 Greek behaviour layer — INTERPRETS existing dealer/greek data ──
+        # No new engine, no new Greek: it reads `_gex_data` (gamma), the market
+        # picture's `vc_exp` (net charm / vanna) and the magnet level the app
+        # already ranks, and translates them into one compact behavioural strip
+        # (pull · chop/expansion · time · vol · expansion risk). Context only —
+        # it never votes, and a missing Greek reads "Not reported", never 0.
+        _gb_html = ""
+        try:
+            from mios_v5.greek_behaviour import interpret as _gb_interpret
+            from mios_v5.ui.greek_behaviour_panel import behaviour_html as _gbhtml
+            _vc = mp.get('vc_exp') or {}
+            _gx = st.session_state.get('_gex_data') or {}
+            _pin = mp.get('oi_pin')
+            if isinstance(_pin, (list, tuple)) and _pin:
+                _plevel = _pin[0]
+                _psrc = _pin[1] if len(_pin) > 1 else 'OI pin'
+            else:
+                _plevel = (option_data or {}).get('max_pain_strike')
+                _psrc = 'max pain'
+            _asof = None
+            _ots = st.session_state.get('_opt_data_ts')
+            if _ots:
+                try:
+                    _asof = datetime.fromisoformat(_ots).timestamp()
+                except Exception:
+                    _asof = None
+            _gb_html = _gbhtml(_gb_interpret(
+                spot=spot_price, pull_level=_plevel, pull_source=_psrc,
+                net_charm=_vc.get('net_charm'), net_vanna=_vc.get('net_vanna'),
+                total_gex=_gx.get('total_gex'),
+                gamma_flip=_gx.get('gamma_flip_level'),
+                is_expiry=_is_expiry_day(option_data),
+                as_of=_asof, now=time.time()))
+        except Exception:
+            _gb_html = ""
+
         # ── ⚙️ dealer & volatility context, in one line ─────────────────
         # The Adaptive Greeks read, from the object Dashboard V6 published this
         # cycle. Read-only and short by design: the card already carries three
@@ -14217,8 +14253,8 @@ def render_clean_card(spot_price, option_data=None):
                    f"{_sr_intel_html}</div>" if _sr_intel_html else
                    f"<div style='text-align:center;font-size:16px;margin-top:4px;"
                    f"font-weight:800;'>{_sr_line}</div>")
-                + _wz_html + _pe_html + _charm_html + _ag_html + _fs_html
-                + _zh_html),
+                + _wz_html + _pe_html + _charm_html + _gb_html + _ag_html
+                + _fs_html + _zh_html),
                 unsafe_allow_html=True)
 
         # ── 4 · DECISIONS — the three action verdicts, side by side. The Entry
