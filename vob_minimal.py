@@ -14223,6 +14223,20 @@ def render_clean_card(spot_price, option_data=None):
                     _la_levels.append({'label': _lbl, 'price': _zz.get('price'),
                                        'strength': _zz.get('strength'),
                                        'lifecycle': _zz.get('lifecycle')})
+            # OI walls — the market picture already ranks them (strike, size)
+            _oc = mp.get('oi_ceiling')
+            if _oc and _oc[0] is not None:
+                _la_levels.append({'label': 'OI wall (CE)', 'price': _oc[0]})
+            _ofl = mp.get('oi_floor')
+            if _ofl and _ofl[0] is not None:
+                _la_levels.append({'label': 'OI wall (PE)', 'price': _ofl[0]})
+            # POC / VAH / VAL — today's money-flow profile (already computed)
+            _mf_la = st.session_state.get('_money_flow_data') or {}
+            for _k, _lbl in (('poc_price', 'POC'), ('value_area_high', 'VAH'),
+                             ('value_area_low', 'VAL')):
+                _pv = _mf_la.get(_k)
+                if _pv:
+                    _la_levels.append({'label': _lbl, 'price': float(_pv)})
             if _la_levels:
                 _la_store = st.session_state.setdefault('_level_accept_mem', {})
                 _la_read = _observe_levels(_la_levels, spot_price, _la_metrics,

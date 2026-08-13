@@ -252,6 +252,39 @@ def test_no_observed_state_is_a_trade_word():
             assert banned not in low
 
 
+# ── retest (derived from the observed-state transition) ────────────────
+
+def test_retest_reads_pass_fail_underway_from_transitions():
+    # confirmed reversal → retest failed
+    r = LA.retest_status(LA.BREAK_ATTEMPT, LA.REJECTED)
+    assert r["detected"] and r["failed"] and not r["passed"]
+    # a failed break that then reclaims → retest held
+    r = LA.retest_status(LA.FAILED_BREAK_WAIT, LA.ACCEPTED_ABOVE)
+    assert r["detected"] and r["passed"] and not r["failed"]
+    # returned inside, not yet resolved → underway, never called early
+    r = LA.retest_status(LA.BREAK_ATTEMPT, LA.FAILED_BREAK_WAIT)
+    assert r["detected"] and not r["passed"] and not r["failed"]
+    # a clean accept with no prior failed break is NOT a retest event
+    r = LA.retest_status(LA.BREAK_ATTEMPT, LA.ACCEPTED_ABOVE)
+    assert not r["detected"]
+    # plain testing → nothing
+    assert not LA.retest_status(None, LA.TESTING)["detected"]
+
+
+def test_retest_is_tracked_across_reruns_via_memory():
+    # cycle 1: a break returns inside → FAILED_BREAK_WAIT (retest underway)
+    o1 = _obs({"label": "R1", "price": 24400}, 24399,
+              _fake("FAILED_BREAKOUT", {"price_held": False}))
+    assert o1["observed"] == LA.FAILED_BREAK_WAIT
+    assert o1["retest"]["detected"] and not o1["retest"]["passed"]
+    # cycle 2: price reclaims above → ACCEPTED, and the prior FAILED makes it a
+    # PASSED retest (memory carried the previous observed word)
+    o2 = _obs({"label": "R1", "price": 24400}, 24416,
+              _fake("CONFIRMED_BREAKOUT", {"price_held": True}), prev=o1["memory"])
+    assert o2["observed"] == LA.ACCEPTED_ABOVE
+    assert o2["retest"]["passed"]
+
+
 def test_observe_levels_always_flags_context_only():
     out = LA.observe_levels([{"label": "R", "price": 24400}], 24400, {}, {},
                             _fake("CONFIRMED_BREAKOUT", {"price_held": True}))
@@ -267,6 +300,14 @@ def test_the_app_reuses_the_engine_and_stays_context_only():
     assert "observe_levels" in src and "acceptance_html" in src
     # per-level memory persisted in session state, keyed per level
     assert "_level_accept_mem" in src
+    # the full level set is wired from existing producers (item 1)
+    for tok in ("Dealer magnet", "Gamma flip", "Resistance", "Support",
+                "OI wall (CE)", "OI wall (PE)", "POC", "VAH", "VAL"):
+        assert tok in src, tok
+    # POC/VAH/VAL reuse the money-flow profile's real field names
+    for fld in ("poc_price", "value_area_high", "value_area_low",
+                "oi_ceiling", "oi_floor"):
+        assert fld in src, fld
     # reuses the SAME published follow-through metrics, not a re-gather
     assert "stage42_acceptance" in src
     assert "'metrics'" in src or '"metrics"' in src

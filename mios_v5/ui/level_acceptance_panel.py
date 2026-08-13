@@ -35,12 +35,25 @@ _ROW = "margin-top:3px;"
 _SUB = "color:#8a95a3;font-size:11px;"
 
 
-def _checks_line(checks: Dict[str, bool], passed: int, known: int) -> str:
-    if not checks:
+def _retest_chip(retest: Optional[Dict[str, Any]]) -> str:
+    """`Retest ✓/✗/…` when a retest was detected, else nothing."""
+    r = retest or {}
+    if not r.get("detected"):
         return ""
+    mark = "✓" if r.get("passed") else "✗" if r.get("failed") else "…"
+    return f"Retest {mark}"
+
+
+def _checks_line(checks: Dict[str, bool], passed: int, known: int,
+                 retest: Optional[Dict[str, Any]] = None) -> str:
     parts = [f"{lbl} {'✓' if ok else '✗'}" for lbl, ok in checks.items()]
-    return (f"<div style='{_ROW}{_SUB}'>{' · '.join(parts)}"
-            f" &nbsp;<b>{passed}/{known}</b></div>")
+    chip = _retest_chip(retest)
+    if chip:
+        parts.append(chip)
+    if not parts:
+        return ""
+    tail = f" &nbsp;<b>{passed}/{known}</b>" if checks else ""
+    return f"<div style='{_ROW}{_SUB}'>{' · '.join(parts)}{tail}</div>"
 
 
 def _zone_html(z: Dict[str, Any]) -> str:
@@ -56,7 +69,8 @@ def _zone_html(z: Dict[str, Any]) -> str:
     lines = [head]
     if is_zone:
         lines.append(f"<div style='{_SUB}'>{' · '.join(z.get('labels') or [])}</div>")
-    ck = _checks_line(z.get("checks") or {}, z.get("passed", 0), z.get("known", 0))
+    ck = _checks_line(z.get("checks") or {}, z.get("passed", 0), z.get("known", 0),
+                      z.get("retest"))
     if ck:
         lines.append(ck)
     return "".join(lines)

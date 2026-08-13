@@ -134,6 +134,36 @@ def map_observed(state: Any, side: Any) -> Dict[str, Optional[str]]:
     return {"observed": observed, "direction": direction}
 
 
+def retest_status(prev_observed: Any, observed: Any) -> Dict[str, Any]:
+    """Derive the retest read from the observed-state *transition* — reusing the
+    engine's own return/reversal logic, computing nothing new.
+
+    A retest is price coming back to a level it broke, to see if the level now
+    holds (acceptance) or fails (rejection):
+
+    * `REJECTED` → the break was pushed back at the level: **retest failed**.
+    * was `FAILED_BREAK_WAIT`, now `ACCEPTED_*` → price dipped back and reclaimed:
+      **retest passed**.
+    * `FAILED_BREAK_WAIT` (and not yet resolved) → price returned inside but the
+      outcome is still open: retest **underway** (never called pass/fail early).
+
+    Returns `{detected, passed, failed, text}`; `detected` is False otherwise.
+    """
+    prev = str(prev_observed or "")
+    cur = str(observed or "")
+    accepted = (ACCEPTED_ABOVE, ACCEPTED_BELOW)
+    if cur == REJECTED:
+        return {"detected": True, "passed": False, "failed": True,
+                "text": "Retest failed"}
+    if cur in accepted and prev == FAILED_BREAK_WAIT:
+        return {"detected": True, "passed": True, "failed": False,
+                "text": "Retest held"}
+    if cur == FAILED_BREAK_WAIT:
+        return {"detected": True, "passed": False, "failed": False,
+                "text": "Retest underway"}
+    return {"detected": False, "passed": False, "failed": False, "text": None}
+
+
 def _confirmations(checks: Mapping[str, Any]) -> Dict[str, Any]:
     """The confirmation checks that actually reported, as `{label: bool}`, plus
     `passed`/`known`. A check the engine could not evaluate (None) is dropped —
@@ -173,8 +203,11 @@ def observe_one(level: Mapping[str, Any], spot: Any, metrics: Mapping[str, Any],
 
     mem = dict(prev or {})
     remembered = _f(mem.get("_price"))
-    if remembered is not None and abs(remembered - price) > reset_eps:
+    reset = remembered is not None and abs(remembered - price) > reset_eps
+    if reset:
         mem = {}                        # a new level — reset the reaction
+    # the prior observed word (for the retest transition); a reset drops it too
+    prev_observed = None if reset else (prev or {}).get("_observed")
 
     zone = {"side": side, "price": price,
             "strength": level.get("strength"), "lifecycle": level.get("lifecycle")}
@@ -183,11 +216,15 @@ def observe_one(level: Mapping[str, Any], spot: Any, metrics: Mapping[str, Any],
     new_mem["_price"] = price
 
     mapped = map_observed(r.get("state"), side)
+    observed = mapped["observed"]
+    new_mem["_observed"] = observed
     conf = _confirmations(r.get("checks") or {})
+    retest = retest_status(prev_observed, observed)
     return {
         "label": label, "price": price, "side": side,
-        "observed": mapped["observed"], "direction": mapped["direction"],
+        "observed": observed, "direction": mapped["direction"],
         "checks": conf["checks"], "passed": conf["passed"], "known": conf["known"],
+        "retest": retest,
         "confidence": int(_f(r.get("confidence")) or 0),
         "reasons": list(r.get("reasons") or [])[:3],
         "raw_state": r.get("state"),
@@ -236,6 +273,7 @@ def cluster(observations: Sequence[Mapping[str, Any]],
             "checks": headline.get("checks", {}),
             "passed": headline.get("passed", 0),
             "known": headline.get("known", 0),
+            "retest": headline.get("retest"),
             "confidence": headline.get("confidence", 0),
             "members": members,
         })
