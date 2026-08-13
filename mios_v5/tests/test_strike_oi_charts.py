@@ -191,6 +191,52 @@ def test_a_long_build_makes_no_claim_about_the_index():
     assert SC.side_read(oi, ltp, "ce")["means"] is None
 
 
+# ── building-vs-covering comes from the DAY's ΔOI, not the session drift ──
+
+def test_delta_oi_drives_direction_and_can_show_covering_when_oi_rose():
+    """⭐ The bug: the panel could only ever say BUILDING.
+
+    `changeinOpenInterest` (the day's ΔOI, from the previous close) is what turns
+    negative when the day is net unwinding — so it, not the absolute-OI drift
+    since snapshotting began, must decide building vs covering. Here absolute OI
+    ROSE across the window, yet the day's ΔOI is negative: covering, not building.
+    """
+    # absolute OI rose (100→130) but the day's ΔOI is negative, premium up
+    r = SC.side_read([100.0, 130.0], [40.0, 50.0], "ce", chg=[-5e5, -3e5])
+    assert r["state"] == "SHORT COVERING"
+    assert r["means"] == "resistance weakening"
+    # negative ΔOI + premium down → long unwinding
+    r2 = SC.side_read([100.0, 130.0], [50.0, 40.0], "pe", chg=[-4e5, -2e5])
+    assert r2["state"] == "LONG UNWINDING"
+    # positive ΔOI + premium down → writing, even if absolute OI happened to dip
+    r3 = SC.side_read([130.0, 100.0], [50.0, 40.0], "ce", chg=[2e5, 4e5])
+    assert r3["state"] == "SHORT BUILDING"
+
+
+def test_without_delta_oi_it_falls_back_to_the_absolute_change():
+    """A caller with only the OI series still gets a reading — backward compatible."""
+    assert SC.side_read([100.0, 130.0], [50.0, 40.0], "ce")["state"] == "SHORT BUILDING"
+    assert SC.side_read([130.0, 100.0], [40.0, 50.0], "ce")["state"] == "SHORT COVERING"
+    # a zero/absent latest ΔOI also falls back rather than reading flat
+    assert SC.side_read([100.0, 130.0], [50.0, 40.0], "ce",
+                        chg=[0.0])["state"] == "SHORT BUILDING"
+
+
+def test_strike_read_surfaces_covering_from_the_stored_delta_oi():
+    """End to end through the store: OI accumulating all session, but the day's
+    ΔOI negative and premium rising → the panel now says SHORT COVERING where
+    before it was pinned to a BUILDING row."""
+    s = {"snaps": []}
+    for i in range(4):
+        df, spot = _chain(ce_oi=9e6 + i * 2e5,     # absolute OI rising
+                          ce_chg=-3e5,              # day net unwinding
+                          ce_ltp=100.0 + i * 5.0)   # premium up
+        SH.record(s, df, spot, now=NOW + i * SH.MIN_GAP_S)
+    r = SC.strike_read(s, 24600)
+    assert r["ce"]["state"] == "SHORT COVERING"
+    assert r["ce"]["means"] == "resistance weakening"
+
+
 def test_one_sample_reads_nothing():
     assert SC.side_read([100.0], [50.0], "ce")["state"] is None
     assert SC.side_read([], [], "pe")["state"] is None
