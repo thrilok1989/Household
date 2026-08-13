@@ -56,6 +56,43 @@ def test_a_new_level_re_arms_immediately():
     assert alert is True
 
 
+def test_a_re_entry_within_the_cooldown_is_suppressed():
+    """The latch stops a loiter; the cooldown stops CHOP. Price touches, leaves
+    past REARM, and comes back — but within the cooldown, so no second alert."""
+    t = 1_000_000.0
+    a1, st = LT.evaluate(24330, 24327, None, now=t)          # touch, alert
+    assert a1 is True
+    _, st = LT.evaluate(24330, 24345, st, now=t + 60)        # leaves → re-arm
+    a2, st = LT.evaluate(24330, 24331, st, now=t + 120)      # back in 2 min
+    assert a2 is False, "re-entry inside the cooldown must not re-alert"
+
+
+def test_after_the_cooldown_a_fresh_touch_alerts_again():
+    t = 1_000_000.0
+    _, st = LT.evaluate(24330, 24327, None, now=t)           # alert
+    _, st = LT.evaluate(24330, 24345, st, now=t + 60)        # leaves → re-arm
+    a, st = LT.evaluate(24330, 24331, st, now=t + LT.COOLDOWN_S + 1)
+    assert a is True, "past the cooldown a genuine re-touch should alert"
+
+
+def test_a_new_level_starts_its_own_cooldown():
+    """A different level is a different alert — the previous level's cooldown
+    must not silence it."""
+    t = 1_000_000.0
+    _, st = LT.evaluate(24330, 24328, None, now=t)           # alert level A
+    a, st = LT.evaluate(24500, 24498, st, now=t + 30)        # level B, seconds later
+    assert a is True
+
+
+def test_without_now_only_the_latch_applies():
+    """Callers (and older tests) that pass no clock keep the pure-latch
+    behaviour — the cooldown simply does not engage."""
+    a1, st = LT.evaluate(24330, 24327, None)                 # no now
+    _, st = LT.evaluate(24330, 24345, st)                    # re-arm
+    a2, _ = LT.evaluate(24330, 24331, st)                    # back → alerts
+    assert a1 is True and a2 is True
+
+
 def test_a_missing_level_or_spot_is_not_a_touch():
     alert, st = LT.evaluate(None, 24330, None)
     assert alert is False and st == {}
