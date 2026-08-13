@@ -708,6 +708,14 @@ FORMATION_ALERTS_DEFAULT = True
 #    `mios_v5.level_touch.evaluate` and `_notify_level_touches`.
 LEVEL_TOUCH_DEFAULT = True
 
+# ── Level Acceptance / Rejection alerts ────────────────────────────────
+# Telegram note when a level RESOLVES (accepted above/below, or rejected) — the
+# owner asked for it ON. Edge-triggered (once, on the transition) and per-zone
+# cooldown-throttled so a chopping level cannot repeat-spam.
+LEVEL_ACCEPT_ALERTS_DEFAULT = True
+#: seconds before the SAME zone may alert again — matches the level-touch sleep.
+LEVEL_ACCEPT_COOLDOWN_S = 900.0
+
 # ── the two sub-alerts the owner paused ────────────────────────────────
 # The ranked support/resistance TOUCH (a sub-alert of level-touch) and the VOB
 # FORMATION alert were both too noisy, so they are OFF by default. The war-zone
@@ -11427,6 +11435,53 @@ def _notify_level_touches():
         pass  # an alert must never take the cycle down
 
 
+def _notify_level_acceptance():
+    """⚔️ Telegram note when a watched level RESOLVES — ACCEPTED ABOVE/BELOW or
+    REJECTED — from the context-only Level-Acceptance strip.
+
+    Fires ONLY on the transition into a resolved state (never on TESTING /
+    BREAK ATTEMPT / FAILED-BREAK-WAIT, which are in-progress), and only once:
+    `_la_alert_state` remembers each zone's last-alerted outcome, so a zone
+    sitting in ACCEPTED does not repeat, and a per-zone cooldown throttles a
+    level that keeps flipping. Zones are already battle-zone-clustered by the
+    strip, so VAH/resistance/magnet at one price send ONE message. Reuses the
+    strip's own reads — recomputes nothing. Opt-out via `_la_alerts_on`.
+    """
+    try:
+        if not st.session_state.get('_la_alerts_on', LEVEL_ACCEPT_ALERTS_DEFAULT):
+            return
+        zones = st.session_state.get('_la_zones_latest') or []
+        if not zones:
+            return
+        from mios_v5.level_acceptance import alert_text as _la_alert_text
+        states = st.session_state.setdefault('_la_alert_state', {})
+        now = time.time()
+        for z in zones:
+            if not z.get('newly_resolved'):
+                continue
+            try:
+                key = str(round(float(z.get('price'))))
+            except (TypeError, ValueError):
+                continue
+            observed = z.get('observed')
+            prev = states.get(key) or {}
+            # skip if this exact outcome already alerted, or still cooling down
+            if prev.get('observed') == observed:
+                continue
+            if now - float(prev.get('ts') or 0) < LEVEL_ACCEPT_COOLDOWN_S:
+                continue
+            msg = _la_alert_text(z)
+            if not msg:
+                continue
+            try:
+                send_telegram_message_sync(msg, force=True)
+                states[key] = {'observed': observed, 'ts': now}
+            except Exception:
+                pass
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
 def capture_stage2_market_events(spot_price, df, option_data):
     """Feed the Market Event Engine (Discord feed + Supabase audit trail)
     from conditions this app already computes each cycle — the 6-8 event
@@ -14242,6 +14297,9 @@ def render_clean_card(spot_price, option_data=None):
                 _la_read = _observe_levels(_la_levels, spot_price, _la_metrics,
                                            _la_store, _eval_reaction)
                 _la_html = _lahtml(_la_read)
+                # hand the resolved zones to the main-loop notifier (edge +
+                # cooldown live there, next to the other Telegram alerts)
+                st.session_state['_la_zones_latest'] = _la_read.get('zones') or []
         except Exception:
             _la_html = ""
 
@@ -14926,6 +14984,17 @@ def _render_main_analyzer():
         help="A Telegram note when spot comes within ±5 points of the war zone, "
              "an OI wall, or the ranked support / resistance. Sent once on "
              "arrival; re-arms only after price leaves the level.")
+
+    # ── ⚔️ level ACCEPTED / REJECTED → Telegram ───────────────────────
+    # Fires when a level resolves (accepted above/below, or rejected), not on
+    # mere touch. Edge-triggered + per-zone cooldown. Consumed in
+    # `_notify_level_acceptance`.
+    st.session_state["_la_alerts_on"] = st.sidebar.checkbox(
+        "⚔️ Level accepted / rejected → Telegram", value=LEVEL_ACCEPT_ALERTS_DEFAULT,
+        help="A Telegram note when a level RESOLVES — accepted above/below, or "
+             "rejected — from the Level-Acceptance strip. Sent once on the "
+             "transition; a per-zone cooldown stops a flipping level spamming. "
+             "Observation only; it does not change any verdict.")
 
     # ── the two sub-alerts the owner paused (off by default) ──────────
     # Ranked S/R touch is a subset of the level-touch alert above; VOB formation
@@ -15614,6 +15683,10 @@ def _render_main_analyzer():
     # is on.
     try:
         _notify_level_touches()
+    except Exception:
+        pass
+    try:
+        _notify_level_acceptance()
     except Exception:
         pass
 

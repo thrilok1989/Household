@@ -291,6 +291,48 @@ def test_observe_levels_always_flags_context_only():
     assert out["context_only"] is True
 
 
+# ── Telegram alert text + edge trigger ─────────────────────────────────
+
+def test_only_resolved_states_produce_alert_text():
+    base = {"price": 24400, "labels": ["Dealer magnet"], "checks": {}, "retest": {}}
+    # resolved → a message
+    assert LA.alert_text({**base, "observed": LA.ACCEPTED_ABOVE, "direction": "ABOVE"})
+    assert LA.alert_text({**base, "observed": LA.REJECTED})
+    # in-progress → None (never alerts)
+    for s in (LA.TESTING, LA.BREAK_ATTEMPT, LA.FAILED_BREAK_WAIT, None):
+        assert LA.alert_text({**base, "observed": s}) is None
+
+
+def test_alert_text_is_observational_never_a_trade():
+    z = {"price": 24400, "observed": LA.ACCEPTED_ABOVE, "direction": "ABOVE",
+         "is_battle_zone": True, "labels": ["VAH", "Resistance", "Dealer magnet"],
+         "checks": {"Hold": True, "CVD": True}, "passed": 2, "known": 2,
+         "retest": {"detected": True, "passed": True}}
+    msg = LA.alert_text(z)
+    assert "ACCEPTED ABOVE" in msg and "24,400" in msg
+    assert "Retest ✓" in msg and "BATTLE ZONE".lower() in msg.lower()
+    assert "context only" in msg.lower()
+    for banned in ("buy", "sell", "enter", "target", "stop loss"):
+        assert banned not in msg.lower()
+
+
+def test_newly_resolved_is_edge_triggered():
+    # first time it resolves → newly_resolved True
+    o1 = _obs({"label": "R1", "price": 24400}, 24416,
+              _fake("CONFIRMED_BREAKOUT", {"price_held": True}))
+    assert o1["observed"] == LA.ACCEPTED_ABOVE and o1["newly_resolved"] is True
+    # still accepted next cycle → NOT newly resolved (no repeat alert)
+    o2 = _obs({"label": "R1", "price": 24400}, 24418,
+              _fake("CONFIRMED_BREAKOUT", {"price_held": True}), prev=o1["memory"])
+    assert o2["observed"] == LA.ACCEPTED_ABOVE and o2["newly_resolved"] is False
+
+
+def test_testing_and_break_never_newly_resolved():
+    for st8 in ("TOUCH", "WATCHING", "BREAK", "FAILED_BREAKOUT"):
+        o = _obs({"label": "R1", "price": 24400}, 24405, _fake(st8))
+        assert o["newly_resolved"] is False
+
+
 # ── the app wiring (source-pinned; vob_minimal can't be imported here) ─
 
 def test_the_app_reuses_the_engine_and_stays_context_only():
@@ -308,6 +350,18 @@ def test_the_app_reuses_the_engine_and_stays_context_only():
     for fld in ("poc_price", "value_area_high", "value_area_low",
                 "oi_ceiling", "oi_floor"):
         assert fld in src, fld
+
+
+def test_the_app_alerts_only_on_resolution_edge_and_can_opt_out():
+    src = (_ROOT / "vob_minimal.py").read_text()
+    # a dedicated notifier, reusing the strip's alert_text (not recomputed)
+    assert "_notify_level_acceptance" in src
+    assert "alert_text" in src
+    # edge-triggered on the resolved transition, throttled per zone, opt-out
+    assert "newly_resolved" in src
+    assert "LEVEL_ACCEPT_COOLDOWN_S" in src
+    assert "_la_alerts_on" in src
+    assert "_la_alert_state" in src
     # reuses the SAME published follow-through metrics, not a re-gather
     assert "stage42_acceptance" in src
     assert "'metrics'" in src or '"metrics"' in src
