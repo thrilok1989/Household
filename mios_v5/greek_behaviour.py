@@ -258,22 +258,36 @@ def expansion_risk(total_gex: Any, speed: Any = None) -> Dict[str, Any]:
                      f"breakout")}
 
 
-def contextual_read(name: str, value: Any) -> Dict[str, Any]:
+def contextual_read(name: str, value: Any,
+                    history: Any = None) -> Dict[str, Any]:
     """Magnitude-only behavioural read for a third-order net exposure
-    (`vomma`/`speed`/`zomma`/`veta`/`color`). `LOW` below its (provisional)
-    MODERATE band; `NOT_REPORTED` when no producer handed a value in. Never a
-    direction — these describe how the *other* Greeks behave, not which way price
-    goes, so the strength alone carries the read."""
+    (`vomma`/`speed`/`zomma`/`veta`/`color`). `NOT_REPORTED` when no producer
+    handed a value in. Never a direction — these describe how the *other* Greeks
+    behave, not which way price goes, so the strength alone carries the read.
+
+    Bucketing:
+
+    * `history` given → **self-calibrating**: the value is bucketed against its
+      OWN recent magnitudes (`rolling_baseline.classify`), so HIGH means large
+      for this Greek right now, not against a guessed constant. The MODERATE band
+      is reused as the noise floor and the HIGH band as the warm-up fallback.
+    * `history` absent → the absolute `CONTEXTUAL_BANDS` (the #92 behaviour), so
+      callers with no window (and the tests) keep working unchanged.
+    """
     label, phrase = CONTEXTUAL_READS[name]
     v = _f(value)
     if v is None:
         return {"label": label, "strength": NOT_REPORTED, "text": NOT_REPORTED}
     mod, high = CONTEXTUAL_BANDS[name]
     a = abs(v)
-    if a < mod:
+    if history is not None:
+        from .rolling_baseline import classify as _classify
+        strength = _classify(a, history, floor=mod, high_band=high)
+    else:
+        strength = ("HIGH" if a >= high else "MODERATE" if a >= mod else "LOW")
+    if strength == "LOW":
         return {"label": label, "strength": "LOW",
                 "text": f"LOW · {label.lower()} not material right now"}
-    strength = "HIGH" if a >= high else "MODERATE"
     return {"label": label, "strength": strength,
             "text": f"{strength} · {phrase} (net {name} {v:+,.0f})"}
 
@@ -308,6 +322,7 @@ def interpret(*, spot: Any = None, pull_level: Any = None,
               is_expiry: bool = False, minutes_to_expiry: Any = None,
               as_of: Any = None, now: Any = None,
               stale_after_s: float = STALE_AFTER_S,
+              contextual_history: Optional[Dict[str, Any]] = None,
               **contextual: Any) -> Dict[str, Any]:
     """The compact behavioural read, from data the app already computed.
 
@@ -316,7 +331,9 @@ def interpret(*, spot: Any = None, pull_level: Any = None,
     (`vomma`, `speed`, `zomma`, `veta`, `color`); each now has a producer
     (`net_*` from `calculate_vanna_charm_exposure`) and becomes its own
     magnitude read under `contextual`, `Not reported` only when its column is
-    absent. Vega has its own `vol_sensitivity` read from `net_vega`.
+    absent. Vega has its own `vol_sensitivity` read from `net_vega`. Pass
+    `contextual_history` (`{greek: [recent |net| …]}`) to bucket each of the five
+    against its own recent magnitudes instead of a fixed band.
 
     Returns a dict with `pull`, `gamma`, `time`, `vol`, `vol_sensitivity`,
     `expansion`, a `synthesis` headline, a `greeks` availability map, a
@@ -336,8 +353,12 @@ def interpret(*, spot: Any = None, pull_level: Any = None,
     greeks = {name: _reported(contextual.get(name))
               for name in CONTEXTUAL_GREEKS}
     #: per-greek magnitude reads (the "other 5") — surfaced by the panel only
-    #: when MODERATE/HIGH, so a LOW/absent one adds no row.
-    contextual_reads = {name: contextual_read(name, contextual.get(name))
+    #: when MODERATE/HIGH, so a LOW/absent one adds no row. When the caller
+    #: passes a rolling `contextual_history`, each bucket self-calibrates against
+    #: that Greek's own recent magnitudes instead of a fixed band.
+    _hist = contextual_history or {}
+    contextual_reads = {name: contextual_read(name, contextual.get(name),
+                                              history=_hist.get(name))
                         for name in CONTEXTUAL_GREEKS}
 
     return {

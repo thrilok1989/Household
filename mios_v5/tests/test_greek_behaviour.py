@@ -355,6 +355,44 @@ def test_the_panel_shows_a_third_order_row_only_when_material():
     assert "Speed" not in lhtml
 
 
+# ── self-calibrating buckets (rolling history) ─────────────────────────
+
+def test_history_makes_the_bucket_self_calibrating_not_absolute():
+    """The SAME value, far below the absolute HIGH band, reads HIGH when it tops
+    its own recent range and only MODERATE when its range sits above it — proof
+    the bucket calibrates against the Greek's own history, not a fixed constant."""
+    g = "speed"
+    mod, high = GB.CONTEXTUAL_BANDS[g]
+    val = mod * 1.5                       # material, but well under the HIGH band
+    assert val < high
+    # a window with real spread whose whole range sits BELOW val → val is a standout
+    busy = [mod * f for f in (0.5, 0.7, 0.9, 0.6, 0.8, 1.0, 0.7, 0.9, 0.6, 0.8, 1.0, 0.7)]
+    quiet = [high * 2] * 12               # its recent range sits ABOVE val
+    assert GB.contextual_read(g, val, history=busy)["strength"] == "HIGH"
+    assert GB.contextual_read(g, val, history=quiet)["strength"] == "MODERATE"
+
+
+def test_no_history_keeps_the_absolute_band_behaviour():
+    """Backward compatible: with no window the #92 absolute bands still apply."""
+    g = "veta"
+    mod, high = GB.CONTEXTUAL_BANDS[g]
+    assert GB.contextual_read(g, high + 1)["strength"] == "HIGH"
+    assert GB.contextual_read(g, mod + 1)["strength"] == "MODERATE"
+    assert GB.contextual_read(g, mod * 0.5)["strength"] == "LOW"
+
+
+def test_interpret_threads_history_into_each_contextual_read():
+    g = "zomma"
+    mod, high = GB.CONTEXTUAL_BANDS[g]
+    val = mod * 1.5
+    busy = [mod * f for f in (0.5, 0.7, 0.9, 0.6, 0.8, 1.0, 0.7, 0.9, 0.6, 0.8, 1.0, 0.7)]
+    r = GB.interpret(total_gex=100.0, **{g: val}, contextual_history={g: busy})
+    assert r["contextual"][g]["strength"] == "HIGH"      # self-calibrated
+    # without the history the same value would only be MODERATE
+    r2 = GB.interpret(total_gex=100.0, **{g: val})
+    assert r2["contextual"][g]["strength"] == "MODERATE"
+
+
 # ── the app wiring ─────────────────────────────────────────────────────
 
 def test_the_app_feeds_the_layer_existing_producers_only():
@@ -369,6 +407,15 @@ def test_the_app_feeds_the_layer_existing_producers_only():
     # …and the five third-order nets are passed through by name
     for g in ("vomma", "speed", "zomma", "veta", "color"):
         assert f"net_{g}" in src, g
+
+
+def test_the_app_maintains_a_rolling_window_and_passes_it_through():
+    """The app keeps a bounded per-greek history in session state and hands it to
+    the layer so each read self-calibrates — it does not hand-set a threshold."""
+    src = (_ROOT / "vob_minimal.py").read_text()
+    assert "_greek_ctx_hist" in src            # the session-state window store
+    assert "contextual_history=" in src        # threaded into interpret
+    assert "_CTX_HIST_WINDOW" in src           # the window is bounded
 
 
 def test_the_producer_sums_the_five_third_order_columns_optionally():
