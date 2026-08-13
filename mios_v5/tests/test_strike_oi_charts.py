@@ -191,46 +191,49 @@ def test_a_long_build_makes_no_claim_about_the_index():
     assert SC.side_read(oi, ltp, "ce")["means"] is None
 
 
-# ── building-vs-covering comes from the DAY's ΔOI, not the session drift ──
+# ── building-vs-covering is the RECENT trend, not the session drift ──
 
-def test_delta_oi_drives_direction_and_can_show_covering_when_oi_rose():
+def test_direction_is_the_recent_trend_not_the_session_drift():
     """⭐ The bug: the panel could only ever say BUILDING.
 
-    `changeinOpenInterest` (the day's ΔOI, from the previous close) is what turns
-    negative when the day is net unwinding — so it, not the absolute-OI drift
-    since snapshotting began, must decide building vs covering. Here absolute OI
-    ROSE across the window, yet the day's ΔOI is negative: covering, not building.
+    OI accumulates through a session, so `oi_last - oi_first` (and the
+    day-cumulative ΔOI) net positive almost always — pinning the read to a
+    BUILDING row. What tells writers-adding from writers-covering is which way OI
+    is moving NOW. Here OI climbed for most of the window but has turned DOWN over
+    the recent lookback while premium rises: SHORT COVERING, not building — even
+    though the session net change in OI is still up.
     """
-    # absolute OI rose (100→130) but the day's ΔOI is negative, premium up
-    r = SC.side_read([100.0, 130.0], [40.0, 50.0], "ce", chg=[-5e5, -3e5])
+    # OI rises 10→59 then falls back over the last ~18 points; premium rising late
+    oi = list(range(10, 60)) + list(range(58, 40, -1))
+    assert oi[-1] > oi[0], "session drift is still net-up — the old read said building"
+    ltp = [100.0] * 50 + [100.0 + i for i in range(1, 19)]
+    r = SC.side_read(oi, ltp, "ce")
     assert r["state"] == "SHORT COVERING"
     assert r["means"] == "resistance weakening"
-    # negative ΔOI + premium down → long unwinding
-    r2 = SC.side_read([100.0, 130.0], [50.0, 40.0], "pe", chg=[-4e5, -2e5])
-    assert r2["state"] == "LONG UNWINDING"
-    # positive ΔOI + premium down → writing, even if absolute OI happened to dip
-    r3 = SC.side_read([130.0, 100.0], [50.0, 40.0], "ce", chg=[2e5, 4e5])
-    assert r3["state"] == "SHORT BUILDING"
 
 
-def test_without_delta_oi_it_falls_back_to_the_absolute_change():
-    """A caller with only the OI series still gets a reading — backward compatible."""
+def test_recent_downtrend_with_falling_premium_is_long_unwinding():
+    oi = list(range(10, 60)) + list(range(58, 40, -1))     # OI turning down
+    ltp = [100.0] * 50 + [100.0 - i for i in range(1, 19)]  # premium falling
+    assert SC.side_read(oi, ltp, "pe")["state"] == "LONG UNWINDING"
+
+
+def test_a_two_point_before_after_pair_is_unchanged():
+    """The window on two points is those two points, so a caller that passes a
+    plain before/after pair still gets the standard quadrant."""
     assert SC.side_read([100.0, 130.0], [50.0, 40.0], "ce")["state"] == "SHORT BUILDING"
     assert SC.side_read([130.0, 100.0], [40.0, 50.0], "ce")["state"] == "SHORT COVERING"
-    # a zero/absent latest ΔOI also falls back rather than reading flat
-    assert SC.side_read([100.0, 130.0], [50.0, 40.0], "ce",
-                        chg=[0.0])["state"] == "SHORT BUILDING"
 
 
-def test_strike_read_surfaces_covering_from_the_stored_delta_oi():
-    """End to end through the store: OI accumulating all session, but the day's
-    ΔOI negative and premium rising → the panel now says SHORT COVERING where
-    before it was pinned to a BUILDING row."""
+def test_strike_read_surfaces_covering_from_a_recent_oi_downturn():
+    """End to end through the store: OI accumulates for the first half of the
+    session, then turns down — the panel now says SHORT COVERING where before it
+    was pinned to a BUILDING row."""
     s = {"snaps": []}
-    for i in range(4):
-        df, spot = _chain(ce_oi=9e6 + i * 2e5,     # absolute OI rising
-                          ce_chg=-3e5,              # day net unwinding
-                          ce_ltp=100.0 + i * 5.0)   # premium up
+    ce_oi_path = ([9e6 + i * 1e5 for i in range(20)]        # rising
+                  + [11e6 - i * 1e5 for i in range(1, 21)])  # then falling
+    for i, oi in enumerate(ce_oi_path):
+        df, spot = _chain(ce_oi=oi, ce_ltp=100.0 + i)       # premium rising
         SH.record(s, df, spot, now=NOW + i * SH.MIN_GAP_S)
     r = SC.strike_read(s, 24600)
     assert r["ce"]["state"] == "SHORT COVERING"
