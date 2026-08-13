@@ -1,7 +1,14 @@
 """The war zone — where the fight is, and who is expected to win it.
 
-Pure presentation. `battle_zone`, `expected_winner` and `probabilities` are all
-published in the final read; this file decides only how they are worded.
+Pure presentation. `battle_zone`, `expected_winner`, `probabilities` and the two
+ranked walls (`strong_support` / `strong_resistance`) are all published in the
+final read; this file decides only how they are worded.
+
+The dashboard strip (`full_html`) shows BOTH walls as a bracket so the whole box
+is visible — resistance above, support below — with the side the move is on
+marked, rather than only the single level the fight is currently at. The battle
+zone is a separate read from the ranked walls (Stage 42 vs the ranked S/R), so
+the fight can sit at a price that is neither wall; the strip carries all three.
 
 ## Two renderings, one owner
 
@@ -79,8 +86,49 @@ def _probs(fr: Mapping[str, Any]) -> Dict[str, float]:
     return out
 
 
+def _bracket_html(f: Mapping[str, Any], bz: Mapping[str, Any]) -> str:
+    """Both walls at once — resistance above, support below — so the trader sees
+    the whole box, not only the side price is currently fighting at.
+
+    ⚠️ These are the RANKED levels (`strong_resistance` / `strong_support`), a
+    separate read from Stage 42's `battle_zone`: the fight can be at a price that
+    is neither wall. So the bracket is drawn from the ranked levels, and the side
+    that matches the battle zone's type is marked ⚔️ and brightened — the one the
+    move is on — while the other stays present but muted. `""` when neither wall
+    is known, so a cycle without them falls back to the single fight line rather
+    than drawing an empty bracket.
+    """
+    res = _num(f.get("strong_resistance"))
+    sup = _num(f.get("strong_support"))
+    if res is None and sup is None:
+        return ""
+    active = str(bz.get("type") or "").strip().upper()
+
+    def _row(icon: str, label: str, price: float, is_active: bool) -> str:
+        col = INK if is_active else MUTED
+        weight = "800" if is_active else "600"
+        mark = f"<span style='color:{WARN}'> ⚔️</span>" if is_active else ""
+        return (f"<span style='color:{col};font-weight:{weight}'>"
+                f"{icon} {label} ₹{price:,.0f}</span>{mark}")
+
+    rows = []
+    if res is not None:
+        rows.append(_row("🧱", "Resistance", res, active == "RESISTANCE"))
+    if sup is not None:
+        rows.append(_row("🛡", "Support", sup, active == "SUPPORT"))
+    sep = f"<span style='color:{MICRO};margin:0 8px'>·</span>"
+    return (f"<div style='font-size:12.5px;margin-top:4px'>"
+            f"{sep.join(rows)}</div>")
+
+
 def full_html(fr: Optional[Mapping[str, Any]] = None) -> str:
-    """The V6 dashboard strip. `""` when there is no fight to report."""
+    """The V6 dashboard strip. `""` when there is no fight to report.
+
+    Two parts: the active fight (Stage 42's contested level, its expected winner
+    and odds) and — when the ranked walls are published — a bracket showing both
+    support and resistance so the whole box is visible at a glance, with the side
+    the move is on marked.
+    """
     f = fr if isinstance(fr, Mapping) else {}
     bz = _zone(f)
     if not bz:
@@ -94,6 +142,7 @@ def full_html(fr: Optional[Mapping[str, Any]] = None) -> str:
         f"<b>{f.get('expected_winner', '—')}</b></span>"
         + "".join(f"<span style='font-size:12px;color:{MUTED};margin-left:10px'>"
                   f"{k} {v:.0f}%</span>" for k, v in probs.items())
+        + _bracket_html(f, bz)
         + "</div>")
 
 
