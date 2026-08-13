@@ -14,11 +14,12 @@ one, stated once in `POSITION_READ` rather than as four scattered branches:
     OI ↓ + price ↑   short covering
     OI ↓ + price ↓   long unwinding
 
-⚠️ The "OI ↑/↓" here is the **day's ΔOI** (`changeinOpenInterest`, from the
-previous close), NOT the change in absolute OI since snapshotting began. Only the
-day figure turns negative on net unwinding, so only it can surface the covering
-and unwinding rows — see `side_read`. Reading it off the absolute-OI series
-instead is what made the panel say BUILDING and nothing else.
+⚠️ The "OI ↑/↓" here is the **recent trend** — the change over the last
+`TREND_LOOKBACK` snapshots — NOT the drift since snapshotting began, and NOT the
+day-cumulative ΔOI. Both of those net positive through a normal session (OI
+accumulates), so they can only ever surface the two BUILDING rows; only the
+recent direction turns negative when writers are covering *now*, which is what
+lets the covering/unwinding rows appear — see `side_read`.
 
 For a CE leg, writing is resistance; for a PE leg, writing is support. The flip is
 applied in one place, `side_read`, for the same reason.
@@ -59,44 +60,46 @@ def _sign(x: Any, eps: float = 0.0) -> int:
     return 1 if v > eps else (-1 if v < -eps else 0)
 
 
-def _first_last(vals: Sequence[Any]) -> Tuple[Optional[float], Optional[float]]:
+#: how many snapshots back "recent" spans for the building-vs-covering read. At
+#: the ~18s snapshot cadence this is roughly the last 5 minutes — long enough not
+#: to flip on one noisy print, short enough to show the CURRENT phase.
+TREND_LOOKBACK = 15
+
+
+def _window(vals: Sequence[Any],
+            lookback: int) -> Tuple[Optional[float], Optional[float]]:
+    """`(earlier, latest)` over the last `lookback` snapshots — or the whole
+    series when it is shorter. `(None, None)` with fewer than two points."""
     nums = [v for v in vals if isinstance(v, (int, float))]
-    return (nums[0], nums[-1]) if len(nums) >= 2 else (None, None)
-
-
-def _last_num(vals: Sequence[Any]) -> Optional[float]:
-    """The most recent numeric value in a series, or None."""
-    for v in reversed(list(vals or ())):
-        if isinstance(v, (int, float)):
-            return float(v)
-    return None
+    if len(nums) < 2:
+        return None, None
+    earlier = nums[max(0, len(nums) - 1 - int(lookback))]
+    return earlier, nums[-1]
 
 
 def side_read(oi: Sequence[Any], ltp: Sequence[Any], side: str,
-              chg: Optional[Sequence[Any]] = None) -> Dict[str, Any]:
+              lookback: int = TREND_LOOKBACK) -> Dict[str, Any]:
     """`{state, oi_pct, ltp_pct, means}` for one side of one strike.
 
     `means` is what the state implies for price — resistance or support — and is
     only set for the two WRITING/COVERING cases, because a long build in an option
     is not a statement about the index level.
 
-    ⚠️ **OI direction comes from the day's ΔOI (`chg`), not from the change in
-    absolute OI since collection began.** `changeinOpenInterest` is measured from
-    the previous day's close, so its sign is negative exactly when the day is net
-    *unwinding* — which is what lets SHORT COVERING and LONG UNWINDING ever show.
-    The old reading, `sign(oi_last - oi_first)`, was anchored to whenever the app
-    started snapshotting; intraday OI almost always nets up from that arbitrary
-    point, so `d_oi` was stuck at +1 and the panel could only ever say BUILDING.
-    When no ΔOI series is supplied (or its latest point is absent/zero) it falls
-    back to the absolute-OI delta, so a caller with only OI still gets a reading.
+    ⚠️ **Direction is the RECENT trend, over the last `lookback` snapshots — not
+    the drift since collection began, and not the day-cumulative ΔOI.** Both of
+    those net *positive* through a normal session (OI accumulates), so the panel
+    could only ever say BUILDING — which is exactly the bug reported: every strike
+    stuck on LONG/SHORT BUILDING, never covering. What separates writers *adding*
+    from writers *covering* is which way OI is moving **now**, so a strike whose
+    OI has turned down in the last few minutes reads as covering even while the
+    day is still net-long OI. On a series of two points the window is those two,
+    so the quadrant rule is unchanged for callers that pass a before/after pair.
     """
-    o_a, o_b = _first_last(oi)
-    l_a, l_b = _first_last(ltp)
+    o_a, o_b = _window(oi, lookback)
+    l_a, l_b = _window(ltp, lookback)
     if o_a is None or l_a is None:
         return {"state": None, "oi_pct": None, "ltp_pct": None, "means": None}
-    d_ltp = _sign(l_b - l_a)
-    d_chg = _sign(_last_num(chg)) if _last_num(chg) is not None else 0
-    d_oi = d_chg if d_chg != 0 else _sign(o_b - o_a)
+    d_oi, d_ltp = _sign(o_b - o_a), _sign(l_b - l_a)
     state = POSITION_READ.get((d_oi, d_ltp))
     means = None
     if state == "SHORT BUILDING":
@@ -112,13 +115,12 @@ def side_read(oi: Sequence[Any], ltp: Sequence[Any], side: str,
 def strike_read(store: Any, strike: Any) -> Dict[str, Any]:
     """Both sides of one strike, plus which is heavier right now."""
     out: Dict[str, Any] = {}
-    for side, oi_f, ltp_f, chg_f in (("ce", "ce_oi", "ce_ltp", "ce_chg"),
-                                     ("pe", "pe_oi", "pe_ltp", "pe_chg")):
+    for side, oi_f, ltp_f in (("ce", "ce_oi", "ce_ltp"),
+                              ("pe", "pe_oi", "pe_ltp")):
         oi = SH.series(store, strike, oi_f)["v"]
         ltp = SH.series(store, strike, ltp_f)["v"]
-        # the day's ΔOI drives building-vs-covering; see `side_read`.
-        chg = SH.series(store, strike, chg_f)["v"]
-        out[side] = side_read(oi, ltp, side, chg=chg)
+        # the RECENT trend of OI drives building-vs-covering; see `side_read`.
+        out[side] = side_read(oi, ltp, side)
         out[f"{side}_oi"] = oi[-1] if oi else None
     ce, pe = out.get("ce_oi"), out.get("pe_oi")
     if isinstance(ce, (int, float)) and isinstance(pe, (int, float)) and ce > 0 and pe > 0:
