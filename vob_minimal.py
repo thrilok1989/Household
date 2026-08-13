@@ -14293,9 +14293,31 @@ def render_clean_card(spot_price, option_data=None):
                 if _pv:
                     _la_levels.append({'label': _lbl, 'price': float(_pv)})
             if _la_levels:
+                # ── reset per-level state on a NEW session or a confirmed regime
+                # flip — never on tick noise. Session = the IST trading date;
+                # regime flip = a real UP↔DOWN change, ignoring SIDEWAYS flicker.
+                _la_sess = (_ots or '')[:10]          # YYYY-MM-DD from market ts
+                _la_reg = str(mp.get('regime') or '').upper()
+                _la_keys = st.session_state.get('_la_reset_keys') or {}
+                _reset_la = False
+                if (_la_sess and _la_keys.get('session')
+                        and _la_keys['session'] != _la_sess):
+                    _reset_la = True                  # a new trading session
+                if _la_reg in ('UP', 'DOWN'):
+                    if _la_keys.get('regime_dir') and _la_keys['regime_dir'] != _la_reg:
+                        _reset_la = True              # confirmed UP↔DOWN flip
+                    _la_keys['regime_dir'] = _la_reg  # updated only on direction
+                if _la_sess:
+                    _la_keys['session'] = _la_sess
+                st.session_state['_la_reset_keys'] = _la_keys
+                if _reset_la:
+                    st.session_state['_level_accept_mem'] = {}
+                    st.session_state['_la_alert_state'] = {}
                 _la_store = st.session_state.setdefault('_level_accept_mem', {})
+                _la_iband = st.session_state.get('_la_interaction_band') or 5.0
                 _la_read = _observe_levels(_la_levels, spot_price, _la_metrics,
-                                           _la_store, _eval_reaction)
+                                           _la_store, _eval_reaction,
+                                           interaction_band=_la_iband, now=_ots)
                 _la_html = _lahtml(_la_read)
                 # hand the resolved zones to the main-loop notifier (edge +
                 # cooldown live there, next to the other Telegram alerts)
