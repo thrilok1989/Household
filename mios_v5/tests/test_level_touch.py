@@ -149,3 +149,19 @@ def test_the_sidebar_toggle_reads_the_named_constant():
     default = next((kw.value for kw in checks[0].keywords if kw.arg == "value"),
                    None)
     assert isinstance(default, ast.Name) and default.id == "LEVEL_TOUCH_DEFAULT"
+
+
+def test_the_ranked_sr_touch_is_paused_by_default_but_gated_not_removed():
+    """The owner paused the ranked S/R touch — off by default, but still gated on
+    a session flag so it can be turned back on. War-zone and OI-wall touches are
+    NOT gated by it (they remain under the level-touch toggle)."""
+    const = next(n for n in _TREE.body if isinstance(n, ast.Assign)
+                 and any(getattr(t, "id", "") == "SR_TOUCH_ALERTS_DEFAULT"
+                         for t in n.targets))
+    assert isinstance(const.value, ast.Constant) and const.value.value is False
+    helper = _fn("_notify_level_touches")
+    consts = {n.value for n in ast.walk(helper)
+              if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "_sr_touch_on" in consts
+    # the S/R sources are still there (gated, not deleted)
+    assert "strong_support" in consts and "strong_resistance" in consts

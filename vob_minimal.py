@@ -706,6 +706,14 @@ FORMATION_ALERTS_DEFAULT = True
 #    at is alerted once, not every 20-second refresh — see
 #    `mios_v5.level_touch.evaluate` and `_notify_level_touches`.
 LEVEL_TOUCH_DEFAULT = True
+
+# ── the two sub-alerts the owner paused ────────────────────────────────
+# The ranked support/resistance TOUCH (a sub-alert of level-touch) and the VOB
+# FORMATION alert were both too noisy, so they are OFF by default. The war-zone
+# and OI-wall touches and the HVP formation alert are unaffected. Flip either to
+# True (or tick its sidebar box) to bring it back.
+SR_TOUCH_ALERTS_DEFAULT = False
+VOB_FORMATION_ALERTS_DEFAULT = False
 _RETIRED_ALERT_CLASSES = frozenset({
     'leg_entry', 'confirmed_entry', 'entry_result', 'all_aligned_entry',
     'sr_confluence', 'fresh_entry', 'bias_enter',
@@ -11252,12 +11260,17 @@ def _notify_chart_formations():
                 except Exception:
                     pass
 
+        # VOB formation was paused by the owner (too noisy); HVP stays on. The
+        # seeding still runs when it is re-enabled — `diff` seeds on first sight
+        # regardless — so turning it back on does not replay the day's blocks.
+        _vob_on = st.session_state.get('_vob_formation_on',
+                                       VOB_FORMATION_ALERTS_DEFAULT)
         for chart in _fa.CHARTS:
             prof = profiles.get(chart) or {}
             dp = 0 if chart == 'NIFTY' else 2
             _emit('hvp', chart, prof.get('hv_points'),
                   _fa.hvp_signature, _fa.hvp_message, dp)
-            if chart in ('CALL', 'PUT'):
+            if _vob_on and chart in ('CALL', 'PUT'):
                 zones = vob_store.get(labels.get(chart)) or []
                 _emit('vob', chart, zones,
                       _fa.vob_signature, _fa.vob_message, dp)
@@ -11337,13 +11350,18 @@ def _notify_level_touches():
             targets.append(('oi_floor', "PE OI wall (support)", '🛡', _fp,
                             [f"{_fq:.1f}L OI" if _fq else None], _bb.NEUTRAL))
 
-        _res = _num(fr.get('strong_resistance'))
-        if _res is not None:
-            targets.append(('resistance', "resistance", '🧱', _res, [],
-                            _bb.NEUTRAL))
-        _sup = _num(fr.get('strong_support'))
-        if _sup is not None:
-            targets.append(('support', "support", '🛡', _sup, [], _bb.NEUTRAL))
+        # The ranked S/R touch was paused by the owner (too noisy); the war-zone
+        # and OI-wall touches above are unaffected. Off by default — flip
+        # `SR_TOUCH_ALERTS_DEFAULT` or tick the sidebar box to bring it back.
+        if st.session_state.get('_sr_touch_on', SR_TOUCH_ALERTS_DEFAULT):
+            _res = _num(fr.get('strong_resistance'))
+            if _res is not None:
+                targets.append(('resistance', "resistance", '🧱', _res, [],
+                                _bb.NEUTRAL))
+            _sup = _num(fr.get('strong_support'))
+            if _sup is not None:
+                targets.append(('support', "support", '🛡', _sup, [],
+                                _bb.NEUTRAL))
 
         states = st.session_state.setdefault('_level_touch_state', {})
         hits = []
@@ -14759,6 +14777,18 @@ def _render_main_analyzer():
         help="A Telegram note when spot comes within ±5 points of the war zone, "
              "an OI wall, or the ranked support / resistance. Sent once on "
              "arrival; re-arms only after price leaves the level.")
+
+    # ── the two sub-alerts the owner paused (off by default) ──────────
+    # Ranked S/R touch is a subset of the level-touch alert above; VOB formation
+    # a subset of the formation alert. Both were too noisy, so they are opt-in.
+    st.session_state["_sr_touch_on"] = st.sidebar.checkbox(
+        "   ↳ include ranked S/R touch", value=SR_TOUCH_ALERTS_DEFAULT,
+        help="Paused — the ranked support/resistance touch was noisy. The "
+             "war-zone and OI-wall touches above are unaffected.")
+    st.session_state["_vob_formation_on"] = st.sidebar.checkbox(
+        "   ↳ include VOB formation", value=VOB_FORMATION_ALERTS_DEFAULT,
+        help="Paused — new-VOB alerts were noisy. High-volume pivot (HVP) "
+             "formation alerts are unaffected.")
 
     if _mios_tg:
         st.session_state["_mios_transport"] = mios_v6_transport
