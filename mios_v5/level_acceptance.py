@@ -52,6 +52,11 @@ REJECTED = "REJECTED"
 #: the ±5 the level-touch alerts already use, so the two agree on "at a level".
 CLUSTER_TOLERANCE = 5.0
 
+#: the resolved outcomes — the only states worth a Telegram alert. TESTING /
+#: BREAK_ATTEMPT / FAILED_BREAK_WAIT are in-progress and must NOT alert (they'd
+#: spam and, worse, call a move before the market settled it).
+RESOLVED = (ACCEPTED_ABOVE, ACCEPTED_BELOW, REJECTED)
+
 #: a remembered level whose price moves more than this is a NEW level — its
 #: reaction memory resets rather than carrying a stale reference point.
 RESET_EPS = 3.0
@@ -134,6 +139,36 @@ def map_observed(state: Any, side: Any) -> Dict[str, Optional[str]]:
     return {"observed": observed, "direction": direction}
 
 
+def retest_status(prev_observed: Any, observed: Any) -> Dict[str, Any]:
+    """Derive the retest read from the observed-state *transition* — reusing the
+    engine's own return/reversal logic, computing nothing new.
+
+    A retest is price coming back to a level it broke, to see if the level now
+    holds (acceptance) or fails (rejection):
+
+    * `REJECTED` → the break was pushed back at the level: **retest failed**.
+    * was `FAILED_BREAK_WAIT`, now `ACCEPTED_*` → price dipped back and reclaimed:
+      **retest passed**.
+    * `FAILED_BREAK_WAIT` (and not yet resolved) → price returned inside but the
+      outcome is still open: retest **underway** (never called pass/fail early).
+
+    Returns `{detected, passed, failed, text}`; `detected` is False otherwise.
+    """
+    prev = str(prev_observed or "")
+    cur = str(observed or "")
+    accepted = (ACCEPTED_ABOVE, ACCEPTED_BELOW)
+    if cur == REJECTED:
+        return {"detected": True, "passed": False, "failed": True,
+                "text": "Retest failed"}
+    if cur in accepted and prev == FAILED_BREAK_WAIT:
+        return {"detected": True, "passed": True, "failed": False,
+                "text": "Retest held"}
+    if cur == FAILED_BREAK_WAIT:
+        return {"detected": True, "passed": False, "failed": False,
+                "text": "Retest underway"}
+    return {"detected": False, "passed": False, "failed": False, "text": None}
+
+
 def _confirmations(checks: Mapping[str, Any]) -> Dict[str, Any]:
     """The confirmation checks that actually reported, as `{label: bool}`, plus
     `passed`/`known`. A check the engine could not evaluate (None) is dropped —
@@ -173,8 +208,11 @@ def observe_one(level: Mapping[str, Any], spot: Any, metrics: Mapping[str, Any],
 
     mem = dict(prev or {})
     remembered = _f(mem.get("_price"))
-    if remembered is not None and abs(remembered - price) > reset_eps:
+    reset = remembered is not None and abs(remembered - price) > reset_eps
+    if reset:
         mem = {}                        # a new level — reset the reaction
+    # the prior observed word (for the retest transition); a reset drops it too
+    prev_observed = None if reset else (prev or {}).get("_observed")
 
     zone = {"side": side, "price": price,
             "strength": level.get("strength"), "lifecycle": level.get("lifecycle")}
@@ -183,11 +221,18 @@ def observe_one(level: Mapping[str, Any], spot: Any, metrics: Mapping[str, Any],
     new_mem["_price"] = price
 
     mapped = map_observed(r.get("state"), side)
+    observed = mapped["observed"]
+    new_mem["_observed"] = observed
     conf = _confirmations(r.get("checks") or {})
+    retest = retest_status(prev_observed, observed)
+    # edge trigger: a resolution the market just reached (not one it has been
+    # sitting in). This is what an alert fires on — once, on the transition.
+    newly_resolved = observed in RESOLVED and observed != prev_observed
     return {
         "label": label, "price": price, "side": side,
-        "observed": mapped["observed"], "direction": mapped["direction"],
+        "observed": observed, "direction": mapped["direction"],
         "checks": conf["checks"], "passed": conf["passed"], "known": conf["known"],
+        "retest": retest, "newly_resolved": newly_resolved,
         "confidence": int(_f(r.get("confidence")) or 0),
         "reasons": list(r.get("reasons") or [])[:3],
         "raw_state": r.get("state"),
@@ -236,10 +281,50 @@ def cluster(observations: Sequence[Mapping[str, Any]],
             "checks": headline.get("checks", {}),
             "passed": headline.get("passed", 0),
             "known": headline.get("known", 0),
+            "retest": headline.get("retest"),
+            "newly_resolved": headline.get("newly_resolved", False),
             "confidence": headline.get("confidence", 0),
             "members": members,
         })
     return out
+
+
+#: word → (icon, phrasing) for the alert headline.
+_ALERT_WORDS = {
+    ACCEPTED_ABOVE: ("🟢", "ACCEPTED ABOVE"),
+    ACCEPTED_BELOW: ("🟢", "ACCEPTED BELOW"),
+    REJECTED: ("🔴", "REJECTED"),
+}
+
+
+def alert_text(zone: Mapping[str, Any]) -> Optional[str]:
+    """The Telegram body for a resolved zone, or None if it is not a resolved
+    state. Pure — the app owns *when* to send (edge + cooldown); this only words
+    it. Reports what price DID; carries no BUY/SELL and no prediction.
+    """
+    observed = zone.get("observed")
+    if observed not in RESOLVED:
+        return None
+    icon, word = _ALERT_WORDS.get(observed, ("⚔️", str(observed)))
+    arrow = {"ABOVE": " ↑", "BELOW": " ↓"}.get(zone.get("direction") or "", "")
+    price = _f(zone.get("price"))
+    name = ("BATTLE ZONE" if zone.get("is_battle_zone")
+            else (list(zone.get("labels") or ["level"]) or ["level"])[0])
+    lines = [f"{icon} <b>₹{price:,.0f} · {word}{arrow}</b>",
+             f"⚔️ Level {name.lower() if not zone.get('is_battle_zone') else 'battle zone'}"
+             f" — {' · '.join(zone.get('labels') or [])}"]
+    checks = zone.get("checks") or {}
+    ck = [f"{lbl} {'✓' if ok else '✗'}" for lbl, ok in checks.items()]
+    rt = zone.get("retest") or {}
+    if rt.get("detected"):
+        ck.append("Retest " + ("✓" if rt.get("passed")
+                               else "✗" if rt.get("failed") else "…"))
+    if ck:
+        lines.append(" · ".join(ck)
+                     + (f"  {zone.get('passed', 0)}/{zone.get('known', 0)}"
+                        if checks else ""))
+    lines.append("Observed, not predicted — context only.")
+    return "\n".join(lines)
 
 
 def observe_levels(levels: Sequence[Mapping[str, Any]], spot: Any,

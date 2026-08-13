@@ -252,10 +252,85 @@ def test_no_observed_state_is_a_trade_word():
             assert banned not in low
 
 
+# ── retest (derived from the observed-state transition) ────────────────
+
+def test_retest_reads_pass_fail_underway_from_transitions():
+    # confirmed reversal → retest failed
+    r = LA.retest_status(LA.BREAK_ATTEMPT, LA.REJECTED)
+    assert r["detected"] and r["failed"] and not r["passed"]
+    # a failed break that then reclaims → retest held
+    r = LA.retest_status(LA.FAILED_BREAK_WAIT, LA.ACCEPTED_ABOVE)
+    assert r["detected"] and r["passed"] and not r["failed"]
+    # returned inside, not yet resolved → underway, never called early
+    r = LA.retest_status(LA.BREAK_ATTEMPT, LA.FAILED_BREAK_WAIT)
+    assert r["detected"] and not r["passed"] and not r["failed"]
+    # a clean accept with no prior failed break is NOT a retest event
+    r = LA.retest_status(LA.BREAK_ATTEMPT, LA.ACCEPTED_ABOVE)
+    assert not r["detected"]
+    # plain testing → nothing
+    assert not LA.retest_status(None, LA.TESTING)["detected"]
+
+
+def test_retest_is_tracked_across_reruns_via_memory():
+    # cycle 1: a break returns inside → FAILED_BREAK_WAIT (retest underway)
+    o1 = _obs({"label": "R1", "price": 24400}, 24399,
+              _fake("FAILED_BREAKOUT", {"price_held": False}))
+    assert o1["observed"] == LA.FAILED_BREAK_WAIT
+    assert o1["retest"]["detected"] and not o1["retest"]["passed"]
+    # cycle 2: price reclaims above → ACCEPTED, and the prior FAILED makes it a
+    # PASSED retest (memory carried the previous observed word)
+    o2 = _obs({"label": "R1", "price": 24400}, 24416,
+              _fake("CONFIRMED_BREAKOUT", {"price_held": True}), prev=o1["memory"])
+    assert o2["observed"] == LA.ACCEPTED_ABOVE
+    assert o2["retest"]["passed"]
+
+
 def test_observe_levels_always_flags_context_only():
     out = LA.observe_levels([{"label": "R", "price": 24400}], 24400, {}, {},
                             _fake("CONFIRMED_BREAKOUT", {"price_held": True}))
     assert out["context_only"] is True
+
+
+# ── Telegram alert text + edge trigger ─────────────────────────────────
+
+def test_only_resolved_states_produce_alert_text():
+    base = {"price": 24400, "labels": ["Dealer magnet"], "checks": {}, "retest": {}}
+    # resolved → a message
+    assert LA.alert_text({**base, "observed": LA.ACCEPTED_ABOVE, "direction": "ABOVE"})
+    assert LA.alert_text({**base, "observed": LA.REJECTED})
+    # in-progress → None (never alerts)
+    for s in (LA.TESTING, LA.BREAK_ATTEMPT, LA.FAILED_BREAK_WAIT, None):
+        assert LA.alert_text({**base, "observed": s}) is None
+
+
+def test_alert_text_is_observational_never_a_trade():
+    z = {"price": 24400, "observed": LA.ACCEPTED_ABOVE, "direction": "ABOVE",
+         "is_battle_zone": True, "labels": ["VAH", "Resistance", "Dealer magnet"],
+         "checks": {"Hold": True, "CVD": True}, "passed": 2, "known": 2,
+         "retest": {"detected": True, "passed": True}}
+    msg = LA.alert_text(z)
+    assert "ACCEPTED ABOVE" in msg and "24,400" in msg
+    assert "Retest ✓" in msg and "BATTLE ZONE".lower() in msg.lower()
+    assert "context only" in msg.lower()
+    for banned in ("buy", "sell", "enter", "target", "stop loss"):
+        assert banned not in msg.lower()
+
+
+def test_newly_resolved_is_edge_triggered():
+    # first time it resolves → newly_resolved True
+    o1 = _obs({"label": "R1", "price": 24400}, 24416,
+              _fake("CONFIRMED_BREAKOUT", {"price_held": True}))
+    assert o1["observed"] == LA.ACCEPTED_ABOVE and o1["newly_resolved"] is True
+    # still accepted next cycle → NOT newly resolved (no repeat alert)
+    o2 = _obs({"label": "R1", "price": 24400}, 24418,
+              _fake("CONFIRMED_BREAKOUT", {"price_held": True}), prev=o1["memory"])
+    assert o2["observed"] == LA.ACCEPTED_ABOVE and o2["newly_resolved"] is False
+
+
+def test_testing_and_break_never_newly_resolved():
+    for st8 in ("TOUCH", "WATCHING", "BREAK", "FAILED_BREAKOUT"):
+        o = _obs({"label": "R1", "price": 24400}, 24405, _fake(st8))
+        assert o["newly_resolved"] is False
 
 
 # ── the app wiring (source-pinned; vob_minimal can't be imported here) ─
@@ -267,6 +342,26 @@ def test_the_app_reuses_the_engine_and_stays_context_only():
     assert "observe_levels" in src and "acceptance_html" in src
     # per-level memory persisted in session state, keyed per level
     assert "_level_accept_mem" in src
+    # the full level set is wired from existing producers (item 1)
+    for tok in ("Dealer magnet", "Gamma flip", "Resistance", "Support",
+                "OI wall (CE)", "OI wall (PE)", "POC", "VAH", "VAL"):
+        assert tok in src, tok
+    # POC/VAH/VAL reuse the money-flow profile's real field names
+    for fld in ("poc_price", "value_area_high", "value_area_low",
+                "oi_ceiling", "oi_floor"):
+        assert fld in src, fld
+
+
+def test_the_app_alerts_only_on_resolution_edge_and_can_opt_out():
+    src = (_ROOT / "vob_minimal.py").read_text()
+    # a dedicated notifier, reusing the strip's alert_text (not recomputed)
+    assert "_notify_level_acceptance" in src
+    assert "alert_text" in src
+    # edge-triggered on the resolved transition, throttled per zone, opt-out
+    assert "newly_resolved" in src
+    assert "LEVEL_ACCEPT_COOLDOWN_S" in src
+    assert "_la_alerts_on" in src
+    assert "_la_alert_state" in src
     # reuses the SAME published follow-through metrics, not a re-gather
     assert "stage42_acceptance" in src
     assert "'metrics'" in src or '"metrics"' in src
