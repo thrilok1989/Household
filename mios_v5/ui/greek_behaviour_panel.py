@@ -73,6 +73,14 @@ def behaviour_html(read: Optional[Dict[str, Any]]) -> str:
     if vsens.get("strength") in ("MODERATE", "HIGH"):
         rows.append(_row("Vol sensitivity", vsens.get("text")))
 
+    # The "other 5" third-order reads — one small row each, shown ONLY when the
+    # magnitude is material (MODERATE/HIGH). A LOW or absent read adds no row, so
+    # the strip stays compact and never trains the eye to ignore it.
+    for _g in CONTEXTUAL_GREEKS:
+        cr = (r.get("contextual") or {}).get(_g) or {}
+        if cr.get("strength") in ("MODERATE", "HIGH"):
+            rows.append(_row(cr.get("label", _g.capitalize()), cr.get("text")))
+
     synth = r.get("synthesis")
     if synth and synth != NOT_REPORTED:
         rows.append(f"<div style='{_ROW}margin-top:4px;'>"

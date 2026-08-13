@@ -70,6 +70,37 @@ VEGA_HIGH = 20000.0
 PULL_MODERATE = 25.0
 PULL_STRONG = 100.0
 
+#: (MODERATE, HIGH) magnitude bands for the third-order net exposures.
+#: ⚠️ Provisional & one-line-tunable, exactly like VEGA above. The third-order
+#: net exposures use the SAME OI-weighted /1e5 scale as vanna/charm/vega, but
+#: their per-option magnitudes differ by orders of magnitude between greeks, so
+#: these are placeholders until the live scale is seen. They gate a MAGNITUDE
+#: only — never a direction — and the panel shows a row only at MODERATE/HIGH, so
+#: a band set too high fails *safe* (the row stays silent) rather than noisy.
+CONTEXTUAL_BANDS = {
+    "vomma": (5000.0, 20000.0),   # ∂vega/∂σ — scales like vega
+    "speed": (50.0, 200.0),       # ∂gamma/∂S
+    "zomma": (50.0, 200.0),       # ∂gamma/∂σ
+    "veta": (5000.0, 20000.0),    # ∂vega/∂t — scales like vega
+    "color": (50.0, 200.0),       # ∂gamma/∂t
+}
+
+#: (label, behavioural phrase) per third-order net exposure — non-directional.
+#: Each describes how the *other* Greeks behave, so none of these ever implies a
+#: price direction; they read as a magnitude only, like vol_sensitivity.
+CONTEXTUAL_READS = {
+    "vomma": ("Vol curvature",
+              "vega itself accelerates as IV moves — vol sensitivity is unstable"),
+    "speed": ("Gamma acceleration",
+              "gamma shifts quickly as spot moves — pin/expansion behaviour can flip fast"),
+    "zomma": ("Gamma-vol interaction",
+              "gamma shifts as IV moves — the gamma regime is IV-sensitive"),
+    "veta": ("Vega time pressure",
+             "vega is eroding with time — vol sensitivity fades toward expiry"),
+    "color": ("Gamma time effect",
+              "gamma is shifting with time — pinning strength changes toward expiry"),
+}
+
 
 def _f(v: Any) -> Optional[float]:
     try:
@@ -227,6 +258,26 @@ def expansion_risk(total_gex: Any, speed: Any = None) -> Dict[str, Any]:
                      f"breakout")}
 
 
+def contextual_read(name: str, value: Any) -> Dict[str, Any]:
+    """Magnitude-only behavioural read for a third-order net exposure
+    (`vomma`/`speed`/`zomma`/`veta`/`color`). `LOW` below its (provisional)
+    MODERATE band; `NOT_REPORTED` when no producer handed a value in. Never a
+    direction — these describe how the *other* Greeks behave, not which way price
+    goes, so the strength alone carries the read."""
+    label, phrase = CONTEXTUAL_READS[name]
+    v = _f(value)
+    if v is None:
+        return {"label": label, "strength": NOT_REPORTED, "text": NOT_REPORTED}
+    mod, high = CONTEXTUAL_BANDS[name]
+    a = abs(v)
+    if a < mod:
+        return {"label": label, "strength": "LOW",
+                "text": f"LOW · {label.lower()} not material right now"}
+    strength = "HIGH" if a >= high else "MODERATE"
+    return {"label": label, "strength": strength,
+            "text": f"{strength} · {phrase} (net {name} {v:+,.0f})"}
+
+
 def synthesise(pull_read: Dict[str, Any], gamma: Dict[str, Any]) -> str:
     """One headline from the pull direction and the gamma regime."""
     direction = (pull_read or {}).get("direction")
@@ -241,9 +292,11 @@ def synthesise(pull_read: Dict[str, Any], gamma: Dict[str, Any]) -> str:
 
 # ── the whole read ─────────────────────────────────────────────────────
 
-#: the higher-order Greeks this layer will surface IF a producer ever hands them
-#: in — until then each reads "Not reported". Vega is NOT here: it has a producer
-#: now (`net_vega`) and its own `vol_sensitivity` read.
+#: the third-order Greeks the layer surfaces as their own magnitude reads. Each
+#: has a producer now (`net_vomma`/`net_speed`/`net_zomma`/`net_veta`/`net_color`
+#: from `calculate_vanna_charm_exposure`); a name still reads "Not reported" only
+#: when that column is absent from the chain. Vega is separate again — it has
+#: `vol_sensitivity`. Nothing in this tuple is inherently "unreported" any more.
 CONTEXTUAL_GREEKS = ("vomma", "speed", "zomma", "veta", "color")
 
 
@@ -260,13 +313,15 @@ def interpret(*, spot: Any = None, pull_level: Any = None,
 
     Every input is optional; a section whose inputs are absent reads
     `Not reported`. `contextual` accepts the higher-order Greeks by name
-    (`vomma`, `speed`, `zomma`, `veta`, `color`) for the day a producer exists —
-    until then they are `Not reported`, never `0`. Vega has a producer now
-    (`net_vega`) and reads as `vol_sensitivity`.
+    (`vomma`, `speed`, `zomma`, `veta`, `color`); each now has a producer
+    (`net_*` from `calculate_vanna_charm_exposure`) and becomes its own
+    magnitude read under `contextual`, `Not reported` only when its column is
+    absent. Vega has its own `vol_sensitivity` read from `net_vega`.
 
     Returns a dict with `pull`, `gamma`, `time`, `vol`, `vol_sensitivity`,
-    `expansion`, a `synthesis` headline, a `greeks` availability map, `stale`,
-    and `context_only` (always True — this never votes).
+    `expansion`, a `synthesis` headline, a `greeks` availability map, a
+    `contextual` map of the five third-order reads, `stale`, and `context_only`
+    (always True — this never votes).
     """
     _pull = pull(spot, pull_level, pull_source, net_charm)
     _gamma = gamma_regime(total_gex)
@@ -280,6 +335,10 @@ def interpret(*, spot: Any = None, pull_level: Any = None,
 
     greeks = {name: _reported(contextual.get(name))
               for name in CONTEXTUAL_GREEKS}
+    #: per-greek magnitude reads (the "other 5") — surfaced by the panel only
+    #: when MODERATE/HIGH, so a LOW/absent one adds no row.
+    contextual_reads = {name: contextual_read(name, contextual.get(name))
+                        for name in CONTEXTUAL_GREEKS}
 
     return {
         "pull": _pull,
@@ -291,6 +350,7 @@ def interpret(*, spot: Any = None, pull_level: Any = None,
         "synthesis": synthesise(_pull, _gamma),
         "gamma_flip": _reported(gamma_flip),
         "greeks": greeks,
+        "contextual": contextual_reads,
         "stale": stale,
         # ⚠️ non-negotiable: this layer is context, never a vote.
         "context_only": True,
