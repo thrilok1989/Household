@@ -14361,40 +14361,29 @@ def render_clean_card(spot_price, option_data=None):
             _spot_html + _vp_html + _gap_html + _ctx_facts_html),
             unsafe_allow_html=True)
 
-        _c5, _c6, _cd = st.columns(3)
-
-        # ── 2 · MIOS V5 — the Conflict-Engine arbitrated read ──
-        with _c5:
-            st.markdown(_sec(
-                "🧭 MIOS V5 · conflict-arbitrated", _col_m,
-                f"<div style='text-align:center;font-size:26px;font-weight:900;"
-                f"color:{_col_m};line-height:1.08;'>{_em_m} {_lbl_m}"
-                f"<div style='color:#ffffff;font-size:14px;font-weight:700;'>"
-                f"{_sub_m} ({_dom}%)</div></div>"
-                + _prep_html + _cal_html + _ctx_v5_html),
-                unsafe_allow_html=True)
-
-        # ── 3 · MIOS V6 — families · reaction · structure · footprint ──
-        with _c6:
-            st.markdown(_sec(
-                "🧬 MIOS V6 · observational", "#4da6ff",
-                _v6_html + _dayt_html + _sess_html
-                + (f"<div style='text-align:center;margin-top:4px;'>"
-                   f"{_sr_intel_html}</div>" if _sr_intel_html else
-                   f"<div style='text-align:center;font-size:16px;margin-top:4px;"
-                   f"font-weight:800;'>{_sr_line}</div>")
-                + _wz_html + _pe_html + _charm_html + _gb_html + _ag_html
-                + _fs_html + _zh_html),
-                unsafe_allow_html=True)
-
-        # ── 4 · DECISIONS — the three action verdicts, side by side. The Entry
-        # Gate is the native (pre-MIOS) one and still the only one that drives
-        # a live alert; v0 and v2 are observational until Wave 6 promotes them.
-        with _cd:
-            st.markdown(_sec(
-                "🎯 Decisions · gate ‖ v0 ‖ v2", "#a78bfa",
-                _action_html + _signal_html + _dec_v2_html + _why_html),
-                unsafe_allow_html=True)
+        # ── MIOS V6 — the observational read, FULL WIDTH ──────────────
+        # The owner removed the MIOS V5 (conflict-arbitrated) and Decisions
+        # (gate ‖ v0 ‖ v2) columns from the Trade Card so the complete screen
+        # goes to the MIOS V6 read — families, reaction, structure, war zone,
+        # dealer magnet, Greek behaviour, adaptive greeks, premium energy,
+        # session and day-type. It used to be one of three columns; now it spans
+        # the card. `_gb_html` (the Greek-behaviour strip) stays in the section.
+        #
+        # ⚠️ Display only. The Entry Gate, v0 and v2 verdicts still compute and
+        # the native gate still drives its live Telegram alert exactly as before
+        # — only their card on this screen is gone. `_action_html`, `_signal_html`,
+        # `_dec_v2_html`, `_why_html` and the MIOS V5 fragments are still built
+        # above; they are simply no longer drawn here.
+        st.markdown(_sec(
+            "🧬 MIOS V6 · observational", "#4da6ff",
+            _v6_html + _dayt_html + _sess_html
+            + (f"<div style='text-align:center;margin-top:4px;'>"
+               f"{_sr_intel_html}</div>" if _sr_intel_html else
+               f"<div style='text-align:center;font-size:16px;margin-top:4px;"
+               f"font-weight:800;'>{_sr_line}</div>")
+            + _wz_html + _pe_html + _charm_html + _gb_html + _ag_html
+            + _fs_html + _zh_html),
+            unsafe_allow_html=True)
     except Exception:
         pass
 
