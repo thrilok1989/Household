@@ -655,11 +655,13 @@ def _msg_entry_tier(message):
 RETIRE_ENTRY_ALERTS = True
 
 # ── 📨 MIOS V6 signals → Telegram: the DEFAULT for the sidebar toggle ──
-# ⚠️ True means entry and exit signals are LIVE from the moment the app loads,
-#    on every fresh session, without anyone opting in. Set by the owner
-#    deliberately; the sidebar toggle still turns it off for the session.
+# ⚠️ PAUSED by default at the owner's request: the "MIOS ENTRY / ENTRY READY"
+#    stream was firing repeatedly on the main Telegram bot and the owner asked
+#    to stop it. False means entry and exit signals are OFF on every fresh
+#    session until someone ticks the sidebar toggle back on — the switch is
+#    unchanged, only its starting state moved.
 #
-# What still protects you with this on, and what does not:
+# When it IS turned on, what still protects you and what does not:
 #   ✅ Stage 72.9's gates all apply — a decision must verify, must not be a
 #      duplicate, must not be superseded, must be under MAX_AGE_SECONDS, and
 #      must be in a sendable state. WAIT is never sent.
@@ -669,12 +671,27 @@ RETIRE_ENTRY_ALERTS = True
 #      STAGE72_9_VALIDATION_REPORT.md. Its gates are proven in simulation, not
 #      against five hundred live dispatches.
 #
-# Flip to False to go back to opt-in.
-MIOS_V6_TELEGRAM_DEFAULT = True
+# Flip to True to make the signals live again from load.
+MIOS_V6_TELEGRAM_DEFAULT = False
 
 # ── ⚡ the simple entry system's default. Five plain rules, ANDed, with its
 #    own dedup — see `run_simple_entry`. On by default at the owner's request.
 SIMPLE_ENTRY_DEFAULT = True
+
+# ── 📢 Call/Put writing & capping → Telegram: the sidebar toggle's default.
+# The owner asked for a Telegram note when heavy call writing (capping upside,
+# resistance) or put writing (support building) is detected. These already fire
+# as market events (Discord + Supabase); the toggle adds a Telegram copy. ON by
+# default because it was explicitly requested, and it is edge-triggered — one
+# note per episode via `_event_edge`, not one per 20-second refresh — so it does
+# not reintroduce the entry-stream spam that was just paused above.
+WRITING_TG_DEFAULT = True
+
+# ── 📍 Dynamic-POC shift alerts → Discord: the sidebar toggle's default.
+# OFF by default (opt-in): the owner is sensitive to message volume, so a chart
+# whose dynamic POC steps up or down only alerts once this is switched on. Routed
+# to Discord, the app's channel for informational (non-entry) alerts.
+POC_SHIFT_ALERTS_DEFAULT = False
 _RETIRED_ALERT_CLASSES = frozenset({
     'leg_entry', 'confirmed_entry', 'entry_result', 'all_aligned_entry',
     'sr_confluence', 'fresh_entry', 'bias_enter',
@@ -11071,6 +11088,92 @@ def _event_edge(event_key, signature, cooldown_s=300):
     return True
 
 
+def _notify_writing_telegram(side, headline, detail, spot_price):
+    """📢 Mirror a heavy call/put writing event to the main Telegram bot.
+
+    Opt-out via the sidebar toggle (`_writing_tg_on`, default `WRITING_TG_DEFAULT`).
+    The caller has already passed the `_event_edge` gate, so this is once per
+    episode — no throttle of its own is needed. `force=True` because a writing
+    note is not entry-tier and would otherwise be routed Discord-only by
+    `send_telegram_message_sync`; the user asked for it ON Telegram specifically.
+
+    Nothing is computed here — headline, detail and spot come from the caller,
+    which read them off the Market Picture's ΔOI bias. It only words and sends.
+    """
+    try:
+        if not st.session_state.get('_writing_tg_on', WRITING_TG_DEFAULT):
+            return
+        if side == 'CALL':
+            glyph, banner = '🧱', 'CALL WRITING / CAPPING — resistance building'
+        else:
+            glyph, banner = '🛡', 'PUT WRITING — support building'
+        msg = (f"{glyph} <b>{banner}</b>\n"
+               f"{headline}\n"
+               f"{detail}\n"
+               f"📍 Spot: ₹{spot_price:,.1f}")
+        send_telegram_message_sync(msg, force=True)
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
+def _notify_poc_shifts():
+    """📍 Alert when a chart's dynamic POC steps to a new level.
+
+    The per-panel dynamic POC is published on `_leg_profiles` by the terminal —
+    one owner, `compute_dynamic_poc`, reached through the `_premium_builders`
+    bridge. This reads only that, compares each chart to the last level it saw,
+    and raises a `POC_SHIFT` market event — which the app already routes to the
+    live Discord feed (`_relay_event_to_discord`) and the Supabase audit trail.
+
+    ⚠️ NOT `_throttled_telegram_send`: its non-entry branch calls
+    `send_discord_message`, which is a paused no-op — the alert would archive but
+    never appear. `capture_market_event` is the path that actually reaches
+    Discord in this app.
+
+    Opt-in via the sidebar (`_poc_shift_on`, default `POC_SHIFT_ALERTS_DEFAULT`).
+    `mios_v5.poc_shift` owns the comparison and the wording; this owns the memory,
+    the per-chart edge gate and the send.
+    """
+    try:
+        if not st.session_state.get('_poc_shift_on', POC_SHIFT_ALERTS_DEFAULT):
+            return
+        from mios_v5 import poc_shift as _ps
+        profiles = st.session_state.get('_leg_profiles') or {}
+        if not profiles:
+            return
+        current = {c: (profiles.get(c) or {}).get('dynamic_poc')
+                   for c in _ps.CHARTS}
+        previous = st.session_state.get('_poc_shift_prev') or {}
+        labels = {'NIFTY': 'NIFTY',
+                  'CALL': profiles.get('call_label') or 'ATM Call',
+                  'PUT': profiles.get('put_label') or 'ATM Put'}
+        _spot = st.session_state.get('_nifty_spot_live')
+        for shift in _ps.detect(current, previous):
+            _c = shift['chart']
+            _lbl = labels.get(_c)
+            # Edge-gated per chart so an oscillating bin does not ping-pong an
+            # alert every cycle; the relay also dedups identical headlines 5 min.
+            _dp = 0 if _c == 'NIFTY' else 2
+            if not _event_edge(f'poc_shift_{_c}',
+                               f"{shift['direction']}:{shift['cur']:.{_dp}f}"):
+                continue
+            capture_market_event(
+                EventType.POC_SHIFT, EventSeverity.WARNING,
+                _ps.headline(shift, label=_lbl),
+                _ps.detail(shift, label=_lbl),
+                snapshot={'price': _spot} if _spot else None)
+        # Remember the latest level for every chart that HAS one, so the next
+        # step is measured against the last real level rather than wiped by a
+        # cycle where the panel briefly produced no POC.
+        merged = dict(previous)
+        for _c in _ps.CHARTS:
+            if current.get(_c) is not None:
+                merged[_c] = current[_c]
+        st.session_state['_poc_shift_prev'] = merged
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
 def capture_stage2_market_events(spot_price, df, option_data):
     """Feed the Market Event Engine (Discord feed + Supabase audit trail)
     from conditions this app already computes each cycle — the 6-8 event
@@ -11087,19 +11190,32 @@ def capture_stage2_market_events(spot_price, df, option_data):
         doi_label = doi_bias.get('label', '')
 
         # PUT_WRITING / CALL_WRITING — same string match the entry gate
-        # already uses to decide "writers building" at a zone
+        # already uses to decide "writers building" at a zone.
+        #
+        # 📢 These are also the owner's requested Telegram alerts. The capture
+        # feeds Discord + Supabase + the Story Engine as before; the extra
+        # `_notify_writing_telegram` mirrors it to the main Telegram bot when the
+        # sidebar toggle is on. It rides the SAME `_event_edge` gate, so it fires
+        # once per writing episode, not once per refresh.
         if 'PE writers building' in doi_label and _event_edge('put_writing', 'on'):
             capture_market_event(
                 EventType.PUT_WRITING, EventSeverity.WARNING,
                 f"Heavy Put Writing near ₹{spot_price:.0f}",
                 f"ΔOI bias: {doi_label} — dealers hedging upside, support building",
                 snapshot={'price': spot_price})
+            _notify_writing_telegram(
+                'PUT', f"Heavy Put Writing near ₹{spot_price:.0f}",
+                f"ΔOI bias: {doi_label} — support building below", spot_price)
         if 'CE writers capping' in doi_label and _event_edge('call_writing', 'on'):
             capture_market_event(
                 EventType.CALL_WRITING, EventSeverity.WARNING,
                 f"Heavy Call Writing near ₹{spot_price:.0f}",
                 f"ΔOI bias: {doi_label} — dealers capping upside, resistance building",
                 snapshot={'price': spot_price})
+            _notify_writing_telegram(
+                'CALL', f"Heavy Call Writing near ₹{spot_price:.0f}",
+                f"ΔOI bias: {doi_label} — capping upside, resistance building",
+                spot_price)
 
         # OI_WALL — spot within ~25pts of the dominant CE/PE OI concentration
         _prox = 25.0
@@ -14414,6 +14530,27 @@ def _render_main_analyzer():
     # would show the PREVIOUS cycle's answer — worse than showing none.
     st.session_state["_simple_entry_slot"] = st.sidebar.empty()
 
+    # ── 📢 heavy call/put writing & capping → Telegram ─────────────────
+    # A note when dealers are writing calls (capping upside → resistance) or
+    # writing puts (support building). Edge-triggered in
+    # `capture_stage2_market_events`, so one note per episode. Separate switch
+    # from the entry stream above — this is a positioning read, not a trade call.
+    st.session_state["_writing_tg_on"] = st.sidebar.checkbox(
+        "📢 Call/Put writing → Telegram", value=WRITING_TG_DEFAULT,
+        help="Heavy call writing (capping upside · resistance) or put writing "
+             "(support) sends a Telegram note. One per episode, not per "
+             "refresh. Also always logged to Discord.")
+
+    # ── 📍 dynamic-POC shift → Discord ─────────────────────────────────
+    # Opt-in: alerts when a chart's dynamic POC steps up or down. Off by
+    # default (see POC_SHIFT_ALERTS_DEFAULT); routed to Discord like the app's
+    # other informational alerts. Consumed in `_notify_poc_shifts`.
+    st.session_state["_poc_shift_on"] = st.sidebar.checkbox(
+        "📍 Dynamic POC shift alerts", value=POC_SHIFT_ALERTS_DEFAULT,
+        help="When the dynamic POC on the NIFTY, Call or Put chart steps to a "
+             "new level, post which way it moved to Discord. Deduped per chart "
+             "with a cooldown so it cannot spam.")
+
     if _mios_tg:
         st.session_state["_mios_transport"] = mios_v6_transport
         st.sidebar.caption("🔴 Live — Stage 72.9 will send entry and exit "
@@ -15064,6 +15201,16 @@ def _render_main_analyzer():
                         pass
             except Exception as err:
                 st.caption(f"Dashboard V6 unavailable: {err}")
+
+    # 📍 Dynamic-POC shift alerts. Placed AFTER the V6 render because the
+    # terminal publishes `_leg_profiles` (the three charts' dynamic POC) while
+    # it draws inside the block above; reading it here sees this cycle's levels,
+    # not last cycle's. No-op unless the sidebar toggle is on.
+    try:
+        _notify_poc_shifts()
+    except Exception:
+        pass
+
     with _v5_container:
         with st.expander("🧭 MIOS V5 — Analysis & Audit (deep layer)", expanded=False):
             try:
