@@ -2329,6 +2329,15 @@ def calculate_vanna_charm_exposure(df_summary, spot_price, contract_multiplier=2
         net_charm = (Charm_CE*OI_CE + Charm_PE*OI_PE) * mult
     Context only (informational): net vanna hints how dealer hedging flows react
     to an IV move; net charm hints the delta-decay / pin drift into expiry.
+
+    `net_vega` is added on the same OI-weighted basis when the chain carries the
+    per-strike Vega columns (`Vega_CE`/`Vega_PE`) — the book's volatility
+    sensitivity as ONE magnitude, so the Greek-behaviour layer's "Vol sensitivity"
+    read can stop saying "Not reported". Vega is a separate column from the
+    Vanna/Charm this function requires, so it is OPTIONAL: `net_vega` is `None`
+    when the columns are absent rather than 0 (an unmeasured force is not a
+    balanced one).
+
     Returns dict with a per-strike frame and totals, or None."""
     if df_summary is None or getattr(df_summary, 'empty', True):
         return None
@@ -2337,7 +2346,9 @@ def calculate_vanna_charm_exposure(df_summary, spot_price, contract_multiplier=2
                 'openInterest_CE', 'openInterest_PE'}
         if not need <= set(df_summary.columns):
             return None
+        has_vega = {'Vega_CE', 'Vega_PE'} <= set(df_summary.columns)
         rows = []
+        vega_sum = 0.0
         for _, row in df_summary.iterrows():
             oi_ce = float(row.get('openInterest_CE', 0) or 0)
             oi_pe = float(row.get('openInterest_PE', 0) or 0)
@@ -2347,10 +2358,15 @@ def calculate_vanna_charm_exposure(df_summary, spot_price, contract_multiplier=2
                   + float(row.get('Charm_PE', 0) or 0) * oi_pe) * contract_multiplier / 1e5
             rows.append({'Strike': row.get('Strike', 0),
                          'Net_Vanna': round(nv, 2), 'Net_Charm': round(nc, 2)})
+            if has_vega:
+                vega_sum += (float(row.get('Vega_CE', 0) or 0) * oi_ce
+                             + float(row.get('Vega_PE', 0) or 0) * oi_pe) \
+                    * contract_multiplier / 1e5
         vc_df = pd.DataFrame(rows)
         return {'vc_df': vc_df,
                 'net_vanna': round(float(vc_df['Net_Vanna'].sum()), 2),
-                'net_charm': round(float(vc_df['Net_Charm'].sum()), 2)}
+                'net_charm': round(float(vc_df['Net_Charm'].sum()), 2),
+                'net_vega': round(vega_sum, 2) if has_vega else None}
     except Exception:
         return None
 
@@ -7392,7 +7408,8 @@ def compute_market_picture(spot_price, df, option_data, cat_scores=None):
         if _ds_v is not None and not getattr(_ds_v, 'empty', True):
             _vc = calculate_vanna_charm_exposure(_ds_v, _u_v)
             if _vc:
-                vc_exp = {'net_vanna': _vc['net_vanna'], 'net_charm': _vc['net_charm']}
+                vc_exp = {'net_vanna': _vc['net_vanna'], 'net_charm': _vc['net_charm'],
+                          'net_vega': _vc.get('net_vega')}
     except Exception:
         pass
 
@@ -14115,6 +14132,7 @@ def render_clean_card(spot_price, option_data=None):
             _gb_html = _gbhtml(_gb_interpret(
                 spot=spot_price, pull_level=_plevel, pull_source=_psrc,
                 net_charm=_vc.get('net_charm'), net_vanna=_vc.get('net_vanna'),
+                net_vega=_vc.get('net_vega'),
                 total_gex=_gx.get('total_gex'),
                 gamma_flip=_gx.get('gamma_flip_level'),
                 is_expiry=_is_expiry_day(option_data),

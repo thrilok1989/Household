@@ -59,6 +59,13 @@ CHARM_ELEVATED = 60.0
 #: |net vanna| (L) bands for volatility pressure.
 VANNA_MODERATE = 50.0
 VANNA_HIGH = 200.0
+#: |net vega| (L) bands for volatility SENSITIVITY (magnitude of the book's vega).
+#: ⚠️ Provisional — net vega runs far larger than vanna/charm because vega per
+#: option is orders of magnitude bigger, so these are one-line-tunable once the
+#: live scale is observed. Getting the label wrong only mislabels a magnitude; it
+#: never changes a direction (Vega is non-directional here).
+VEGA_MODERATE = 5000.0
+VEGA_HIGH = 20000.0
 #: |net charm| (L/day) bands for how strong the magnet's pull reads.
 PULL_MODERATE = 25.0
 PULL_STRONG = 100.0
@@ -183,6 +190,25 @@ def vol_pressure(net_vanna: Any) -> Dict[str, Any]:
                      f"(net vanna {nv:+.1f}L)")}
 
 
+def vol_sensitivity(net_vega: Any) -> Dict[str, Any]:
+    """How much an IV change can move the option book, from net vega — a
+    MAGNITUDE, never a direction. High vega means IV changes materially alter
+    positioning; it says nothing about which way price goes (rule: do not
+    interpret vega as bullish or bearish by itself)."""
+    nv = _f(net_vega)
+    if nv is None:
+        return {"strength": NOT_REPORTED, "text": NOT_REPORTED}
+    a = abs(nv)
+    if a < VEGA_MODERATE:
+        return {"strength": "LOW",
+                "text": ("LOW · IV changes are unlikely to materially move the "
+                         "book")}
+    strength = "HIGH" if a >= VEGA_HIGH else "MODERATE"
+    return {"strength": strength,
+            "text": (f"{strength} · IV changes can materially alter option "
+                     f"positioning (net vega {nv:+,.0f}L)")}
+
+
 def expansion_risk(total_gex: Any, speed: Any = None) -> Dict[str, Any]:
     """Potential for moves to accelerate. Driven by negative gamma; positive
     gamma absorbs directional movement, so the risk reads LOW."""
@@ -216,14 +242,15 @@ def synthesise(pull_read: Dict[str, Any], gamma: Dict[str, Any]) -> str:
 # ── the whole read ─────────────────────────────────────────────────────
 
 #: the higher-order Greeks this layer will surface IF a producer ever hands them
-#: in — until then each reads "Not reported". Listed so the panel and the tests
-#: agree on the contextual set.
-CONTEXTUAL_GREEKS = ("vega", "vomma", "speed", "zomma", "veta", "color")
+#: in — until then each reads "Not reported". Vega is NOT here: it has a producer
+#: now (`net_vega`) and its own `vol_sensitivity` read.
+CONTEXTUAL_GREEKS = ("vomma", "speed", "zomma", "veta", "color")
 
 
 def interpret(*, spot: Any = None, pull_level: Any = None,
               pull_source: Optional[str] = None,
               net_charm: Any = None, net_vanna: Any = None,
+              net_vega: Any = None,
               total_gex: Any = None, gamma_flip: Any = None,
               is_expiry: bool = False, minutes_to_expiry: Any = None,
               as_of: Any = None, now: Any = None,
@@ -233,17 +260,19 @@ def interpret(*, spot: Any = None, pull_level: Any = None,
 
     Every input is optional; a section whose inputs are absent reads
     `Not reported`. `contextual` accepts the higher-order Greeks by name
-    (`vega`, `vomma`, `speed`, `zomma`, `veta`, `color`) for the day a producer
-    exists — until then they are `Not reported`, never `0`.
+    (`vomma`, `speed`, `zomma`, `veta`, `color`) for the day a producer exists —
+    until then they are `Not reported`, never `0`. Vega has a producer now
+    (`net_vega`) and reads as `vol_sensitivity`.
 
-    Returns a dict with `pull`, `gamma`, `time`, `vol`, `expansion`, a
-    `synthesis` headline, a `greeks` availability map, `stale`, and
-    `context_only` (always True — this never votes).
+    Returns a dict with `pull`, `gamma`, `time`, `vol`, `vol_sensitivity`,
+    `expansion`, a `synthesis` headline, a `greeks` availability map, `stale`,
+    and `context_only` (always True — this never votes).
     """
     _pull = pull(spot, pull_level, pull_source, net_charm)
     _gamma = gamma_regime(total_gex)
     _time = time_pressure(net_charm, is_expiry, minutes_to_expiry)
     _vol = vol_pressure(net_vanna)
+    _vsens = vol_sensitivity(net_vega)
     _exp = expansion_risk(total_gex, contextual.get("speed"))
 
     a, n = _f(as_of), _f(now)
@@ -257,6 +286,7 @@ def interpret(*, spot: Any = None, pull_level: Any = None,
         "gamma": _gamma,
         "time": _time,
         "vol": _vol,
+        "vol_sensitivity": _vsens,
         "expansion": _exp,
         "synthesis": synthesise(_pull, _gamma),
         "gamma_flip": _reported(gamma_flip),
