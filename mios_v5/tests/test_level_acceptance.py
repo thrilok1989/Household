@@ -291,6 +291,53 @@ def test_observe_levels_always_flags_context_only():
     assert out["context_only"] is True
 
 
+# ── interaction band (±5): TESTING only when genuinely at the level ────
+
+def test_testing_requires_price_within_the_interaction_band():
+    lvl = {"label": "R1", "price": 24400}
+    # 2 pts away → TESTING shows
+    assert _obs(lvl, 24398, _fake("TOUCH"))["observed"] == LA.TESTING
+    # exactly at the ±5 edge → still TESTING (inclusive)
+    assert _obs(lvl, 24395, _fake("TOUCH"))["observed"] == LA.TESTING
+    # 25 pts away (inside the engine's OLD ~28-pt at-zone) → NOT testing now
+    assert _obs(lvl, 24375, _fake("WATCHING"))["observed"] is None
+
+
+def test_break_and_resolved_states_are_not_gated_by_the_band():
+    lvl = {"label": "R1", "price": 24400}
+    # price 6 pts beyond the level is outside ±5 but is a legitimate BREAK_ATTEMPT
+    assert _obs(lvl, 24406, _fake("BREAK"))["observed"] == LA.BREAK_ATTEMPT
+    # accepted well above the band still shows (price is meant to be away)
+    assert _obs(lvl, 24420, _fake("CONFIRMED_BREAKOUT"))["observed"] == LA.ACCEPTED_ABOVE
+    # rejected likewise
+    assert _obs(lvl, 24380, _fake("REJECTION"))["observed"] == LA.REJECTED
+
+
+def test_interaction_band_is_configurable_and_separate_from_cluster():
+    lvl = {"label": "R1", "price": 24400}
+    # a wider band keeps a 10-pt-away touch as TESTING
+    o = LA.observe_one(lvl, 24390, {}, None, _fake("TOUCH"), interaction_band=15.0)
+    assert o["observed"] == LA.TESTING
+    # the two tolerances are distinct constants
+    assert LA.INTERACTION_BAND == 5.0 and hasattr(LA, "CLUSTER_TOLERANCE")
+
+
+# ── timestamp: stamped on change, carried while it holds ───────────────
+
+def test_timestamp_is_stamped_on_change_and_carried_while_held():
+    lvl = {"label": "R1", "price": 24400}
+    o1 = LA.observe_one(lvl, 24416, {}, None, _fake("CONFIRMED_BREAKOUT"),
+                        now="T1")
+    assert o1["observed"] == LA.ACCEPTED_ABOVE and o1["timestamp"] == "T1"
+    # same state next cycle at a later clock → keeps the ORIGINAL transition time
+    o2 = LA.observe_one(lvl, 24418, {}, o1["memory"], _fake("CONFIRMED_BREAKOUT"),
+                        now="T2")
+    assert o2["timestamp"] == "T1"
+    # a NEW state → re-stamps to the current clock
+    o3 = LA.observe_one(lvl, 24398, {}, o2["memory"], _fake("REJECTION"), now="T3")
+    assert o3["observed"] == LA.REJECTED and o3["timestamp"] == "T3"
+
+
 # ── Telegram alert text + edge trigger ─────────────────────────────────
 
 def test_only_resolved_states_produce_alert_text():
@@ -362,6 +409,17 @@ def test_the_app_alerts_only_on_resolution_edge_and_can_opt_out():
     assert "LEVEL_ACCEPT_COOLDOWN_S" in src
     assert "_la_alerts_on" in src
     assert "_la_alert_state" in src
+
+
+def test_the_app_passes_the_band_timestamp_and_resets_on_session_regime():
+    src = (_ROOT / "vob_minimal.py").read_text()
+    # ±5 interaction band (configurable) + market timestamp threaded in
+    assert "interaction_band=" in src
+    assert "now=_ots" in src               # reuses the existing market timestamp
+    # session + confirmed-regime reset of the per-level memory
+    assert "_la_reset_keys" in src
+    assert "regime_dir" in src
+    assert "_la_sess" in src
     # reuses the SAME published follow-through metrics, not a re-gather
     assert "stage42_acceptance" in src
     assert "'metrics'" in src or '"metrics"' in src
