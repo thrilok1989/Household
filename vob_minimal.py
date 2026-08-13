@@ -14158,6 +14158,23 @@ def render_clean_card(spot_price, option_data=None):
                     _asof = datetime.fromisoformat(_ots).timestamp()
                 except Exception:
                     _asof = None
+            # rolling per-greek windows so each third-order read self-calibrates
+            # against its OWN recent magnitude (the five nets span orders of
+            # magnitude, so a fixed band can't fit them). Bounded to the last
+            # _CTX_HIST_WINDOW reruns (~20 min at ~20s each).
+            _CTX_HIST_WINDOW = 60
+            _hist_store = st.session_state.setdefault('_greek_ctx_hist', {})
+            _ctx_hist = {}
+            for _g in ('vomma', 'speed', 'zomma', 'veta', 'color'):
+                _dq = _hist_store.setdefault(_g, [])
+                _gv = _vc.get(f'net_{_g}')
+                if _gv is not None:
+                    try:
+                        _dq.append(abs(float(_gv)))
+                        del _dq[:-_CTX_HIST_WINDOW]
+                    except (TypeError, ValueError):
+                        pass
+                _ctx_hist[_g] = list(_dq)
             _gb_html = _gbhtml(_gb_interpret(
                 spot=spot_price, pull_level=_plevel, pull_source=_psrc,
                 net_charm=_vc.get('net_charm'), net_vanna=_vc.get('net_vanna'),
@@ -14166,10 +14183,12 @@ def render_clean_card(spot_price, option_data=None):
                 gamma_flip=_gx.get('gamma_flip_level'),
                 is_expiry=_is_expiry_day(option_data),
                 as_of=_asof, now=time.time(),
-                # the "other 5" third-order net exposures → their own reads
+                # the "other 5" third-order net exposures → their own reads,
+                # each bucketed against its own rolling history
                 vomma=_vc.get('net_vomma'), speed=_vc.get('net_speed'),
                 zomma=_vc.get('net_zomma'), veta=_vc.get('net_veta'),
-                color=_vc.get('net_color')))
+                color=_vc.get('net_color'),
+                contextual_history=_ctx_hist))
         except Exception:
             _gb_html = ""
 
