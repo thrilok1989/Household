@@ -65,13 +65,19 @@ def test_the_css_is_injected_on_the_charts_tab():
     assert "FS_CHART_CSS" in body
 
 
-def test_all_three_chart_calls_use_the_shared_config():
-    """The terminal, the per-strike OI charts and the POC chart — one config, so a
-    fourth chart added later without it is the odd one out, not the norm."""
+def test_every_chart_call_uses_the_shared_config():
+    """The three split terminal panels (NIFTY / Call / Put), the per-strike OI
+    charts and the POC chart — one config, so a chart added later without it is
+    the odd one out, not the norm.
+
+    ⚠️ The terminal used to be ONE `plotly_chart` call; it is now three, one per
+    panel, because each needs its own Streamlit Fullscreen button. The invariant
+    that matters is not the count but that EVERY call carries the shared config —
+    the count is pinned alongside it only so a chart cannot quietly vanish."""
     calls = [c for c in ast.walk(_TREE)
              if isinstance(c, ast.Call)
              and getattr(c.func, "attr", "") == "plotly_chart"]
-    assert len(calls) == 3, f"expected 3 plotly_chart calls, found {len(calls)}"
+    assert len(calls) == 5, f"expected 5 plotly_chart calls, found {len(calls)}"
     for c in calls:
         cfg = next((kw.value for kw in c.keywords if kw.arg == "config"), None)
         assert isinstance(cfg, ast.Name) and cfg.id == "FS_CHART_CONFIG", \

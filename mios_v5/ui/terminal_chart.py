@@ -409,6 +409,157 @@ def terminal_chart(nifty_df=None, call_df=None, put_df=None,
     return fig, notes
 
 
+#: the three panels of the split terminal, in draw order, each keyed so the
+#: caller can address one figure. NIFTY carries the spot-axis levels; the two
+#: legs carry their own premium levels and the dominance tint.
+SPLIT_KEYS = ("NIFTY", "CALL", "PUT")
+
+
+def terminal_charts_split(nifty_df=None, call_df=None, put_df=None,
+                          levels: Optional[Dict[str, Any]] = None,
+                          htf_levels: Optional[Dict[str, Any]] = None,
+                          call_label: str = "ATM Call",
+                          put_label: str = "ATM Put",
+                          tint: Optional[str] = None,
+                          dominance: str = "neutral",
+                          signal: Optional[Dict[str, Any]] = None,
+                          height: int = 660,
+                          window_minutes: Optional[int] = None,
+                          call_levels: Optional[Dict[str, Any]] = None,
+                          put_levels: Optional[Dict[str, Any]] = None,
+                          call_zones: Optional[Sequence[Dict[str, Any]]] = None,
+                          put_zones: Optional[Sequence[Dict[str, Any]]] = None,
+                          nifty_profile: Optional[Dict[str, Any]] = None,
+                          call_profile: Optional[Dict[str, Any]] = None,
+                          put_profile: Optional[Dict[str, Any]] = None):
+    """NIFTY, ATM Call and ATM Put as THREE independent figures.
+
+    `terminal_chart` above draws one figure so Streamlit's single Fullscreen
+    button enlarges all three locked panels together. A trader asked to enlarge
+    each chart on its own, and Streamlit injects the Fullscreen button per
+    `st.plotly_chart` call — so each chart has to be its own figure to get its
+    own button.
+
+    The cost of splitting is the live cross-panel crosshair: Plotly can
+    synchronise hover only *within* a figure, so hovering NIFTY can no longer
+    light up the same minute on the legs. Everything that does NOT need a shared
+    figure is kept: all three are reindexed onto one `master_timeline`, so
+    candle *n* is the same minute on every chart, and one zoom window
+    (`window_minutes`, anchored at the newest bar across all three) is applied
+    to each — so they still line up and zoom to the same span, they simply no
+    longer share a cursor.
+
+    Returns `(figs, notes)`. `figs` maps each of `SPLIT_KEYS` to its figure, or
+    to `None` when that series could not be drawn; `notes` names the missing
+    series, exactly as `terminal_chart` does.
+    """
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    from ..clock import today_slice
+    panels = [("NIFTY", today_slice(nifty_df)),
+              (call_label, today_slice(call_df)),
+              (put_label, today_slice(put_df))]
+    parsed = [(name, _ohlc(df)) for name, df in panels]
+    notes = [name for name, p in parsed if p is None]
+
+    # ── one clock for all three, exactly as the combined chart uses ──
+    # Reindexing each panel onto the union of timestamps is what keeps candle
+    # *n* the same minute everywhere now that the axes are no longer `matches`-
+    # linked inside a single figure.
+    timeline = master_timeline(parsed)
+    parsed = [(name, align(p, timeline)) for name, p in parsed]
+
+    # ── one zoom window for all three, anchored at the newest bar across every
+    # panel — the same range the combined chart pins on its master axis, applied
+    # to each figure independently so they still show the same span.
+    rng = x_range(_last_x(parsed), window_minutes)
+
+    leg_over = {"CALL": (call_levels, call_zones),
+                "PUT": (put_levels, put_zones)}
+    profiles = {"NIFTY": nifty_profile, "CALL": call_profile,
+                "PUT": put_profile}
+    # NIFTY spans the full height in the combined layout; the two legs share it
+    # stacked, so each is ~half. Preserving that keeps the split page reading
+    # like the terminal it replaces.
+    heights = {"NIFTY": height, "CALL": max(int(height / 2), 240),
+               "PUT": max(int(height / 2), 240)}
+
+    figs: Dict[str, Any] = {}
+    for key, (name, p) in zip(SPLIT_KEYS, parsed):
+        if p is None:
+            figs[key] = None
+            continue
+        fig = make_subplots(rows=1, cols=1, subplot_titles=[name])
+        _add_series(go, fig, name, p, 1, 1)
+
+        prof = profiles.get(key)
+        if prof:
+            # Each leg is now a full-width panel, so its POC/VAH/VAL labels
+            # overhang the 8px right margin the same way the combined legs did —
+            # keep them inside regardless of column.
+            _profile_overlay(fig, prof, 1, 1, x=p.get("x"),
+                             labels_inside=(key != "NIFTY"))
+
+        if key == "NIFTY":
+            for lkey, price in (levels or {}).items():
+                v = _f(price)
+                if v is None or lkey not in LEVELS:
+                    continue
+                colour, dash, width = LEVELS[lkey]
+                fig.add_hline(y=v, row=1, col=1, line_width=width,
+                              line_dash=dash, line_color=colour,
+                              annotation_text=f"{LEVEL_LABEL[lkey]} {v:,.0f}",
+                              annotation_position="right",
+                              annotation_font=dict(size=9, color=colour))
+            for label, price in sorted((htf_levels or {}).items(),
+                                       key=lambda kv: -(_f(kv[1]) or 0))[:8]:
+                v = _f(price)
+                if v is None:
+                    continue
+                fig.add_hline(y=v, row=1, col=1, line_width=1, line_dash="dot",
+                              line_color=HTF_COLOUR,
+                              annotation_text=f"{label} {v:,.0f}",
+                              annotation_position="left",
+                              annotation_font=dict(size=8, color=HTF_COLOUR))
+            _add_signal(go, fig, p, signal)
+        else:
+            _lv, _zn = leg_over[key]
+            _leg_overlay(fig, _lv, _zn, 1, 1)
+            _tint_single(fig, tint, dominance)
+
+        fig.update_layout(
+            height=heights[key], margin=dict(l=8, r=8, t=26, b=8),
+            paper_bgcolor="#0b0f16", plot_bgcolor="#0b0f16",
+            font=dict(color="#edf3f9", size=10), showlegend=False,
+            hovermode="x unified", dragmode="pan",
+            # Keyed per chart so each figure keeps its OWN zoom across the 20s
+            # rerun, and re-keyed on the window so the ➕/➖ buttons still move it.
+            uirevision=f"terminal-split:{key}:{window_minutes}")
+        fig.update_xaxes(rangeslider_visible=False, gridcolor="#161b22",
+                         showspikes=True, spikecolor="#3a4757",
+                         spikethickness=1, spikemode="across",
+                         spikesnap="cursor")
+        fig.update_yaxes(gridcolor="#161b22", side="right", showspikes=False)
+        if rng:
+            fig.update_xaxes(range=rng, row=1, col=1)
+        lo_hi = price_range(p.get("low") if p.get("low") is not None
+                            else p["close"],
+                            p.get("high") if p.get("high") is not None
+                            else p["close"],
+                            p["x"], rng)
+        if lo_hi:
+            fig.update_yaxes(range=lo_hi, row=1, col=1)
+        for a in fig.layout.annotations:
+            if a.text == name:
+                a.font.size = 11.5
+                a.font.color = "#cfd9e6"
+                a.xanchor = "left"
+        figs[key] = fig
+
+    return figs, notes
+
+
 #: VOB zone status → (fill, edge). Building zones read loudest; a faded zone
 #: is drawn but must not compete with one that is still being defended.
 ZONE_TONE = {
@@ -420,7 +571,8 @@ ZONE_TONE = {
 
 
 def _profile_overlay(fig, profile: Dict[str, Any], row: int, col: int,
-                     x: Optional[Sequence[Any]] = None) -> None:
+                     x: Optional[Sequence[Any]] = None,
+                     labels_inside: Optional[bool] = None) -> None:
     """One panel's liquidity & sentiment profile.
 
     `profile` is whatever `calculate_money_flow_profile` returned, optionally
@@ -432,10 +584,17 @@ def _profile_overlay(fig, profile: Dict[str, Any], row: int, col: int,
     kept inside the panel; a right-positioned label there overhangs an 8px
     margin and is cut off. The index panel has the column gap to spill into and
     keeps the wider placement.
+
+    `labels_inside` defaults to that column rule, but the split terminal draws
+    each leg as its OWN full-width figure — where the label overhangs the same
+    8px right margin regardless of which column it was in — so it passes the
+    flag explicitly rather than relying on `col`.
     """
+    if labels_inside is None:
+        labels_inside = (col == LEG_COL)
     from .profile_overlay import draw
     draw(fig, row, col, rows=profile.get("rows"), profile=profile,
-         shape=profile.get("shape"), labels_inside=(col == LEG_COL), x=x)
+         shape=profile.get("shape"), labels_inside=labels_inside, x=x)
 
     # 📍 High-volume pivots and their levels, on the same panel and the same axis.
     # A separate module because it draws per-bar geometry rather than horizontal
@@ -882,6 +1041,20 @@ def _tint(fig, tint: Optional[str], dominance: str):
         fig.add_shape(type="rect", xref=f"{axis} domain", yref=f"{yaxis} domain",
                       x0=0, x1=1, y0=0, y1=1, layer="below",
                       fillcolor=tint, line_width=0)
+
+
+def _tint_single(fig, tint: Optional[str], dominance: str):
+    """The dominance wash for a split leg — one figure, so one panel.
+
+    Same below-layer rectangle as `_tint`, but a single-panel figure's option
+    leg lives on the primary `x`/`y` axes rather than the combined chart's
+    `x2`/`x3`, so it addresses the panel's own domain.
+    """
+    if not tint or dominance == "neutral":
+        return
+    fig.add_shape(type="rect", xref="x domain", yref="y domain",
+                  x0=0, x1=1, y0=0, y1=1, layer="below",
+                  fillcolor=tint, line_width=0)
 
 
 def atm_legs(leg_dfs: Optional[Dict[str, Any]]):
