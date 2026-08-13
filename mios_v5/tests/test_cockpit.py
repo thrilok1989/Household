@@ -221,10 +221,13 @@ def test_new_panels_wrap_rather_than_overflow(name):
 
 
 def test_the_sync_and_flow_legend_is_on_the_chart():
-    """Priority 4 — the synchronisation has worked since it was built and
-    nobody knew to try it, and the flow colours are new and unexplained."""
+    """Priority 4 — the flow colours are new and unexplained, and the split into
+    three fullscreen-able charts changed what the shared clock now means, so the
+    legend has to say it: one timeline and one zoom window, but no shared
+    crosshair. The Fullscreen affordance is itself part of the legend now."""
     src = (pathlib.Path(CP.__file__).parent / "dashboard_v6.py").read_text()
-    assert "stay synchronised" in src
+    assert "own Fullscreen button" in src
+    assert "one zoom window" in src
     assert "who was buying" in src
     assert "CVD" in src
 

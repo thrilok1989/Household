@@ -329,10 +329,14 @@ def test_all_three_panels_accept_their_own_profile():
 def test_all_three_panels_are_actually_passed_a_profile():
     """A parameter nothing passes is the regression this repo has hit twice —
     `cfb6c93` and `_atm_leg_ltf_delta`. A test that the overlay works says
-    nothing about whether it runs."""
+    nothing about whether it runs.
+
+    ⚠️ The terminal is now drawn by `terminal_charts_split` (three figures, one
+    per chart, each with its own Fullscreen button), so the profile arguments are
+    passed to it rather than to the combined `terminal_chart`."""
     tree = ast.parse((ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text())
     call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call)
-                and getattr(n.func, "id", "") == "terminal_chart")
+                and getattr(n.func, "id", "") == "terminal_charts_split")
     passed = {kw.arg for kw in call.keywords}
     assert {"nifty_profile", "call_profile", "put_profile"} <= passed
 

@@ -421,3 +421,52 @@ def test_changing_a_setting_takes_effect_now_not_at_the_next_bar_close():
     # the control offers exactly the three knobs and computes nothing
     assert "number_input" in calls
     assert not {"high_volume_pivots", "pivots"} & calls
+
+
+def test_the_setting_is_written_only_behind_the_apply_button():
+    """⚠️ The staged inputs must not commit on the 20-second autorefresh — a
+    trader dialling 15 → 22 would otherwise redraw every chart on each
+    intermediate value. `_hv_settings` is assigned, `_panel_profiles` is dropped
+    and the page is rerun ONLY inside the `if apply_clicked:` branch, so a value
+    becomes live only when Apply is pressed."""
+    d6 = (_ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(d6))
+              if isinstance(n, ast.FunctionDef) and n.name == "_hv_settings")
+
+    # a button is offered, and the page reruns so the charts (drawn above this
+    # control) pick up the new pivots in the same interaction.
+    calls = {getattr(c.func, "attr", "") for c in ast.walk(fn)
+             if isinstance(c, ast.Call)}
+    assert "button" in calls, "no Apply button"
+    assert "rerun" in calls, "Apply does not redraw the charts"
+
+    # find the `if apply_clicked:` guard and prove the write + cache-drop live
+    # inside it, not at function top level where every rerun would run them.
+    guard = None
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.If)
+                and isinstance(node.test, ast.Name)
+                and node.test.id == "apply_clicked"):
+            guard = node
+            break
+    assert guard is not None, "the write is not gated on the button"
+
+    def _hv_settings_writes(scope):
+        return [n for n in ast.walk(scope)
+                if isinstance(n, ast.Subscript)
+                and isinstance(n.ctx, ast.Store)
+                and isinstance(n.slice, ast.Constant)
+                and n.slice.value == "_hv_settings"]
+
+    guarded_calls = {getattr(c.func, "attr", "") for c in ast.walk(guard)
+                     if isinstance(c, ast.Call)}
+    assert "pop" in guarded_calls, "the cache is dropped outside Apply"
+    assert "rerun" in guarded_calls, "the rerun is outside Apply"
+
+    # every write to `_hv_settings` lives inside the Apply branch — nowhere else
+    # in the function commits the staged value.
+    writes_in_guard = {id(n) for n in _hv_settings_writes(guard)}
+    all_writes = _hv_settings_writes(fn)
+    assert all_writes, "the setting is never written"
+    assert all(id(n) in writes_in_guard for n in all_writes), \
+        "_hv_settings is committed outside the Apply branch"

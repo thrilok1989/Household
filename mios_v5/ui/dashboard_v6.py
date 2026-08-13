@@ -244,14 +244,23 @@ def _strike_verdict(st, r) -> None:
 
 
 def _hv_settings(st) -> None:
-    """⚙️ The three knobs the reference indicator exposes, and nothing more.
+    """⚙️ The three knobs the reference indicator exposes, behind an Apply button.
 
-    ⚠️ It WRITES `_hv_settings` and computes nothing. `vob_minimal._hv_points` reads
-    the same key and fills anything absent from `volume_points.defaults()`, so the
-    control and the computation cannot disagree about a default.
+    ⚠️ It WRITES `_hv_settings` **only when Apply is clicked**, and computes
+    nothing. `vob_minimal._hv_points` reads the same key and fills anything
+    absent from `volume_points.defaults()`, so the control and the computation
+    cannot disagree about a default.
 
-    Collapsed by default: a settings row permanently open above the leg tabulation
-    costs that space on every screen to say nothing most days.
+    Why the button. The number inputs are *staged*: without a gate, every
+    intermediate value a trader dials through — 15 → 16 → … → 22 — would commit
+    on the next 20-second autorefresh and redraw all three charts, so the pivots
+    would flicker while the number was still being chosen. Apply is the single
+    moment the staged values become the live setting, and it is where the stale
+    per-panel profiles are dropped so the new threshold lands on every chart at
+    once, this rerun rather than at the next bar close.
+
+    Collapsed by default: a settings row permanently open above the leg
+    tabulation costs that space on every screen to say nothing most days.
     """
     try:
         from ..volume_points import defaults
@@ -259,43 +268,61 @@ def _hv_settings(st) -> None:
         return
     try:
         d = defaults()
-        cur = dict(d)
-        cur.update({k: v for k, v in
-                    (st.session_state.get("_hv_settings") or {}).items()
-                    if k in d})
+        # What is CURRENTLY applied — defaults, overlaid with whatever the last
+        # Apply committed to `_hv_settings`. The inputs seed from this, and it is
+        # the baseline the staged values are compared against to detect changes.
+        applied = dict(d)
+        applied.update({k: v for k, v in
+                        (st.session_state.get("_hv_settings") or {}).items()
+                        if k in d})
         with st.expander("⚙️ High-volume pivots — settings", expanded=False):
             c1, c2, c3 = st.columns(3)
             with c1:
                 left = st.number_input(
                     "Left bars", min_value=2, max_value=60,
-                    value=int(cur["left"]), step=1, key="hv_left",
+                    value=int(applied["left"]), step=1, key="hv_left",
                     help="Bars before a candidate that must not exceed it. "
                          "On a 1-minute chart, 15 is a quarter-hour.")
             with c2:
                 right = st.number_input(
                     "Right bars", min_value=2, max_value=60,
-                    value=int(cur["right"]), step=1, key="hv_right",
+                    value=int(applied["right"]), step=1, key="hv_right",
                     help="Bars after it. A pivot is only confirmed once these "
                          "have printed, so a larger value means fewer, later "
                          "pivots — never earlier ones.")
             with c3:
                 filt = st.number_input(
                     "Volume filter", min_value=0.0, max_value=6.0,
-                    value=float(cur["filter_vol"]), step=0.1, key="hv_filter",
+                    value=float(applied["filter_vol"]), step=0.1, key="hv_filter",
                     help="On the normalised scale: the pivot's rolling volume "
                          "÷ the session's 95th percentile × 5. Lower keeps more "
                          "pivots. It is relative, so one value works on NIFTY "
                          "and on a ₹90 leg alike.")
-            st.session_state["_hv_settings"] = {
-                "left": int(left), "right": int(right),
-                "filter_vol": float(filt)}
-            # ⚠️ The cached per-panel profiles carry the OLD pivots, and they key on
-            # bar count — which does not change when a setting does. Cleared here so
-            # a changed threshold takes effect on this rerun rather than at the next
-            # bar close.
-            if {"left": int(left), "right": int(right),
-                    "filter_vol": float(filt)} != cur:
+            staged = {"left": int(left), "right": int(right),
+                      "filter_vol": float(filt)}
+            live = {"left": int(applied["left"]), "right": int(applied["right"]),
+                    "filter_vol": float(applied["filter_vol"])}
+            dirty = staged != live
+            b1, b2 = st.columns([1, 3])
+            with b1:
+                # Disabled when nothing changed, so the button reads as "there is
+                # something to apply" rather than a control that does nothing.
+                apply_clicked = st.button(
+                    "Apply", key="hv_apply", type="primary", disabled=not dirty,
+                    help="Apply these pivots to the NIFTY, Call and Put charts "
+                         "at once.")
+            with b2:
+                st.caption("⚠️ Staged — click **Apply** to update every chart."
+                           if dirty else "✅ Applied to all charts.")
+            if apply_clicked:
+                st.session_state["_hv_settings"] = staged
+                # ⚠️ The cached per-panel profiles carry the OLD pivots, and they
+                # key on bar count — which does not change when a setting does.
+                # Dropped here so the new threshold recomputes on every panel;
+                # `st.rerun` redraws the charts (already drawn above this control
+                # with the old setting) in the same interaction.
                 st.session_state.pop("_panel_profiles", None)
+                st.rerun()
             st.caption(
                 f"defaults {d['left']}/{d['right']} bars · filter "
                 f"{d['filter_vol']}. A strongly trending series has no swing "
@@ -2499,9 +2526,11 @@ def _panel_profile(st, tag, df=None, ready: Optional[Dict[str, Any]] = None):
 
 
 def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
-    """NIFTY ‖ ATM Call ‖ ATM Put — one figure, so zoom, pan and crosshair
-    stay locked together across all three."""
-    from .terminal_chart import atm_legs, terminal_chart
+    """NIFTY ‖ ATM Call ‖ ATM Put — three figures, each with its own Fullscreen
+    button, kept on one shared timeline and one zoom window so they still line
+    up. The trade a per-chart fullscreen makes is the live cross-panel
+    crosshair, which only a single figure can carry."""
+    from .terminal_chart import atm_legs, terminal_charts_split
 
     from ..runner import nifty_frame
     nifty, nifty_src = nifty_frame(st.session_state)
@@ -2581,7 +2610,13 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
     _put_levels.update(_put_proj)
 
     try:
-        fig, notes = terminal_chart(
+        # ⛶ Three figures, not one — so each chart carries its OWN Streamlit
+        # Fullscreen button and NIFTY, Call and Put can each be enlarged alone.
+        # They are still reindexed onto one timeline and pinned to one zoom
+        # window inside `terminal_charts_split`, so they line up; what a split
+        # gives up is the live cross-panel crosshair, which a single figure is
+        # the only way to keep.
+        figs, notes = terminal_charts_split(
             nifty, call_df, put_df, levels, htf_levels=htf,
             call_label=ce or "ATM Call", put_label=pe or "ATM Put",
             tint=dom.get("tint"), dominance=dom.get("side", "neutral"),
@@ -2592,11 +2627,23 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
             nifty_profile=_nifty_prof,
             call_profile=_call_prof,
             put_profile=_put_prof)
-        # ⛶ The shared config: a modebar stripped to the one Fullscreen button, so
-        # the terminal can finally be enlarged. scrollZoom stays off — the wheel
-        # zoomed the chart out from under anyone scrolling the page past it — and
-        # every pan/zoom/reset button is removed, leaving only Fullscreen.
-        st.plotly_chart(fig, use_container_width=True, config=FS_CHART_CONFIG)
+        # NIFTY wide on the left, the two legs stacked on the right — the same
+        # 60/40 proportions the combined terminal used, so the page still reads
+        # as the terminal it replaces. Each `plotly_chart` gets the shared
+        # config (a modebar stripped to the one Fullscreen button) and its own
+        # key, so Streamlit gives each its own fullscreen frame.
+        _left, _right = st.columns([0.6, 0.4], gap="small")
+        with _left:
+            if figs.get("NIFTY") is not None:
+                st.plotly_chart(figs["NIFTY"], use_container_width=True,
+                                key="terminal_nifty", config=FS_CHART_CONFIG)
+        with _right:
+            if figs.get("CALL") is not None:
+                st.plotly_chart(figs["CALL"], use_container_width=True,
+                                key="terminal_call", config=FS_CHART_CONFIG)
+            if figs.get("PUT") is not None:
+                st.plotly_chart(figs["PUT"], use_container_width=True,
+                                key="terminal_put", config=FS_CHART_CONFIG)
         if notes:
             # name the series AND why — "No candle series yet for: NIFTY" on a
             # screen where the two option legs drew fine tells you nothing
@@ -2610,10 +2657,11 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
             st.caption("No candle series yet for: " + ", ".join(notes)
                        + (" — " + "; ".join(x for x in why if x) if why else ""))
         st.caption(
-            "🖱 **Hover any candle — all three charts stay synchronised.** "
-            "10:48 on NIFTY reads 10:48 on both legs, so a reversal and the "
-            "premium response to it are visible in the same glance. The ➕/➖ "
-            "buttons and dragging to pan move all three together.  \n"
+            "⛶ **Each chart has its own Fullscreen button** — click it to "
+            "enlarge NIFTY, Call or Put on its own. All three share one clock "
+            "and one zoom window, so 10:48 is 10:48 on every panel and the ➕/➖ "
+            "buttons move each to the same span; hovering one no longer lights "
+            "the others, which is the trade a per-chart fullscreen makes.  \n"
             "🟢🔴 **Option bar colour is who was buying that minute**; bar "
             "height is still volume. The violet line is CVD — rising means "
             "buyers are still adding, falling means they have stopped. Its "
