@@ -699,6 +699,21 @@ POC_SHIFT_ALERTS_DEFAULT = False
 #    alerted ONCE — the existing structure at load is seeded silently, never
 #    replayed. `_notify_chart_formations` owns the memory and the send.
 FORMATION_ALERTS_DEFAULT = True
+
+# ── 🎯 Level-touch alerts → Telegram: spot reaching a key level within ±5 pts —
+#    the war zone, either OI wall, and the ranked support / resistance. ON by
+#    default (explicitly requested). Latched per level so a level price loiters
+#    at is alerted once, not every 20-second refresh — see
+#    `mios_v5.level_touch.evaluate` and `_notify_level_touches`.
+LEVEL_TOUCH_DEFAULT = True
+
+# ── the two sub-alerts the owner paused ────────────────────────────────
+# The ranked support/resistance TOUCH (a sub-alert of level-touch) and the VOB
+# FORMATION alert were both too noisy, so they are OFF by default. The war-zone
+# and OI-wall touches and the HVP formation alert are unaffected. Flip either to
+# True (or tick its sidebar box) to bring it back.
+SR_TOUCH_ALERTS_DEFAULT = False
+VOB_FORMATION_ALERTS_DEFAULT = False
 _RETIRED_ALERT_CLASSES = frozenset({
     'leg_entry', 'confirmed_entry', 'entry_result', 'all_aligned_entry',
     'sr_confluence', 'fresh_entry', 'bias_enter',
@@ -8686,7 +8701,9 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
                     _em_w = '🟢' if _dir_w > 0 else '🔴'
                     _kind_w = ("FAKE BREAKOUT — SWEPT & RECLAIMED"
                                if _swept_ctx else "SUDDEN ENTRY AT ZONE")
-                    _msg_w = (
+                    from mios_v5 import bias_ball as _bb
+                    _msg_w = _bb.prefix(
+                        _bb.BULL if _dir_w > 0 else _bb.BEAR,
                         f"⚡ <b>ZONE REVERSAL — {_kind_w}</b>\n"
                         f"{_em_w} Possible institutional {'buying' if _dir_w > 0 else 'selling'} "
                         f"at {_zone_w} ₹{float(_lv_w):.0f}\n"
@@ -11114,10 +11131,13 @@ def _notify_writing_telegram(side, headline, detail, spot_price):
             glyph, banner = '🧱', 'CALL WRITING / CAPPING — resistance building'
         else:
             glyph, banner = '🛡', 'PUT WRITING — support building'
-        msg = (f"{glyph} <b>{banner}</b>\n"
-               f"{headline}\n"
-               f"{detail}\n"
-               f"📍 Spot: ₹{spot_price:,.1f}")
+        from mios_v5 import bias_ball as _bb
+        msg = _bb.prefix(
+            _bb.writing_bias(side),
+            f"{glyph} <b>{banner}</b>\n"
+            f"{headline}\n"
+            f"{detail}\n"
+            f"📍 Spot: ₹{spot_price:,.1f}")
         send_telegram_message_sync(msg, force=True)
     except Exception:
         pass  # an alert must never take the cycle down
@@ -11164,9 +11184,11 @@ def _notify_poc_shifts():
             if not _event_edge(f'poc_shift_{_c}',
                                f"{shift['direction']}:{shift['cur']:.{_dp}f}"):
                 continue
+            from mios_v5 import bias_ball as _bb
             capture_market_event(
                 EventType.POC_SHIFT, EventSeverity.WARNING,
-                _ps.headline(shift, label=_lbl),
+                _bb.prefix(_bb.poc_bias(_c, shift['direction']),
+                           _ps.headline(shift, label=_lbl)),
                 _ps.detail(shift, label=_lbl),
                 snapshot={'price': _spot} if _spot else None)
         # Remember the latest level for every chart that HAS one, so the next
@@ -11238,15 +11260,122 @@ def _notify_chart_formations():
                 except Exception:
                     pass
 
+        # VOB formation was paused by the owner (too noisy); HVP stays on. The
+        # seeding still runs when it is re-enabled — `diff` seeds on first sight
+        # regardless — so turning it back on does not replay the day's blocks.
+        _vob_on = st.session_state.get('_vob_formation_on',
+                                       VOB_FORMATION_ALERTS_DEFAULT)
         for chart in _fa.CHARTS:
             prof = profiles.get(chart) or {}
             dp = 0 if chart == 'NIFTY' else 2
             _emit('hvp', chart, prof.get('hv_points'),
                   _fa.hvp_signature, _fa.hvp_message, dp)
-            if chart in ('CALL', 'PUT'):
+            if _vob_on and chart in ('CALL', 'PUT'):
                 zones = vob_store.get(labels.get(chart)) or []
                 _emit('vob', chart, zones,
                       _fa.vob_signature, _fa.vob_message, dp)
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
+def _notify_level_touches():
+    """🎯 Telegram note when spot reaches a key level within ±5 points.
+
+    Levels watched, each from the read that owns it and none recomputed here:
+      • the war zone — Stage 42's battle price (`fr.battle_zone`);
+      • both OI walls — the dominant CE/PE OI concentration (`_market_picture`);
+      • the ranked strong support / strong resistance (`fr`).
+
+    Each is latched independently in `_level_touch_state`, so a level price sits
+    at does not re-alert every cycle — `level_touch.evaluate` fires once on
+    entry and re-arms only after price has left the level. When two levels are
+    the same number this cycle (war zone == a ranked S/R, say), `dedupe` collapses
+    them to one message. Opt-out via `_level_touch_on` (default
+    `LEVEL_TOUCH_DEFAULT`).
+    """
+    try:
+        if not st.session_state.get('_level_touch_on', LEVEL_TOUCH_DEFAULT):
+            return
+        spot = st.session_state.get('_nifty_spot_live')
+        if not spot:
+            return
+        spot = float(spot)
+        from mios_v5 import level_touch as _lt
+        from mios_v5.final_read import build_final_read
+        fr = build_final_read(st.session_state.get('_mios_state')) or {}
+        mp = st.session_state.get('_market_picture') or {}
+
+        def _num(v):
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                return None
+            return None if x != x else x
+
+        def _oi(x):
+            # OI walls arrive as (price, oi_in_lakhs); tolerate a bare number too
+            if isinstance(x, (list, tuple)) and x:
+                return _num(x[0]), (_num(x[1]) if len(x) > 1 else None)
+            return _num(x), None
+
+        from mios_v5 import bias_ball as _bb
+        # (key, label, icon, price, extra_lines, bias) in priority order — the
+        # war zone leads, so when it shares a price with a ranked level `dedupe`
+        # keeps the war zone's richer message. Bias is the NIFTY-direction ball:
+        # the war zone reads off its expected winner; a plain OI-wall or S/R
+        # arrival has no bounce-vs-break call yet, so it is neutral.
+        targets = []
+        bz = fr.get('battle_zone')
+        if isinstance(bz, dict):
+            _p = _num(bz.get('price'))
+            if _p is not None:
+                _t = str(bz.get('type') or '').upper()
+                _icon = {'SUPPORT': '🛡', 'RESISTANCE': '🧱'}.get(_t, '⚔️')
+                _win = fr.get('expected_winner')
+                _odds = ' · '.join(
+                    f"{k} {v:.0f}%" for k, v in
+                    (fr.get('probabilities') or {}).items()
+                    if isinstance(v, (int, float)))
+                targets.append((
+                    'war_zone', f"war zone — {_t}".strip(), _icon, _p,
+                    [f"Expected winner: {_win}" if _win else None,
+                     _odds or None], _bb.winner_bias(_win)))
+
+        _cp, _cq = _oi(mp.get('oi_ceiling'))
+        if _cp is not None:
+            targets.append(('oi_ceiling', "CE OI wall (resistance)", '🧱', _cp,
+                            [f"{_cq:.1f}L OI" if _cq else None], _bb.NEUTRAL))
+        _fp, _fq = _oi(mp.get('oi_floor'))
+        if _fp is not None:
+            targets.append(('oi_floor', "PE OI wall (support)", '🛡', _fp,
+                            [f"{_fq:.1f}L OI" if _fq else None], _bb.NEUTRAL))
+
+        # The ranked S/R touch was paused by the owner (too noisy); the war-zone
+        # and OI-wall touches above are unaffected. Off by default — flip
+        # `SR_TOUCH_ALERTS_DEFAULT` or tick the sidebar box to bring it back.
+        if st.session_state.get('_sr_touch_on', SR_TOUCH_ALERTS_DEFAULT):
+            _res = _num(fr.get('strong_resistance'))
+            if _res is not None:
+                targets.append(('resistance', "resistance", '🧱', _res, [],
+                                _bb.NEUTRAL))
+            _sup = _num(fr.get('strong_support'))
+            if _sup is not None:
+                targets.append(('support', "support", '🛡', _sup, [],
+                                _bb.NEUTRAL))
+
+        states = st.session_state.setdefault('_level_touch_state', {})
+        hits = []
+        for key, label, icon, price, extra, bias in targets:
+            alert, new_state = _lt.evaluate(price, spot, states.get(key))
+            states[key] = new_state
+            if alert:
+                hits.append((label, price, _bb.prefix(
+                    bias, _lt.message(label, price, spot, icon, extra))))
+        for _label, _price, _msg in _lt.dedupe(hits):
+            try:
+                send_telegram_message_sync(_msg, force=True)
+            except Exception:
+                pass
     except Exception:
         pass  # an alert must never take the cycle down
 
@@ -14639,6 +14768,28 @@ def _render_main_analyzer():
              "is sent once; what already exists when the app loads is not "
              "re-announced.")
 
+    # ── 🎯 spot reaching a key level (±5 pts) → Telegram ──────────────
+    # War zone, either OI wall, and the ranked support / resistance. Latched per
+    # level so a price loitered at alerts once. Consumed in
+    # `_notify_level_touches`.
+    st.session_state["_level_touch_on"] = st.sidebar.checkbox(
+        "🎯 Level-touch alerts (±5 pts) → Telegram", value=LEVEL_TOUCH_DEFAULT,
+        help="A Telegram note when spot comes within ±5 points of the war zone, "
+             "an OI wall, or the ranked support / resistance. Sent once on "
+             "arrival; re-arms only after price leaves the level.")
+
+    # ── the two sub-alerts the owner paused (off by default) ──────────
+    # Ranked S/R touch is a subset of the level-touch alert above; VOB formation
+    # a subset of the formation alert. Both were too noisy, so they are opt-in.
+    st.session_state["_sr_touch_on"] = st.sidebar.checkbox(
+        "   ↳ include ranked S/R touch", value=SR_TOUCH_ALERTS_DEFAULT,
+        help="Paused — the ranked support/resistance touch was noisy. The "
+             "war-zone and OI-wall touches above are unaffected.")
+    st.session_state["_vob_formation_on"] = st.sidebar.checkbox(
+        "   ↳ include VOB formation", value=VOB_FORMATION_ALERTS_DEFAULT,
+        help="Paused — new-VOB alerts were noisy. High-volume pivot (HVP) "
+             "formation alerts are unaffected.")
+
     if _mios_tg:
         st.session_state["_mios_transport"] = mios_v6_transport
         st.sidebar.caption("🔴 Live — Stage 72.9 will send entry and exit "
@@ -15305,6 +15456,15 @@ def _render_main_analyzer():
     # structure. No-op unless the sidebar toggle is on.
     try:
         _notify_chart_formations()
+    except Exception:
+        pass
+
+    # 🎯 Spot-at-a-key-level (±5 pts) alerts — war zone, OI walls, ranked S/R.
+    # Same placement: the MIOS state and `_market_picture` are current by now,
+    # and the final read is a cheap transport over them. No-op unless the toggle
+    # is on.
+    try:
+        _notify_level_touches()
     except Exception:
         pass
 
