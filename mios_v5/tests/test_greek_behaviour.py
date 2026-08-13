@@ -158,18 +158,43 @@ def test_missing_greeks_are_not_reported_never_zero():
     r = GB.interpret(total_gex=100.0)          # no contextual greeks handed in
     for g in GB.CONTEXTUAL_GREEKS:
         assert r["greeks"][g] == NR, g
+    assert "vega" not in GB.CONTEXTUAL_GREEKS   # vega is promoted, not contextual
     # zero is a real reading and is kept, not turned into "Not reported"
-    assert GB.interpret(vega=0.0)["greeks"]["vega"] == 0.0
+    assert GB.interpret(vomma=0.0)["greeks"]["vomma"] == 0.0
 
 
 def test_contextual_greeks_never_create_direction_or_a_regime():
-    """Speed/Color/Zomma/Veta/Vomma/Vega are context — handing them in must not
-    change the gamma regime or invent a direction."""
+    """Speed/Color/Zomma/Veta/Vomma are context — handing them in must not change
+    the gamma regime or invent a direction."""
     base = GB.interpret(total_gex=180.0)
     withx = GB.interpret(total_gex=180.0, vomma=999, zomma=999, veta=999,
-                         color=999, speed=999, vega=999)
+                         color=999, speed=999)
     assert base["gamma"] == withx["gamma"]
     assert base["synthesis"] == withx["synthesis"]
+
+
+# ── vega → vol sensitivity (magnitude, never direction) ────────────────
+
+def test_vega_reports_a_magnitude_not_a_direction():
+    lo = GB.vol_sensitivity(1000.0)
+    assert lo["strength"] == "LOW"
+    mod = GB.vol_sensitivity(GB.VEGA_MODERATE + 1)
+    assert mod["strength"] == "MODERATE"
+    hi = GB.vol_sensitivity(GB.VEGA_HIGH + 1)
+    assert hi["strength"] == "HIGH" and "materially" in hi["text"]
+    # magnitude only — sign must not create a bullish/bearish direction
+    assert "direction" not in hi
+    for banned in ("buy", "sell", "bullish", "bearish", "upside", "downside"):
+        assert banned not in hi["text"].lower()
+    # absent → Not reported, never a fabricated 0
+    assert GB.vol_sensitivity(None)["strength"] == NR
+
+
+def test_interpret_surfaces_vega_as_vol_sensitivity():
+    r = GB.interpret(total_gex=100.0, net_vega=GB.VEGA_HIGH + 5000)
+    assert r["vol_sensitivity"]["strength"] == "HIGH"
+    # no net_vega → Not reported
+    assert GB.interpret(total_gex=100.0)["vol_sensitivity"]["strength"] == NR
 
 
 # ── staleness ──────────────────────────────────────────────────────────
@@ -215,8 +240,19 @@ def test_the_panel_renders_context_only_and_missing_greeks():
     assert "CHOP / PIN" in html and "DOWNWARD DRIFT + CHOP" in html
     # the unavailable higher-order Greeks are named as Not reported
     assert "Not reported" in html and "Vomma" in html
+    assert "Vega" not in html          # vega is promoted; not in the missing list
     # never a trade
     assert "buy" not in html.lower() and "sell" not in html.lower()
+
+
+def test_the_panel_shows_vol_sensitivity_only_when_material():
+    material = GB.interpret(spot=24460, pull_level=24400, net_charm=-36.2,
+                            total_gex=180.0, net_vega=GB.VEGA_HIGH + 5000)
+    assert "Vol sensitivity" in GP.behaviour_html(material)
+    # a LOW/absent vega read adds no row on the space-constrained card
+    low = GB.interpret(spot=24460, pull_level=24400, net_charm=-36.2,
+                       total_gex=180.0, net_vega=10.0)
+    assert "Vol sensitivity" not in GP.behaviour_html(low)
 
 
 def test_the_panel_flags_stale_and_is_empty_when_nothing_to_say():
@@ -240,6 +276,28 @@ def test_the_panel_adds_no_number_of_its_own():
     assert not ({"pandas", "numpy"} & imported)
 
 
+# ── the net_vega producer (reuses the existing exposure aggregator) ────
+
+def test_net_vega_is_summed_from_the_chain_and_optional():
+    """`vob_minimal` cannot be imported here (heavy Streamlit deps), so the
+    net_vega aggregate is pinned on the parse tree of the existing exposure
+    producer: it sums the per-strike Vega columns and returns `net_vega`, and it
+    is OPTIONAL — `None` when the chain has no Vega columns, never a fabricated 0.
+    """
+    src = (_ROOT / "vob_minimal.py").read_text()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "calculate_vanna_charm_exposure")
+    seg = ast.get_source_segment(src, fn) or ""
+    # it reuses the per-strike Vega columns the chain already carries…
+    assert "Vega_CE" in seg and "Vega_PE" in seg
+    # …aggregated the same OI-weighted / contract_multiplier / 1e5 way…
+    assert "contract_multiplier" in seg
+    # …returned as net_vega, optional: None when the columns are absent
+    assert "'net_vega'" in seg
+    assert "if has_vega else None" in seg
+
+
 # ── the app wiring ─────────────────────────────────────────────────────
 
 def test_the_app_feeds_the_layer_existing_producers_only():
@@ -248,5 +306,6 @@ def test_the_app_feeds_the_layer_existing_producers_only():
     src = (_ROOT / "vob_minimal.py").read_text()
     assert "greek_behaviour import interpret" in src
     assert "behaviour_html" in src
-    # the inputs come from already-published data
+    # the inputs come from already-published data, now including net_vega
     assert "_gex_data" in src and "vc_exp" in src
+    assert "net_vega" in src

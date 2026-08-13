@@ -67,6 +67,12 @@ def behaviour_html(read: Optional[Dict[str, Any]]) -> str:
         _row("Expansion risk", exp.get("text")),
     ]
 
+    # Vega → vol sensitivity, shown ONLY when materially significant (spec §5),
+    # so a LOW/absent read does not add a row on a space-constrained card.
+    vsens = r.get("vol_sensitivity") or {}
+    if vsens.get("strength") in ("MODERATE", "HIGH"):
+        rows.append(_row("Vol sensitivity", vsens.get("text")))
+
     synth = r.get("synthesis")
     if synth and synth != NOT_REPORTED:
         rows.append(f"<div style='{_ROW}margin-top:4px;'>"
