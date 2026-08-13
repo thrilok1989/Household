@@ -11366,7 +11366,8 @@ def _notify_level_touches():
         states = st.session_state.setdefault('_level_touch_state', {})
         hits = []
         for key, label, icon, price, extra, bias in targets:
-            alert, new_state = _lt.evaluate(price, spot, states.get(key))
+            alert, new_state = _lt.evaluate(price, spot, states.get(key),
+                                            now=time.time())
             states[key] = new_state
             if alert:
                 hits.append((label, price, _bb.prefix(
