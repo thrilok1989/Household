@@ -88,9 +88,12 @@ def hvp_message(chart: str, label: Optional[str], pivot: Mapping[str, Any],
     icon = "🔺" if side == "HIGH" else "🔻"
     vol = f" on {norm:.1f}× volume" if norm is not None else ""
     price_s = "—" if price is None else f"₹{price:,.{decimals}f}"
-    return (f"{icon} <b>New high-volume {kind} — {label}</b>\n"
-            f"A high-volume swing {kind} formed at {price_s}{vol} — "
-            f"a fresh level to watch.")
+    from . import bias_ball as _bb
+    return _bb.prefix(
+        _bb.hvp_bias(chart, side),
+        f"{icon} <b>New high-volume {kind} — {label}</b>\n"
+        f"A high-volume swing {kind} formed at {price_s}{vol} — "
+        f"a fresh level to watch.")
 
 
 # ── volume order blocks ────────────────────────────────────────────────
@@ -125,5 +128,8 @@ def vob_message(chart: str, label: Optional[str], zone: Mapping[str, Any],
     band = ("—" if lo is None or hi is None
             else f"₹{lo:,.{decimals}f}–₹{hi:,.{decimals}f}")
     tail = f" ({status})" if status else ""
-    return (f"{icon} <b>New VOB {word} — {label}</b>\n"
-            f"A volume order block formed at {band}{tail}.")
+    from . import bias_ball as _bb
+    return _bb.prefix(
+        _bb.vob_bias(chart, role),
+        f"{icon} <b>New VOB {word} — {label}</b>\n"
+        f"A volume order block formed at {band}{tail}.")

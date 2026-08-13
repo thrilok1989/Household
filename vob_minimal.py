@@ -8693,7 +8693,9 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
                     _em_w = '🟢' if _dir_w > 0 else '🔴'
                     _kind_w = ("FAKE BREAKOUT — SWEPT & RECLAIMED"
                                if _swept_ctx else "SUDDEN ENTRY AT ZONE")
-                    _msg_w = (
+                    from mios_v5 import bias_ball as _bb
+                    _msg_w = _bb.prefix(
+                        _bb.BULL if _dir_w > 0 else _bb.BEAR,
                         f"⚡ <b>ZONE REVERSAL — {_kind_w}</b>\n"
                         f"{_em_w} Possible institutional {'buying' if _dir_w > 0 else 'selling'} "
                         f"at {_zone_w} ₹{float(_lv_w):.0f}\n"
@@ -11121,10 +11123,13 @@ def _notify_writing_telegram(side, headline, detail, spot_price):
             glyph, banner = '🧱', 'CALL WRITING / CAPPING — resistance building'
         else:
             glyph, banner = '🛡', 'PUT WRITING — support building'
-        msg = (f"{glyph} <b>{banner}</b>\n"
-               f"{headline}\n"
-               f"{detail}\n"
-               f"📍 Spot: ₹{spot_price:,.1f}")
+        from mios_v5 import bias_ball as _bb
+        msg = _bb.prefix(
+            _bb.writing_bias(side),
+            f"{glyph} <b>{banner}</b>\n"
+            f"{headline}\n"
+            f"{detail}\n"
+            f"📍 Spot: ₹{spot_price:,.1f}")
         send_telegram_message_sync(msg, force=True)
     except Exception:
         pass  # an alert must never take the cycle down
@@ -11171,9 +11176,11 @@ def _notify_poc_shifts():
             if not _event_edge(f'poc_shift_{_c}',
                                f"{shift['direction']}:{shift['cur']:.{_dp}f}"):
                 continue
+            from mios_v5 import bias_ball as _bb
             capture_market_event(
                 EventType.POC_SHIFT, EventSeverity.WARNING,
-                _ps.headline(shift, label=_lbl),
+                _bb.prefix(_bb.poc_bias(_c, shift['direction']),
+                           _ps.headline(shift, label=_lbl)),
                 _ps.detail(shift, label=_lbl),
                 snapshot={'price': _spot} if _spot else None)
         # Remember the latest level for every chart that HAS one, so the next
@@ -11298,9 +11305,12 @@ def _notify_level_touches():
                 return _num(x[0]), (_num(x[1]) if len(x) > 1 else None)
             return _num(x), None
 
-        # (key, label, icon, price, extra_lines) in priority order — the war
-        # zone leads, so when it shares a price with a ranked level `dedupe`
-        # keeps the war zone's richer message.
+        from mios_v5 import bias_ball as _bb
+        # (key, label, icon, price, extra_lines, bias) in priority order — the
+        # war zone leads, so when it shares a price with a ranked level `dedupe`
+        # keeps the war zone's richer message. Bias is the NIFTY-direction ball:
+        # the war zone reads off its expected winner; a plain OI-wall or S/R
+        # arrival has no bounce-vs-break call yet, so it is neutral.
         targets = []
         bz = fr.get('battle_zone')
         if isinstance(bz, dict):
@@ -11316,32 +11326,33 @@ def _notify_level_touches():
                 targets.append((
                     'war_zone', f"war zone — {_t}".strip(), _icon, _p,
                     [f"Expected winner: {_win}" if _win else None,
-                     _odds or None]))
+                     _odds or None], _bb.winner_bias(_win)))
 
         _cp, _cq = _oi(mp.get('oi_ceiling'))
         if _cp is not None:
             targets.append(('oi_ceiling', "CE OI wall (resistance)", '🧱', _cp,
-                            [f"{_cq:.1f}L OI" if _cq else None]))
+                            [f"{_cq:.1f}L OI" if _cq else None], _bb.NEUTRAL))
         _fp, _fq = _oi(mp.get('oi_floor'))
         if _fp is not None:
             targets.append(('oi_floor', "PE OI wall (support)", '🛡', _fp,
-                            [f"{_fq:.1f}L OI" if _fq else None]))
+                            [f"{_fq:.1f}L OI" if _fq else None], _bb.NEUTRAL))
 
         _res = _num(fr.get('strong_resistance'))
         if _res is not None:
-            targets.append(('resistance', "resistance", '🧱', _res, []))
+            targets.append(('resistance', "resistance", '🧱', _res, [],
+                            _bb.NEUTRAL))
         _sup = _num(fr.get('strong_support'))
         if _sup is not None:
-            targets.append(('support', "support", '🛡', _sup, []))
+            targets.append(('support', "support", '🛡', _sup, [], _bb.NEUTRAL))
 
         states = st.session_state.setdefault('_level_touch_state', {})
         hits = []
-        for key, label, icon, price, extra in targets:
+        for key, label, icon, price, extra, bias in targets:
             alert, new_state = _lt.evaluate(price, spot, states.get(key))
             states[key] = new_state
             if alert:
-                hits.append((label, price,
-                             _lt.message(label, price, spot, icon, extra)))
+                hits.append((label, price, _bb.prefix(
+                    bias, _lt.message(label, price, spot, icon, extra))))
         for _label, _price, _msg in _lt.dedupe(hits):
             try:
                 send_telegram_message_sync(_msg, force=True)
