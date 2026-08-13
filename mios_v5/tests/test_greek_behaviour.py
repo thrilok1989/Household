@@ -298,6 +298,63 @@ def test_net_vega_is_summed_from_the_chain_and_optional():
     assert "if has_vega else None" in seg
 
 
+# ── the "other 5" third-order reads (vomma/speed/zomma/veta/color) ─────
+
+def test_each_third_order_greek_reads_a_magnitude_never_a_direction():
+    for g in GB.CONTEXTUAL_GREEKS:
+        mod, high = GB.CONTEXTUAL_BANDS[g]
+        lo = GB.contextual_read(g, mod * 0.5)
+        assert lo["strength"] == "LOW", g
+        md = GB.contextual_read(g, mod + 1)
+        assert md["strength"] == "MODERATE", g
+        hi = GB.contextual_read(g, high + 1)
+        assert hi["strength"] == "HIGH", g
+        # sign carries NOTHING — a negative net reads the same magnitude bucket
+        assert GB.contextual_read(g, -(high + 1))["strength"] == "HIGH", g
+        # never a trade or a direction word
+        for banned in ("buy", "sell", "bullish", "bearish", "upside",
+                       "downside", "long", "short"):
+            assert banned not in hi["text"].lower(), (g, banned)
+        # absent → Not reported, never a fabricated 0
+        assert GB.contextual_read(g, None)["strength"] == NR, g
+
+
+def test_interpret_surfaces_the_five_as_contextual_reads():
+    r = GB.interpret(total_gex=100.0,
+                     vomma=GB.CONTEXTUAL_BANDS["vomma"][1] + 1,
+                     speed=GB.CONTEXTUAL_BANDS["speed"][1] + 1)
+    assert r["contextual"]["vomma"]["strength"] == "HIGH"
+    assert r["contextual"]["speed"]["strength"] == "HIGH"
+    # a greek with no producer value handed in → Not reported, never 0
+    assert r["contextual"]["zomma"]["strength"] == NR
+
+
+def test_the_five_do_not_change_the_gamma_regime_or_synthesis():
+    base = GB.interpret(spot=24460, pull_level=24400, net_charm=-36.2,
+                        total_gex=180.0)
+    loud = GB.interpret(spot=24460, pull_level=24400, net_charm=-36.2,
+                        total_gex=180.0, vomma=9e9, speed=9e9, zomma=9e9,
+                        veta=9e9, color=9e9)
+    assert base["gamma"] == loud["gamma"]
+    assert base["synthesis"] == loud["synthesis"]
+    assert loud["context_only"] is True
+
+
+def test_the_panel_shows_a_third_order_row_only_when_material():
+    material = GB.interpret(spot=24460, pull_level=24400, net_charm=-36.2,
+                            total_gex=180.0,
+                            speed=GB.CONTEXTUAL_BANDS["speed"][1] + 1)
+    html = GP.behaviour_html(material)
+    assert "Gamma acceleration" in html
+    # a LOW read adds no row, and with a producer present it is NOT "Not reported"
+    low = GB.interpret(spot=24460, pull_level=24400, net_charm=-36.2,
+                       total_gex=180.0, speed=0.0)
+    lhtml = GP.behaviour_html(low)
+    assert "Gamma acceleration" not in lhtml
+    # speed reported (0.0) → it drops off the "Not reported" list
+    assert "Speed" not in lhtml
+
+
 # ── the app wiring ─────────────────────────────────────────────────────
 
 def test_the_app_feeds_the_layer_existing_producers_only():
@@ -309,3 +366,37 @@ def test_the_app_feeds_the_layer_existing_producers_only():
     # the inputs come from already-published data, now including net_vega
     assert "_gex_data" in src and "vc_exp" in src
     assert "net_vega" in src
+    # …and the five third-order nets are passed through by name
+    for g in ("vomma", "speed", "zomma", "veta", "color"):
+        assert f"net_{g}" in src, g
+
+
+def test_the_producer_sums_the_five_third_order_columns_optionally():
+    """Pinned on the parse tree (vob_minimal can't be imported): the exposure
+    producer sums the per-strike third-order columns the chain now carries, and
+    each net is OPTIONAL — None when its columns are absent, never a fabricated 0.
+    """
+    src = (_ROOT / "vob_minimal.py").read_text()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "calculate_vanna_charm_exposure")
+    seg = ast.get_source_segment(src, fn) or ""
+    # column names are built in a loop over the capitalised greek tuple, so the
+    # producer references the five names and constructs `_CE`/`_PE` + `net_`
+    for g in ("Vomma", "Speed", "Zomma", "Veta", "Color"):
+        assert g in seg, g
+    assert "f'{g}_CE'" in seg and "f'{g}_PE'" in seg
+    assert "net_{g.lower()}" in seg
+    # the same OI-weighted / contract_multiplier / 1e5 basis, and optional
+    assert "contract_multiplier" in seg
+    assert "has_higher" in seg
+
+
+def test_the_chain_build_produces_the_five_columns():
+    """The chain build must call the higher_greeks producer and assign the five
+    per-strike columns for both legs — otherwise the aggregate has nothing to sum.
+    """
+    src = (_ROOT / "vob_minimal.py").read_text()
+    assert "from mios_v5.higher_greeks import higher_greeks" in src
+    for g in ("Vomma", "Speed", "Zomma", "Veta", "Color"):
+        assert f"'{g}_CE'" in src and f"'{g}_PE'" in src, g

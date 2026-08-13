@@ -25,6 +25,7 @@ from indicators.money_flow_profile import calculate_money_flow_profile
 from mios_v5.story_integration import get_story_task, process_market_event
 from mios_v5.market_events import build_event, EventType, EventSeverity
 from mios_v5.clock import to_ist as _to_ist
+from mios_v5.higher_greeks import higher_greeks as _higher_greeks
 
 
 
@@ -2347,8 +2348,14 @@ def calculate_vanna_charm_exposure(df_summary, spot_price, contract_multiplier=2
         if not need <= set(df_summary.columns):
             return None
         has_vega = {'Vega_CE', 'Vega_PE'} <= set(df_summary.columns)
+        cols = set(df_summary.columns)
+        # third-order greeks, each optional & independent — a net is None (not 0)
+        # unless BOTH legs of that greek are present, same rule as Vega
+        higher = ('Vomma', 'Speed', 'Zomma', 'Veta', 'Color')
+        has_higher = {g: {f'{g}_CE', f'{g}_PE'} <= cols for g in higher}
         rows = []
         vega_sum = 0.0
+        higher_sum = {g: 0.0 for g in higher}
         for _, row in df_summary.iterrows():
             oi_ce = float(row.get('openInterest_CE', 0) or 0)
             oi_pe = float(row.get('openInterest_PE', 0) or 0)
@@ -2362,11 +2369,19 @@ def calculate_vanna_charm_exposure(df_summary, spot_price, contract_multiplier=2
                 vega_sum += (float(row.get('Vega_CE', 0) or 0) * oi_ce
                              + float(row.get('Vega_PE', 0) or 0) * oi_pe) \
                     * contract_multiplier / 1e5
+            for g in higher:
+                if has_higher[g]:
+                    higher_sum[g] += (float(row.get(f'{g}_CE', 0) or 0) * oi_ce
+                                      + float(row.get(f'{g}_PE', 0) or 0) * oi_pe) \
+                        * contract_multiplier / 1e5
         vc_df = pd.DataFrame(rows)
-        return {'vc_df': vc_df,
-                'net_vanna': round(float(vc_df['Net_Vanna'].sum()), 2),
-                'net_charm': round(float(vc_df['Net_Charm'].sum()), 2),
-                'net_vega': round(vega_sum, 2) if has_vega else None}
+        out = {'vc_df': vc_df,
+               'net_vanna': round(float(vc_df['Net_Vanna'].sum()), 2),
+               'net_charm': round(float(vc_df['Net_Charm'].sum()), 2),
+               'net_vega': round(vega_sum, 2) if has_vega else None}
+        for g in higher:
+            out[f'net_{g.lower()}'] = round(higher_sum[g], 2) if has_higher[g] else None
+        return out
     except Exception:
         return None
 
@@ -3840,6 +3855,13 @@ def analyze_option_chain(selected_expiry=None, pivot_data=None, vob_data=None):
         _vc_pe = calculate_vanna_charm('PE', underlying, strike, T, r, iv_pe / 100)
         df.at[idx, 'Vanna_CE'], df.at[idx, 'Charm_CE'] = _vc_ce
         df.at[idx, 'Vanna_PE'], df.at[idx, 'Charm_PE'] = _vc_pe
+        # Third-order Greeks (vomma/speed/zomma/veta/color) — the producer the
+        # Greek-behaviour layer needs so it can stop reporting them "Not reported".
+        _hg_ce = _higher_greeks(underlying, strike, T, r, iv_ce / 100)
+        _hg_pe = _higher_greeks(underlying, strike, T, r, iv_pe / 100)
+        for _g in ('vomma', 'speed', 'zomma', 'veta', 'color'):
+            df.at[idx, f'{_g.capitalize()}_CE'] = _hg_ce[_g]
+            df.at[idx, f'{_g.capitalize()}_PE'] = _hg_pe[_g]
 
     atm_strike = min(df['strikePrice'], key=lambda x: abs(x - underlying))
 
@@ -3948,6 +3970,10 @@ def analyze_option_chain(selected_expiry=None, pivot_data=None, vob_data=None):
                   # carry the 2nd-order greeks so the Vanna/Charm exposure
                   # aggregation (needs these on df_summary) can compute + show
                   'Vanna_CE', 'Vanna_PE', 'Charm_CE', 'Charm_PE',
+                  # 3rd-order greeks — carried the same way so their net-exposure
+                  # aggregation can compute for the Greek-behaviour layer
+                  'Vomma_CE', 'Vomma_PE', 'Speed_CE', 'Speed_PE', 'Zomma_CE', 'Zomma_PE',
+                  'Veta_CE', 'Veta_PE', 'Color_CE', 'Color_PE',
                   'impliedVolatility_CE', 'impliedVolatility_PE', 'bidQty_CE', 'bidQty_PE', 'askQty_CE', 'askQty_PE']
     merge_cols = [col for col in merge_cols if col in df.columns]
 
@@ -7409,7 +7435,10 @@ def compute_market_picture(spot_price, df, option_data, cat_scores=None):
             _vc = calculate_vanna_charm_exposure(_ds_v, _u_v)
             if _vc:
                 vc_exp = {'net_vanna': _vc['net_vanna'], 'net_charm': _vc['net_charm'],
-                          'net_vega': _vc.get('net_vega')}
+                          'net_vega': _vc.get('net_vega'),
+                          'net_vomma': _vc.get('net_vomma'), 'net_speed': _vc.get('net_speed'),
+                          'net_zomma': _vc.get('net_zomma'), 'net_veta': _vc.get('net_veta'),
+                          'net_color': _vc.get('net_color')}
     except Exception:
         pass
 
@@ -14136,7 +14165,11 @@ def render_clean_card(spot_price, option_data=None):
                 total_gex=_gx.get('total_gex'),
                 gamma_flip=_gx.get('gamma_flip_level'),
                 is_expiry=_is_expiry_day(option_data),
-                as_of=_asof, now=time.time()))
+                as_of=_asof, now=time.time(),
+                # the "other 5" third-order net exposures → their own reads
+                vomma=_vc.get('net_vomma'), speed=_vc.get('net_speed'),
+                zomma=_vc.get('net_zomma'), veta=_vc.get('net_veta'),
+                color=_vc.get('net_color')))
         except Exception:
             _gb_html = ""
 
