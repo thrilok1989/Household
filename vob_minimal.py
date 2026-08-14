@@ -8387,6 +8387,20 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
         + " · ".join(mp['reasons'][:6]) + "</div></div>",
         unsafe_allow_html=True,
     )
+    # ── detailed intelligence moved off the compact Trade Card (DISPLAY ONLY) ──
+    # The Level-Acceptance evidence, the Dealer-Magnet detail and the full Greek-
+    # Behaviour rows live here, in the investigation layer, in that order. Built
+    # once by the Trade Card renderer and stashed in `_mp_detail`; rendered here
+    # so the same long text is never drawn twice. Nothing is recomputed.
+    try:
+        _mpd = st.session_state.get('_mp_detail') or {}
+        _detail_html = (str(_mpd.get('level_acceptance') or '')
+                        + str(_mpd.get('dealer_magnet') or '')
+                        + str(_mpd.get('greek_behaviour') or ''))
+        if _detail_html.strip():
+            st.markdown(_detail_html, unsafe_allow_html=True)
+    except Exception:
+        pass
     # 🧠 AI Market Story — the same MIOS V5 Stage-36 narrative shown in the
     # Analysis & Audit panel, surfaced here under the Market Picture so the plain-
     # language read sits with the levels it describes.
@@ -14254,10 +14268,12 @@ def render_clean_card(spot_price, option_data=None):
         # no verdict: the predictive breakout/rejection % stays as-is; this
         # reports separately. Never sends Telegram, never feeds Guardian.
         _la_html = ""
+        _la_oneliner = ""
         try:
             from mios_v5.acceptance import evaluate_reaction as _eval_reaction
             from mios_v5.level_acceptance import observe_levels as _observe_levels
             from mios_v5.ui.level_acceptance_panel import acceptance_html as _lahtml
+            from mios_v5.ui.level_acceptance_panel import acceptance_oneliner as _laone
             # reuse the SAME follow-through metrics Stage-42 already assembled
             _la_metrics = {}
             _mst = st.session_state.get('_mios_state') or {}
@@ -14318,7 +14334,8 @@ def render_clean_card(spot_price, option_data=None):
                 _la_read = _observe_levels(_la_levels, spot_price, _la_metrics,
                                            _la_store, _eval_reaction,
                                            interaction_band=_la_iband, now=_ots)
-                _la_html = _lahtml(_la_read)
+                _la_html = _lahtml(_la_read)          # full evidence → Market Picture
+                _la_oneliner = _laone(_la_read)       # compact state → Trade Card
                 # hand the resolved zones to the main-loop notifier (edge +
                 # cooldown live there, next to the other Telegram alerts)
                 st.session_state['_la_zones_latest'] = _la_read.get('zones') or []
@@ -14564,19 +14581,28 @@ def render_clean_card(spot_price, option_data=None):
             _spot_html + _vp_html + _gap_html + _ctx_facts_html),
             unsafe_allow_html=True)
 
+        # ── information hierarchy (DISPLAY ONLY) ───────────────────────
+        # The Trade Card is the "what is happening now" summary; the Market
+        # Picture is the "why / how" detail. The verbose strips — the full Greek-
+        # Behaviour rows, the Dealer-Magnet detail and the Level-Acceptance
+        # evidence — are built here (nothing recomputed) but rendered in the
+        # Market Picture instead, so the card stays compact and the same long
+        # text is never drawn twice. `render_market_picture` reads this stash.
+        st.session_state['_mp_detail'] = {
+            'level_acceptance': _la_html,
+            'dealer_magnet': _charm_html,
+            'greek_behaviour': _gb_html,
+        }
+
         # ── MIOS V6 — the observational read, FULL WIDTH ──────────────
-        # The owner removed the MIOS V5 (conflict-arbitrated) and Decisions
-        # (gate ‖ v0 ‖ v2) columns from the Trade Card so the complete screen
-        # goes to the MIOS V6 read — families, reaction, structure, war zone,
-        # dealer magnet, Greek behaviour, adaptive greeks, premium energy,
-        # session and day-type. It used to be one of three columns; now it spans
-        # the card. `_gb_html` (the Greek-behaviour strip) stays in the section.
+        # KEY POINTS ONLY: the V6 read (market state), the structure line, the
+        # war zone, the COMPACT level-acceptance state (`_la_oneliner`) and the
+        # one-line dealer/greek/fade summary (`_ag_html`). The detailed Greek
+        # rows, dealer-magnet detail and acceptance evidence moved to the Market
+        # Picture (stashed above) — they are no longer drawn on the card.
         #
         # ⚠️ Display only. The Entry Gate, v0 and v2 verdicts still compute and
-        # the native gate still drives its live Telegram alert exactly as before
-        # — only their card on this screen is gone. `_action_html`, `_signal_html`,
-        # `_dec_v2_html`, `_why_html` and the MIOS V5 fragments are still built
-        # above; they are simply no longer drawn here.
+        # the native gate still drives its live Telegram alert exactly as before.
         st.markdown(_sec(
             "🧬 MIOS V6 · observational", "#4da6ff",
             _v6_html + _dayt_html + _sess_html
@@ -14584,7 +14610,7 @@ def render_clean_card(spot_price, option_data=None):
                f"{_sr_intel_html}</div>" if _sr_intel_html else
                f"<div style='text-align:center;font-size:16px;margin-top:4px;"
                f"font-weight:800;'>{_sr_line}</div>")
-            + _wz_html + _la_html + _pe_html + _charm_html + _gb_html + _ag_html
+            + _wz_html + _la_oneliner + _pe_html + _ag_html
             + _fs_html + _zh_html),
             unsafe_allow_html=True)
     except Exception:

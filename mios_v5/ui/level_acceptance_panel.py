@@ -76,6 +76,25 @@ def _zone_html(z: Dict[str, Any]) -> str:
     return "".join(lines)
 
 
+def acceptance_oneliner(read: Optional[Dict[str, Any]]) -> str:
+    """The COMPACT Trade-Card form — one line per contested zone, state only, no
+    evidence rows. `""` when nothing is contested. The detailed evidence lives in
+    `acceptance_html` (rendered in the Market Picture), never both."""
+    zones: List[Dict[str, Any]] = (read or {}).get("zones") or []
+    if not zones:
+        return ""
+    out = []
+    for z in zones:
+        observed = z.get("observed")
+        icon, word, colour = _DISPLAY.get(observed, ("⚔️", str(observed or "—"), "#9aa5b1"))
+        arrow = _ARROW.get(z.get("direction") or "", "")
+        out.append(
+            f"<div style='margin-top:3px;text-align:center;font-size:13px;'>{icon} "
+            f"<b style='color:{colour};'>₹{z.get('price'):,.0f} · {word}{arrow}</b>"
+            f"</div>")
+    return "".join(out)
+
+
 def acceptance_html(read: Optional[Dict[str, Any]]) -> str:
     """The strip. `""` when nothing is being contested."""
     r = read or {}
