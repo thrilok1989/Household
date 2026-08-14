@@ -52,6 +52,14 @@ REJECTED = "REJECTED"
 #: the ±5 the level-touch alerts already use, so the two agree on "at a level".
 CLUSTER_TOLERANCE = 5.0
 
+#: how close (index points) price must be to a level to be "interacting" with it
+#: — the TESTING/contested band. Deliberately SEPARATE from CLUSTER_TOLERANCE:
+#: this gates whether a level is shown as being tested at all, so a level ~28 pts
+#: away (inside the reused engine's wider internal at-zone) is NOT called TESTING.
+#: BREAK_ATTEMPT and the resolved states are NOT gated — once price is genuinely
+#: beyond the level the existing break logic owns the read, wherever price sits.
+INTERACTION_BAND = 5.0
+
 #: the resolved outcomes — the only states worth a Telegram alert. TESTING /
 #: BREAK_ATTEMPT / FAILED_BREAK_WAIT are in-progress and must NOT alert (they'd
 #: spam and, worse, call a move before the market settled it).
@@ -185,7 +193,9 @@ def _confirmations(checks: Mapping[str, Any]) -> Dict[str, Any]:
 def observe_one(level: Mapping[str, Any], spot: Any, metrics: Mapping[str, Any],
                 prev: Optional[Mapping[str, Any]],
                 reaction_fn: Callable[..., Dict[str, Any]],
-                reset_eps: float = RESET_EPS) -> Dict[str, Any]:
+                reset_eps: float = RESET_EPS,
+                interaction_band: float = INTERACTION_BAND,
+                now: Any = None) -> Dict[str, Any]:
     """Advance ONE level's observed read by reusing the Stage-42 engine.
 
     `level` is `{label, price, [source]}`; `metrics` is the shared follow-through
@@ -204,7 +214,7 @@ def observe_one(level: Mapping[str, Any], spot: Any, metrics: Mapping[str, Any],
         return {"label": label, "price": price, "observed": None,
                 "direction": None, "checks": {}, "passed": 0, "known": 0,
                 "confidence": 0, "raw_state": None, "side": side,
-                "memory": dict(prev or {})}
+                "timestamp": None, "memory": dict(prev or {})}
 
     mem = dict(prev or {})
     remembered = _f(mem.get("_price"))
@@ -213,6 +223,7 @@ def observe_one(level: Mapping[str, Any], spot: Any, metrics: Mapping[str, Any],
         mem = {}                        # a new level — reset the reaction
     # the prior observed word (for the retest transition); a reset drops it too
     prev_observed = None if reset else (prev or {}).get("_observed")
+    prev_ts = None if reset else (prev or {}).get("_ts")
 
     zone = {"side": side, "price": price,
             "strength": level.get("strength"), "lifecycle": level.get("lifecycle")}
@@ -222,17 +233,29 @@ def observe_one(level: Mapping[str, Any], spot: Any, metrics: Mapping[str, Any],
 
     mapped = map_observed(r.get("state"), side)
     observed = mapped["observed"]
+    # interaction band: a level is only TESTING when price is genuinely at it
+    # (±interaction_band). Beyond that the engine's TOUCH is too wide, so the
+    # level is not shown as tested. BREAK_ATTEMPT / resolved states are never
+    # gated — price is meant to be away from the level once it has broken.
+    if observed == TESTING and abs(sp - price) > interaction_band:
+        observed = None
     new_mem["_observed"] = observed
     conf = _confirmations(r.get("checks") or {})
     retest = retest_status(prev_observed, observed)
     # edge trigger: a resolution the market just reached (not one it has been
     # sitting in). This is what an alert fires on — once, on the transition.
     newly_resolved = observed in RESOLVED and observed != prev_observed
+    # timestamp of the CURRENT state — stamped when it last changed, carried
+    # while it holds. Uses the market/session clock the caller passes in.
+    changed = observed != prev_observed
+    timestamp = now if (changed or prev_ts is None) else prev_ts
+    new_mem["_ts"] = timestamp
     return {
         "label": label, "price": price, "side": side,
         "observed": observed, "direction": mapped["direction"],
         "checks": conf["checks"], "passed": conf["passed"], "known": conf["known"],
         "retest": retest, "newly_resolved": newly_resolved,
+        "timestamp": timestamp,
         "confidence": int(_f(r.get("confidence")) or 0),
         "reasons": list(r.get("reasons") or [])[:3],
         "raw_state": r.get("state"),
@@ -283,6 +306,7 @@ def cluster(observations: Sequence[Mapping[str, Any]],
             "known": headline.get("known", 0),
             "retest": headline.get("retest"),
             "newly_resolved": headline.get("newly_resolved", False),
+            "timestamp": headline.get("timestamp"),
             "confidence": headline.get("confidence", 0),
             "members": members,
         })
@@ -331,7 +355,9 @@ def observe_levels(levels: Sequence[Mapping[str, Any]], spot: Any,
                    metrics: Mapping[str, Any],
                    memory_store: Optional[Dict[str, Any]],
                    reaction_fn: Callable[..., Dict[str, Any]],
-                   tolerance: float = CLUSTER_TOLERANCE) -> Dict[str, Any]:
+                   tolerance: float = CLUSTER_TOLERANCE,
+                   interaction_band: float = INTERACTION_BAND,
+                   now: Any = None) -> Dict[str, Any]:
     """The whole strip, context-only. Runs the reused engine over every level,
     updates `memory_store` in place (keyed by level label), clusters the results
     into battle zones, and returns `{zones, context_only}`.
@@ -345,7 +371,8 @@ def observe_levels(levels: Sequence[Mapping[str, Any]], spot: Any,
     for lv in levels:
         label = str(lv.get("label") or "level")
         res = observe_one(lv, spot, metrics, store.get(label), reaction_fn,
-                          reset_eps=RESET_EPS)
+                          reset_eps=RESET_EPS, interaction_band=interaction_band,
+                          now=now)
         store[label] = res.pop("memory")
         obs.append(res)
     zones = [z for z in cluster(obs, tolerance) if z.get("observed") is not None]
