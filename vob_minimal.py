@@ -716,6 +716,14 @@ LEVEL_ACCEPT_ALERTS_DEFAULT = True
 #: seconds before the SAME zone may alert again — matches the level-touch sleep.
 LEVEL_ACCEPT_COOLDOWN_S = 900.0
 
+# ── Confluence entry alert (4-signal alignment) ────────────────────────
+# Telegram when NIFTY is at a level, the ATM-strike verdict is Strong Bull/Bear
+# AGREEING with the level, the trade-side leg's LTP is at its support/session-low,
+# and that side has the greater premium energy. Reuses existing engine outputs —
+# no new engine. Latched per setup + cooldown so it fires once, not every cycle.
+CONFLUENCE_ALERTS_DEFAULT = True
+CONFLUENCE_COOLDOWN_S = 900.0
+
 # ── the two sub-alerts the owner paused ────────────────────────────────
 # The ranked support/resistance TOUCH (a sub-alert of level-touch) and the VOB
 # FORMATION alert were both too noisy, so they are OFF by default. The war-zone
@@ -11526,6 +11534,88 @@ def _notify_level_acceptance():
         pass  # an alert must never take the cycle down
 
 
+def _notify_confluence_entry():
+    """⚡ Telegram when the 4-signal confluence aligns — NIFTY at a level, the
+    ATM-strike verdict Strong Bull/Bear AGREEING with the level, the trade-side
+    leg's LTP at its support/session-low, and that side's premium energy the
+    greater. Every input is an EXISTING engine output; nothing is recomputed.
+
+    Latched per (side, level) with a cooldown so one setup fires once, not every
+    ~20s cycle. Opt-out via `_confluence_alerts_on`.
+    """
+    try:
+        if not st.session_state.get('_confluence_alerts_on', CONFLUENCE_ALERTS_DEFAULT):
+            return
+        spot = st.session_state.get('_nifty_spot_live')
+        if not spot:
+            return
+        spot = float(spot)
+        from mios_v5.entry_alignment import (evaluate as _ea_eval,
+                                             leg_at_support as _ea_leg,
+                                             message as _ea_msg)
+        from mios_v5.final_read import build_final_read
+        from mios_v5.ui.terminal_chart import atm_legs as _atm_legs
+
+        fr = build_final_read(st.session_state.get('_mios_state')) or {}
+        mp = st.session_state.get('_market_picture') or {}
+        _ab = mp.get('atm_bias') or {}
+        _verdict = str(_ab.get('verdict') or '')
+        if 'Strong' not in _verdict:
+            return                                   # only strong verdicts qualify
+
+        _bz = fr.get('battle_zone') or {}
+        _support = fr.get('strong_support')
+        _resistance = fr.get('strong_resistance')
+        _war = _bz.get('price') if isinstance(_bz, dict) else None
+
+        # per-side premium energy (already published by Stage 71.7)
+        _en = (st.session_state.get('_premium_energy') or {}).get('energy_score') or {}
+        _ce_en, _pe_en = _en.get('CALL'), _en.get('PUT')
+
+        # the ATM call/put leg frames + tags the app already cached
+        _call_df, _put_df, _ce_tag, _pe_tag = _atm_legs(
+            st.session_state.get('_atm_leg_dfs'))
+        _sr = st.session_state.get('_atm_leg_sr_behavior') or {}
+
+        def _leg_inputs(df_l, tag):
+            ltp = low = None
+            try:
+                if df_l is not None and not getattr(df_l, 'empty', True):
+                    ltp = float(df_l['close'].iloc[-1])
+                    low = float(df_l['low'].min())
+            except Exception:
+                pass
+            leg_sr = _sr.get(tag) if tag else None
+            tol = max((ltp or 0) * 0.02, 1.0)
+            return _ea_leg(leg_sr, ltp, low, tol)
+
+        _call_at_sup = _leg_inputs(_call_df, _ce_tag)
+        _put_at_sup = _leg_inputs(_put_df, _pe_tag)
+
+        sig = _ea_eval(spot=spot, support=_support, resistance=_resistance,
+                       war_zone=_war, atm_verdict=_verdict,
+                       call_at_support=_call_at_sup, put_at_support=_put_at_sup,
+                       call_energy=_ce_en, put_energy=_pe_en)
+        if not sig:
+            return
+
+        now = time.time()
+        try:
+            key = f"{sig['side']}:{round(float(sig.get('level') or 0))}"
+        except (TypeError, ValueError):
+            key = str(sig['side'])
+        prev = st.session_state.get('_confluence_alert_state') or {}
+        if prev.get('key') == key and now - float(prev.get('ts') or 0) < CONFLUENCE_COOLDOWN_S:
+            return                                   # same setup, still cooling
+        try:
+            send_telegram_message_sync(_ea_msg(sig, spot), force=True)
+            st.session_state['_confluence_alert_state'] = {'key': key, 'ts': now}
+        except Exception:
+            pass
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
 def capture_stage2_market_events(spot_price, df, option_data):
     """Feed the Market Event Engine (Discord feed + Supabase audit trail)
     from conditions this app already computes each cycle — the 6-8 event
@@ -15144,6 +15234,17 @@ def _render_main_analyzer():
              "transition; a per-zone cooldown stops a flipping level spamming. "
              "Observation only; it does not change any verdict.")
 
+    # ── ⚡ 4-signal confluence entry → Telegram ───────────────────────
+    st.session_state["_confluence_alerts_on"] = st.sidebar.checkbox(
+        "⚡ Confluence entry (level + verdict + leg + energy) → Telegram",
+        value=CONFLUENCE_ALERTS_DEFAULT,
+        help="A Telegram note when four existing engine reads align in one "
+             "direction: NIFTY at a support/resistance/war-zone, the ATM-strike "
+             "verdict Strong Bull/Bear agreeing with the level, the trade-side "
+             "leg's LTP at its support/session-low, and that side's premium "
+             "energy the greater. Fires once per setup (cooldown). Reuses "
+             "existing engines; changes no verdict.")
+
     # ── the two sub-alerts the owner paused (off by default) ──────────
     # Ranked S/R touch is a subset of the level-touch alert above; VOB formation
     # a subset of the formation alert. Both were too noisy, so they are opt-in.
@@ -15835,6 +15936,10 @@ def _render_main_analyzer():
         pass
     try:
         _notify_level_acceptance()
+    except Exception:
+        pass
+    try:
+        _notify_confluence_entry()
     except Exception:
         pass
 
