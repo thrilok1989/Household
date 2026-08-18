@@ -411,6 +411,43 @@ def test_the_app_alerts_only_on_resolution_edge_and_can_opt_out():
     assert "_la_alert_state" in src
 
 
+def test_oneliner_is_compact_state_only_and_full_keeps_evidence():
+    from mios_v5.ui import level_acceptance_panel as GP
+    read = {"context_only": True, "zones": [{
+        "price": 24400, "observed": LA.ACCEPTED_ABOVE, "direction": "ABOVE",
+        "is_battle_zone": True, "labels": ["VAH", "Resistance", "Dealer magnet"],
+        "checks": {"Hold": True, "CVD": True}, "passed": 2, "known": 2,
+        "retest": {"detected": True, "passed": True}}]}
+    one = GP.acceptance_oneliner(read)
+    full = GP.acceptance_html(read)
+    # compact line: the state + price, and NONE of the evidence rows
+    assert "ACCEPTED ABOVE" in one and "24,400" in one
+    assert "Hold" not in one and "Retest" not in one and "Observed" not in one
+    # the full strip (Market Picture) keeps the evidence + the footer
+    assert "Hold ✓" in full and "Retest ✓" in full and "Observed" in full
+    # empty read → empty line
+    assert GP.acceptance_oneliner({"zones": []}) == ""
+
+
+def test_trade_card_shows_compact_moves_detail_to_market_picture():
+    """UI-hierarchy: the Trade Card's MIOS V6 section renders the COMPACT
+    acceptance one-liner and the one-line dealer/greek summary, while the verbose
+    strips (full acceptance evidence, dealer-magnet detail, full Greek rows) are
+    stashed and rendered by the Market Picture — never both."""
+    src = (_ROOT / "vob_minimal.py").read_text()
+    # the card assembles the compact one-liner + the one-line greek summary…
+    assert "+ _wz_html + _la_oneliner + _pe_html + _ag_html" in src
+    # …and the three verbose strips are NOT in that card assembly line
+    card_line = next(l for l in src.splitlines()
+                     if "_la_oneliner + _pe_html" in l)
+    for verbose in ("_la_html", "_charm_html", "_gb_html"):
+        assert verbose not in card_line, verbose
+    # the detail is stashed for the Market Picture and rendered there
+    assert "'_mp_detail'" in src or '"_mp_detail"' in src
+    assert "level_acceptance" in src and "greek_behaviour" in src
+    assert "_mp_detail" in src and "_detail_html" in src
+
+
 def test_the_app_passes_the_band_timestamp_and_resets_on_session_regime():
     src = (_ROOT / "vob_minimal.py").read_text()
     # ±5 interaction band (configurable) + market timestamp threaded in
