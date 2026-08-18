@@ -12000,6 +12000,40 @@ def render_strike_mode_dashboard(spot_price, df, option_data):
                "Row highlight = S/R role from OI walls: 🟢 bold = STRONG SUPPORT (biggest PE OI) · "
                "🟢 light = near support · 🔴 bold = STRONG RESISTANCE (biggest CE OI) · 🔴 light = near resistance.")
 
+    # ── 📊 ATM ±2 STRIKES DETAILED TABULATION (14 bias metrics, seller's view) ──
+    # Ported from seller_perspective.py, shown directly below the per-strike leg
+    # tabulation. Reuses the option chain ALREADY fetched (OI / ΔOI / Volume /
+    # LTP / IV, plus the bid/ask depth carried on df_summary) — no new fetch. The
+    # MktDepth metric uses those existing bid/ask quantities, not a depth API.
+    try:
+        from mios_v5.atm_strike_bias import (tabulation as _atm2_tab,
+                                             tabulation_html as _atm2_html)
+        _atm2_rows = []
+        for _off in (-2, -1, 0, 1, 2):
+            _sp = atm + _off * gap
+            _r = ds[ds['Strike'] == _sp]
+            if _r.empty:
+                continue
+            _rd = _r.iloc[0]
+            _atm2_rows.append((float(_sp), {
+                'oi_ce': _rd.get('openInterest_CE'), 'oi_pe': _rd.get('openInterest_PE'),
+                'chg_ce': _rd.get('changeinOpenInterest_CE'),
+                'chg_pe': _rd.get('changeinOpenInterest_PE'),
+                'vol_ce': _rd.get('totalTradedVolume_CE'),
+                'vol_pe': _rd.get('totalTradedVolume_PE'),
+                'ltp_ce': _rd.get('lastPrice_CE'), 'ltp_pe': _rd.get('lastPrice_PE'),
+                'iv_ce': _rd.get('impliedVolatility_CE'),
+                'iv_pe': _rd.get('impliedVolatility_PE'),
+                'bid_ce': _rd.get('bidQty_CE'), 'bid_pe': _rd.get('bidQty_PE'),
+                'ask_ce': _rd.get('askQty_CE'), 'ask_pe': _rd.get('askQty_PE'),
+            }))
+        if _atm2_rows:
+            _atm2 = _atm2_html(_atm2_tab(_atm2_rows, float(atm)), float(atm))
+            if _atm2:
+                st.markdown(_atm2, unsafe_allow_html=True)
+    except Exception:
+        pass
+
 
 def render_atm_cvd_graphs(spot_price):
     """📊 Time-series graphs (x = time, y = value) for the ATM±1 legs —
