@@ -12064,6 +12064,42 @@ def render_strike_mode_dashboard(spot_price, df, option_data):
     except Exception:
         pass
 
+    # ── 📊 ATM ±2 FULL BIAS GRID (11 biases → verdict, owner's chain-bias set) ──
+    # Ported from the owner's option-chain bias script. Same ATM±2 window, but the
+    # LTP · OI · ΔOI · Vol · Δ · Γ · Bid/Ask · IV · ΔExp · ΓExp · DVP biases →
+    # Score/Verdict/Operator/Scalp/Fake-Real. Reuses the SAME already-fetched
+    # df_summary — including the REAL Delta/Gamma the chain build already put on
+    # it (Delta_CE/PE, Gamma_CE/PE) — so no new fetch and no Greek recompute.
+    try:
+        from mios_v5.atm_bias_grid import grid as _bg_grid, grid_html as _bg_html
+        _bg_rows = []
+        for _off in (-2, -1, 0, 1, 2):
+            _sp = atm + _off * gap
+            _r = ds[ds['Strike'] == _sp]
+            if _r.empty:
+                continue
+            _rd = _r.iloc[0]
+            _bg_rows.append((float(_sp), {
+                'ltp_ce': _rd.get('lastPrice_CE'), 'ltp_pe': _rd.get('lastPrice_PE'),
+                'oi_ce': _rd.get('openInterest_CE'), 'oi_pe': _rd.get('openInterest_PE'),
+                'chg_ce': _rd.get('changeinOpenInterest_CE'),
+                'chg_pe': _rd.get('changeinOpenInterest_PE'),
+                'vol_ce': _rd.get('totalTradedVolume_CE'),
+                'vol_pe': _rd.get('totalTradedVolume_PE'),
+                'delta_ce': _rd.get('Delta_CE'), 'delta_pe': _rd.get('Delta_PE'),
+                'gamma_ce': _rd.get('Gamma_CE'), 'gamma_pe': _rd.get('Gamma_PE'),
+                'bid_ce': _rd.get('bidQty_CE'), 'ask_ce': _rd.get('askQty_CE'),
+                'iv_ce': _rd.get('impliedVolatility_CE'),
+                'iv_pe': _rd.get('impliedVolatility_PE'),
+            }))
+        if _bg_rows:
+            _bg = _bg_html(_bg_grid(_bg_rows, float(atm), float(spot_price or atm)),
+                           float(atm))
+            if _bg:
+                st.markdown(_bg, unsafe_allow_html=True)
+    except Exception:
+        pass
+
 
 def render_atm_cvd_graphs(spot_price):
     """📊 Time-series graphs (x = time, y = value) for the ATM±1 legs —
