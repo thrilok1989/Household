@@ -1265,6 +1265,36 @@ def send_telegram_message_sync(message, force=False):
 
 
 
+def _trip_dhan_backoff():
+    """Trip the global Dhan rate-limit back-off, ESCALATING. Returns the pause in
+    seconds. The first 429 pauses only briefly so the NIFTY chart and spot
+    recover fast; consecutive 429s double up to the historical 90s cap so
+    sustained DH-904 limiting still relieves. `_clear_dhan_backoff` on any
+    success resets the ladder, so an isolated blip only ever gets the short
+    first pause."""
+    from mios_v5.rate_backoff import backoff_seconds as _bs, BASE_S, CAP_S
+    _ist = pytz.timezone('Asia/Kolkata')
+    _now = datetime.now(_ist)
+    _until = st.session_state.get('_dhan_429_until')
+    # A burst of 429s within ONE cycle is a single event — don't re-escalate on
+    # every leg. Only a 429 that lands AFTER the last window expired means the
+    # limiting persisted, so only that bumps the ladder.
+    if _until and _now < _until:
+        return _bs(int(st.session_state.get('_dhan_429_count', 1) or 1), BASE_S, CAP_S)
+    n = int(st.session_state.get('_dhan_429_count', 0) or 0) + 1
+    st.session_state['_dhan_429_count'] = n
+    secs = _bs(n, BASE_S, CAP_S)
+    st.session_state['_dhan_429_until'] = _now + timedelta(seconds=secs)
+    return secs
+
+
+def _clear_dhan_backoff():
+    """A clean fetch clears the escalation ladder, so the next isolated 429 pays
+    only the short first pause rather than inheriting an old streak."""
+    if st.session_state.get('_dhan_429_count'):
+        st.session_state['_dhan_429_count'] = 0
+
+
 class DhanAPI:
     def __init__(self, access_token, client_id):
         self.access_token = access_token.strip() if access_token else ""
@@ -1283,6 +1313,7 @@ class DhanAPI:
         hammering Dhan and serve cached data instead — and suppress the
         repeated error spam."""
         if response.status_code == 200:
+            _clear_dhan_backoff()        # a clean fetch resets the escalation
             return response.json()
         if response.status_code == 401:
             st.session_state['_dhan_token_expired'] = True
@@ -1291,12 +1322,13 @@ class DhanAPI:
             _ist = pytz.timezone('Asia/Kolkata')
             _now = datetime.now(_ist)
             # Global back-off window — _opt_analyze and other callers check this.
-            st.session_state['_dhan_429_until'] = _now + timedelta(seconds=90)
+            # Escalating: a transient blip clears fast; sustained 429s back off hard.
+            _secs = _trip_dhan_backoff()
             # Notify at most once per 30s instead of spamming on every leg.
             _last = st.session_state.get('_dhan_429_notified')
             if not _last or (_now - _last).total_seconds() > 30:
                 st.session_state['_dhan_429_notified'] = _now
-                st.warning("⏸️ Dhan rate-limited (DH-904). Throttling for 90s — "
+                st.warning(f"⏸️ Dhan rate-limited (DH-904). Throttling for {_secs:.0f}s — "
                            "showing cached data until it clears.")
         else:
             st.error(f"API Error: {response.status_code} - {response.text}")
@@ -1591,9 +1623,7 @@ def _dhan_post(url, payload, max_retries=4):
                 # behind its own retry ladder. `_dhan_429_until` is the flag
                 # DhanAPI._handle_response already sets and every fetch checks.
                 try:
-                    st.session_state['_dhan_429_until'] = (
-                        datetime.now(pytz.timezone('Asia/Kolkata'))
-                        + timedelta(seconds=90))
+                    _trip_dhan_backoff()
                 except Exception:
                     pass
                 if attempt < max_retries:
@@ -14719,7 +14749,7 @@ def _leg_intraday(api, sid, seg, render_id, ttl_s=60):
                     instrument="OPTIDX", interval="1", days_back=1)
             except Exception as err:
                 if '429' in str(err):
-                    st.session_state['_dhan_429_until'] = now + timedelta(seconds=90)
+                    _trip_dhan_backoff()
                 if not entry:
                     return None, None
                 raw, age = entry['data'], (now - entry['ts']).total_seconds()
