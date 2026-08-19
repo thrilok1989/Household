@@ -15257,6 +15257,15 @@ def _render_main_analyzer():
         help="Paused — new-VOB alerts were noisy. High-volume pivot (HVP) "
              "formation alerts are unaffected.")
 
+    # ── 📐 Advanced Price Action chart overlay (default OFF) ───────────
+    st.session_state["_apa_on"] = st.sidebar.checkbox(
+        "📐 Advanced Price Action on charts (BOS · CHoCH · Fib · patterns)",
+        value=False,
+        help="Overlay swing points, Break of Structure / Change of Character, "
+             "the Fibonacci retracement pocket, and geometric patterns (H&S, "
+             "triangles, flags) on ALL three charts — NIFTY, Call and Put. Off "
+             "by default; enable it here. Display only; changes no verdict.")
+
     if _mios_tg:
         st.session_state["_mios_transport"] = mios_v6_transport
         st.sidebar.caption("🔴 Live — Stage 72.9 will send entry and exit "
