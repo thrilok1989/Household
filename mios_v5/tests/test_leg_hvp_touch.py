@@ -9,9 +9,18 @@ vob_minimal can't be imported under test).
 import ast
 import pathlib
 
+from mios_v5 import bias_ball as BB
 from mios_v5 import level_touch as LT
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
+def test_bias_ball_reads_nifty_direction_with_the_leg_inversion():
+    # HIGH pivot = resistance, LOW = support; PUT inverts.
+    assert BB.hvp_bias("CALL", "LOW") == BB.BULL     # call support → NIFTY 🟢
+    assert BB.hvp_bias("CALL", "HIGH") == BB.BEAR    # call resistance → 🔴
+    assert BB.hvp_bias("PUT", "LOW") == BB.BEAR      # put support → NIFTY 🔴
+    assert BB.hvp_bias("PUT", "HIGH") == BB.BULL     # put resistance → 🟢
 
 
 def test_latch_and_cooldown_are_the_touch_semantics_asked_for():
@@ -44,6 +53,8 @@ def test_the_app_wires_the_hvp_touch_from_existing_data():
     assert "LEG_HVP_COOLDOWN_S" in src
     assert "_leg_hvp_touch_on" in src
     assert "_leg_hvp_touch_state" in src
+    # the NIFTY-bias ball is prepended (leg inversion via bias_ball.hvp_bias)
+    assert "bias_ball" in src and "hvp_bias" in src
     # it is actually called in the render loop, and computes no candles itself
     assert "_notify_leg_hvp_touch()" in src
     tree = ast.parse(src)

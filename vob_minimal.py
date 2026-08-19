@@ -11413,6 +11413,7 @@ def _notify_leg_hvp_touch():
         profiles = st.session_state.get('_leg_profiles') or {}
         if not profiles:
             return
+        from mios_v5 import bias_ball as _bb
         from mios_v5 import level_touch as _lt
         from mios_v5.ui.terminal_chart import atm_legs as _atm_legs
         call_df, put_df, _ce, _pe = _atm_legs(st.session_state.get('_atm_leg_dfs'))
@@ -11445,10 +11446,15 @@ def _notify_leg_hvp_touch():
                 states[key] = new_state
                 if alert:
                     _pv = str(p.get('side', '') or '').title()
+                    # NIFTY-bias ball: a HIGH pivot is resistance, a LOW is
+                    # support, then the leg rule inverts for PUT (bias_ball owns
+                    # that one rule) — so the ball reads NIFTY's direction.
+                    _bias = _bb.hvp_bias(side, p.get('side'))
                     msg = (f"📍 <b>{labels[side]} LTP at HVP line</b>\n"
                            f"LTP ₹{ltp:,.2f} · HVP ₹{hv:,.2f} "
                            f"({ltp - hv:+.2f} pts)"
                            + (f" · {_pv} pivot" if _pv else ""))
+                    msg = _bb.prefix(_bias, msg)
                     try:
                         send_telegram_message_sync(msg, force=True)
                     except Exception:
