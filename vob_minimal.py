@@ -701,6 +701,14 @@ POC_SHIFT_ALERTS_DEFAULT = False
 #    replayed. `_notify_chart_formations` owns the memory and the send.
 FORMATION_ALERTS_DEFAULT = True
 
+# ── Leg LTP → HVP-line touch alert ─────────────────────────────────────
+# Telegram when an option LTP (call or put) comes within ±5 of one of ITS OWN
+# high-volume-point lines. Latched per line + a cooldown ("sleep") so a price
+# loitering at the line does not repeat. Reuses `mios_v5.level_touch`.
+LEG_HVP_TOUCH_DEFAULT = True
+LEG_HVP_BAND = 5.0            # ±5 points of the LTP, as asked
+LEG_HVP_COOLDOWN_S = 900.0    # the "sleeping facility" — 15 min per line
+
 # ── 🎯 Level-touch alerts → Telegram: spot reaching a key level within ±5 pts —
 #    the war zone, either OI wall, and the ranked support / resistance. ON by
 #    default (explicitly requested). Latched per level so a level price loiters
@@ -11384,6 +11392,71 @@ def _notify_chart_formations():
         pass  # an alert must never take the cycle down
 
 
+def _notify_leg_hvp_touch():
+    """📍 Telegram when an option LTP comes within ±5 of one of ITS OWN
+    high-volume-point (HVP) lines — call or put.
+
+    Reads what the terminal already published: each leg's HVP lines from
+    `_leg_profiles[side].hv_points` (owner: `volume_points.high_volume_pivots`)
+    and the leg's LTP from the last close of the cached leg frame. Nothing is
+    recomputed.
+
+    Anti-spam is the level-touch rule reused verbatim (`mios_v5.level_touch`):
+    each HVP line latches — it alerts once when the LTP enters the ±band and
+    re-arms only after the LTP leaves by more than the band — and a per-line
+    cooldown ("sleeping facility") suppresses any repeat within the window even
+    if the LTP keeps crossing the line. Opt-out via `_leg_hvp_touch_on`.
+    """
+    try:
+        if not st.session_state.get('_leg_hvp_touch_on', LEG_HVP_TOUCH_DEFAULT):
+            return
+        profiles = st.session_state.get('_leg_profiles') or {}
+        if not profiles:
+            return
+        from mios_v5 import level_touch as _lt
+        from mios_v5.ui.terminal_chart import atm_legs as _atm_legs
+        call_df, put_df, _ce, _pe = _atm_legs(st.session_state.get('_atm_leg_dfs'))
+        legs = {'CALL': call_df, 'PUT': put_df}
+        labels = {'CALL': profiles.get('call_label') or 'ATM Call',
+                  'PUT': profiles.get('put_label') or 'ATM Put'}
+        states = st.session_state.setdefault('_leg_hvp_touch_state', {})
+        now = time.time()
+        for side in ('CALL', 'PUT'):
+            df_l = legs.get(side)
+            try:
+                ltp = (float(df_l['close'].iloc[-1])
+                       if df_l is not None and not getattr(df_l, 'empty', True)
+                       else None)
+            except Exception:
+                ltp = None
+            if ltp is None:
+                continue
+            for p in ((profiles.get(side) or {}).get('hv_points') or ()):
+                if not isinstance(p, dict):
+                    continue
+                try:
+                    hv = float(p.get('price'))
+                except (TypeError, ValueError):
+                    continue
+                key = f"{side}:{round(hv, 1)}"
+                alert, new_state = _lt.evaluate(
+                    hv, ltp, states.get(key), band=LEG_HVP_BAND,
+                    rearm=LEG_HVP_BAND * 2, cooldown_s=LEG_HVP_COOLDOWN_S, now=now)
+                states[key] = new_state
+                if alert:
+                    _pv = str(p.get('side', '') or '').title()
+                    msg = (f"📍 <b>{labels[side]} LTP at HVP line</b>\n"
+                           f"LTP ₹{ltp:,.2f} · HVP ₹{hv:,.2f} "
+                           f"({ltp - hv:+.2f} pts)"
+                           + (f" · {_pv} pivot" if _pv else ""))
+                    try:
+                        send_telegram_message_sync(msg, force=True)
+                    except Exception:
+                        pass
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
 def _notify_level_touches():
     """🎯 Telegram note when spot reaches a key level within ±5 points.
 
@@ -15213,6 +15286,14 @@ def _render_main_analyzer():
              "is sent once; what already exists when the app loads is not "
              "re-announced.")
 
+    # ── 📍 option LTP reaching its HVP line (±5) → Telegram ────────────
+    st.session_state["_leg_hvp_touch_on"] = st.sidebar.checkbox(
+        "📍 LTP at its HVP line (±5) → Telegram", value=LEG_HVP_TOUCH_DEFAULT,
+        help="A Telegram note when the Call or Put LTP comes within ±5 points of "
+             "one of its own high-volume-point lines. Latched per line and given "
+             "a 15-minute cooldown (sleep), so a price sitting at the line does "
+             "not repeat.")
+
     # ── 🎯 spot reaching a key level (±5 pts) → Telegram ──────────────
     # War zone, either OI wall, and the ranked support / resistance. Latched per
     # level so a price loitered at alerts once. Consumed in
@@ -15932,6 +16013,10 @@ def _render_main_analyzer():
     # structure. No-op unless the sidebar toggle is on.
     try:
         _notify_chart_formations()
+    except Exception:
+        pass
+    try:
+        _notify_leg_hvp_touch()
     except Exception:
         pass
 
