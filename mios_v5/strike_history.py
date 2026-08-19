@@ -146,6 +146,15 @@ def record(store: Any, df_summary: Any = None, spot: Any = None,
 
     snaps.append({"t": at, "strikes": [f"{k:.0f}" for k in strikes],
                   "rows": rows})
+    # One session only: drop any snapshot from a previous IST trading day, so the
+    # per-strike chart never draws yesterday's series alongside today's. The
+    # store is process-wide (cache_resource), so without this it accumulates
+    # across days until CAP ages the old points out. IST = UTC+5:30 → the day
+    # bucket is floor((epoch + 19800) / 86400).
+    _ist_day = lambda t: int(((_f(t) or 0) + 19800) // 86400)
+    _today = _ist_day(at)
+    if snaps and _ist_day(snaps[0].get("t")) != _today:
+        snaps[:] = [s for s in snaps if _ist_day(s.get("t")) == _today]
     if len(snaps) > CAP:
         del snaps[:len(snaps) - CAP]
     return True
