@@ -106,6 +106,62 @@ def test_overlay_is_default_off_and_wired_to_all_three_charts():
     assert "price_action=bool(st.session_state.get(\"_apa_on\", False))" in d6
     src = (_ROOT / "vob_minimal.py").read_text()
     assert "_apa_on" in src and "value=False" in src
-    # the toggle sits on the price-action checkbox specifically
-    tree = ast.parse(src)
     assert "Advanced Price Action on charts" in src
+
+
+def test_geometric_patterns_are_not_drawn_on_the_chart():
+    # the overlay no longer annotates patterns on the chart (moved to a table)
+    ov = (_ROOT / "mios_v5" / "ui" / "price_action_overlay.py").read_text()
+    assert "add_annotation" not in ov
+    # the dashboard renders the pattern TABLE below the charts, gated by the flag
+    d6 = (_ROOT / "mios_v5" / "ui" / "dashboard_v6.py").read_text()
+    assert "price_action_table" in d6 and "_apa_on" in d6
+
+
+# ── the geometric-pattern tabulation (below the charts, with bias) ─────
+
+def test_pattern_bias_maps_each_type_to_a_direction():
+    from mios_v5.ui.price_action_table import pattern_bias
+    assert pattern_bias("HEAD_AND_SHOULDERS")["emoji"] == "🔴"
+    assert "Bearish" in pattern_bias("HEAD_AND_SHOULDERS")["bias"]
+    assert pattern_bias("INVERSE_HEAD_AND_SHOULDERS")["emoji"] == "🟢"
+    assert pattern_bias("ASCENDING_TRIANGLE")["emoji"] == "🟢"
+    assert pattern_bias("DESCENDING_TRIANGLE")["emoji"] == "🔴"
+    assert pattern_bias("SYMMETRICAL_TRIANGLE")["emoji"] == "⚪"
+    assert pattern_bias("BULL_FLAG")["emoji"] == "🟢"
+    assert pattern_bias("BEAR_PENNANT")["emoji"] == "🔴"
+
+
+def test_rows_for_flattens_patterns_with_bias_and_bars():
+    from mios_v5.ui.price_action_table import rows_for
+    analysis = {"patterns": {
+        "head_and_shoulders": [{"type": "HEAD_AND_SHOULDERS",
+                                "left_shoulder": {"index": 3},
+                                "right_shoulder": {"index": 9}}],
+        "triangles": [{"type": "ASCENDING_TRIANGLE",
+                       "lower_trendline": [{"index": 2}, {"index": 8}]}],
+        "inverse_head_and_shoulders": [], "flags_pennants": []}}
+    rows = rows_for(analysis)
+    assert len(rows) == 2
+    hs = next(r for r in rows if r["type"] == "HEAD_AND_SHOULDERS")
+    assert hs["emoji"] == "🔴" and hs["bars"] == (3, 9)
+    tri = next(r for r in rows if r["type"] == "ASCENDING_TRIANGLE")
+    assert tri["emoji"] == "🟢" and tri["bars"] == (2, 8)
+
+
+def test_table_html_groups_by_chart_and_is_empty_when_no_patterns():
+    from mios_v5.ui.price_action_table import table_html
+    rows = [{"type": "BULL_FLAG", "label": "Bull Flag",
+             "bias": "Bullish continuation", "emoji": "🟢", "bars": (5, 25)}]
+    html = table_html({"NIFTY": rows, "CALL": [], "PUT": []})
+    assert "Geometric patterns" in html and "Bull Flag" in html
+    assert "NIFTY" in html and "Bullish continuation" in html
+    assert table_html({"NIFTY": [], "CALL": [], "PUT": []}) == ""
+
+
+def test_build_table_runs_analysis_on_frames_and_is_safe():
+    from mios_v5.ui.price_action_table import build_table
+    # a real frame either yields a table string or "" — never raises
+    out = build_table(_frame(), None, None)
+    assert isinstance(out, str)
+    assert build_table(None, None, None) == ""

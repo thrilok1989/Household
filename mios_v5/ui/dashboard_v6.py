@@ -2645,6 +2645,16 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
             if figs.get("PUT") is not None:
                 st.plotly_chart(figs["PUT"], use_container_width=True,
                                 key="terminal_put", config=FS_CHART_CONFIG)
+        # 📐 Geometric patterns as a TABLE below the charts (not drawn on them),
+        # each with its bias — only when the Advanced Price Action toggle is on.
+        if st.session_state.get("_apa_on", False):
+            try:
+                from .price_action_table import build_table as _pa_table
+                _pah = _pa_table(nifty, call_df, put_df)
+                if _pah:
+                    st.markdown(_pah, unsafe_allow_html=True)
+            except Exception:
+                pass
         if notes:
             # name the series AND why — "No candle series yet for: NIFTY" on a
             # screen where the two option legs drew fine tells you nothing

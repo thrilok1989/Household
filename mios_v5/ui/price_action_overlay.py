@@ -1,8 +1,10 @@
 """Advanced price-action overlay for the terminal charts.
 
 Draws the `mios_v5.advanced_price_action` read onto a plotly figure: swing
-highs/lows, the recent BOS / CHOCH breaks, the Fibonacci retracement band, and a
-compact note of any geometric pattern detected. Opt-in — the caller only calls
+highs/lows, the recent BOS / CHOCH breaks, and the Fibonacci retracement band.
+Geometric patterns are NOT drawn here — they read as clutter on the chart, so
+they are tabulated below the charts with their bias (`price_action_table`).
+Opt-in — the caller only calls
 this when the trader has enabled the indicator, and it is silent on any failure
 (same rule as `profile_overlay` / `volume_points_overlay`): a chart that cannot
 draw the overlay still draws the candles.
@@ -88,23 +90,7 @@ def draw(fig, df, row: int = 1, col: int = 1, swing_length: int = 5) -> None:
                     hoverinfo="skip",
                     marker=dict(symbol="x-thin", size=7, color=colour,
                                 line=dict(width=1, color=colour))), row=row, col=col)
-
-        # ── one compact note listing any geometric pattern ──
-        pats = a.get("patterns") or {}
-        names = []
-        for grp, label in (("head_and_shoulders", "H&S"),
-                           ("inverse_head_and_shoulders", "Inv H&S"),
-                           ("triangles", None), ("flags_pennants", None)):
-            for p in (pats.get(grp) or []):
-                nm = label or str(p.get("type", "")).replace("_", " ").title()
-                if nm and nm not in names:
-                    names.append(nm)
-        if names:
-            fig.add_annotation(
-                xref="x domain", yref="y domain", x=0.01, y=0.99,
-                xanchor="left", yanchor="top", showarrow=False,
-                text="📐 " + " · ".join(names[:3]),
-                font=dict(size=9, color="#dbe4ee"),
-                bgcolor="rgba(20,28,40,0.6)", row=row, col=col)
+        # Geometric patterns are NOT drawn on the chart (too cluttered); they are
+        # tabulated below the charts with their bias — see `price_action_table`.
     except Exception:
         return  # silent by design — the candles still draw
