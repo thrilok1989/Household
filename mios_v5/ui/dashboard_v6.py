@@ -2626,7 +2626,8 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
             put_zones=_leg_store(st, "_atm_leg_vob_volume", pe),
             nifty_profile=_nifty_prof,
             call_profile=_call_prof,
-            put_profile=_put_prof)
+            put_profile=_put_prof,
+            price_action=bool(st.session_state.get("_apa_on", False)))
         # NIFTY wide on the left, the two legs stacked on the right — the same
         # 60/40 proportions the combined terminal used, so the page still reads
         # as the terminal it replaces. Each `plotly_chart` gets the shared
