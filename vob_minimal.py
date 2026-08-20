@@ -1817,6 +1817,36 @@ def get_dhan_expiry_list(underlying_scrip: int, underlying_seg: str, max_retries
                       {"UnderlyingScrip": underlying_scrip, "UnderlyingSeg": underlying_seg},
                       max_retries)
 
+#: How long to wait on the scrip master before giving up. `pd.read_csv(url)`
+#: accepts no timeout at all, so a stalled connection blocks forever — which is
+#: how the app came to sit on its loading screen. (connect, read) seconds.
+SCRIP_MASTER_TIMEOUT = (10, 90)
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _scrip_master():
+    """Dhan's scrip master as one cached frame, fetched at most once per 6h.
+
+    ~26 MB and ~212k rows. Three separate functions used to each call
+    `pd.read_csv(url)` on it, so a cold start paid the download once per
+    caller. They now share this one frame.
+
+    Fetched through `requests` rather than handing the URL to pandas purely so
+    it can carry a timeout: an untimed read hangs the render thread with no
+    error and no way to tell it apart from a dead app.
+    """
+    try:
+        resp = requests.get("https://images.dhan.co/api-data/api-scrip-master.csv",
+                            timeout=SCRIP_MASTER_TIMEOUT)
+        resp.raise_for_status()
+        df = pd.read_csv(io.BytesIO(resp.content), low_memory=False)
+        df.columns = [c.strip().upper() for c in df.columns]
+        return df
+    except Exception as e:
+        st.session_state['_scrip_master_err'] = f"scrip master: {str(e)[:140]}"
+        return None
+
+
 @st.cache_data(ttl=21600)
 def resolve_index_security_id(trading_symbol: str, exchange: str):
     """Resolve an INDEX security id from Dhan's scrip master CSV — the same
@@ -1831,9 +1861,9 @@ def resolve_index_security_id(trading_symbol: str, exchange: str):
     Returns an int security id, or None when the lookup fails.
     """
     try:
-        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
-        df = pd.read_csv(url, low_memory=False)
-        df.columns = [c.strip().upper() for c in df.columns]
+        df = _scrip_master()
+        if df is None:
+            return None
         sym_col = next((c for c in df.columns if 'TRADING_SYMBOL' in c), None)
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c and 'NAME' in c), None)
         secid_col = next((c for c in df.columns if 'SECURITY_ID' in c), None)
@@ -1856,9 +1886,9 @@ def get_nifty_futures_security_id():
     """Resolve the current/nearest-month NIFTY FUTIDX security id from Dhan's
     scrip master CSV. Cached 6h; auto-rolls to the next month's contract."""
     try:
-        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
-        df = pd.read_csv(url, low_memory=False)
-        df.columns = [c.strip().upper() for c in df.columns]
+        df = _scrip_master()
+        if df is None:
+            return None
         sym_col = next((c for c in df.columns if 'TRADING_SYMBOL' in c), None)
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c and 'NAME' in c), None)
         secid_col = next((c for c in df.columns if 'SECURITY_ID' in c), None)
@@ -1903,9 +1933,9 @@ def get_nifty_option_security_ids(expiry: str, symbol: str = "NIFTY"):
     NIFTY so existing callers are unchanged.
     """
     try:
-        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
-        df = pd.read_csv(url, low_memory=False)
-        df.columns = [c.strip().upper() for c in df.columns]
+        df = _scrip_master()
+        if df is None:
+            return {}
         sym_col = next((c for c in df.columns if 'TRADING_SYMBOL' in c), None)
         inst_col = next((c for c in df.columns if 'INSTRUMENT' in c and 'NAME' in c), None)
         secid_col = next((c for c in df.columns if 'SECURITY_ID' in c), None)
@@ -15773,20 +15803,28 @@ def _render_main_analyzer():
     # Set instrument context for the render cycle. Every spec below is a value
     # read off Dhan's scrip master, not an assumption — an invented SENSEX id
     # is what made the chart silently keep drawing NIFTY.
+    # ⏱️ NOTHING HERE MAY TOUCH THE NETWORK. This runs while the sidebar is
+    # being built, before a single pixel of the page is drawn, so anything slow
+    # here is indistinguishable from the app failing to start. It previously
+    # called `resolve_index_security_id`, which reads Dhan's 26 MB scrip master
+    # — ~5s on a fast link, far worse on a slow one, and `pd.read_csv(url)`
+    # takes no timeout, so a stalled connection hung the app on its loading
+    # screen indefinitely. The two index ids are fixed values that Dhan does not
+    # reissue, and they are pinned by tests, so they are used directly. The
+    # scrip master is still the source for OPTION ids, which genuinely change
+    # every expiry — that lookup happens later, off the first-paint path.
     try:
         from mios_v5.instrument_registry import InstrumentContext
         if _selected_instrument == "SENSEX":
-            _sec_id = resolve_index_security_id("SENSEX", "BSE") or 51
             _ctx = InstrumentContext(
-                symbol="SENSEX", security_id=_sec_id, exchange_segment="IDX_I",
+                symbol="SENSEX", security_id=51, exchange_segment="IDX_I",
                 contract_multiplier=20.0,   # SEM_LOT_UNITS for SENSEX OPTIDX
                 strike_step=100,            # observed gap across SENSEX strikes
                 current_expiry="", expiry_list=[],
                 atm_range=100, lot_size=20, tick_size=0.05)
         else:
-            _sec_id = resolve_index_security_id("NIFTY", "NSE") or 13
             _ctx = InstrumentContext(
-                symbol="NIFTY", security_id=_sec_id, exchange_segment="IDX_I",
+                symbol="NIFTY", security_id=13, exchange_segment="IDX_I",
                 contract_multiplier=65.0,   # SEM_LOT_UNITS for NIFTY OPTIDX
                 strike_step=50,             # observed gap across NIFTY strikes
                 current_expiry="", expiry_list=[],
