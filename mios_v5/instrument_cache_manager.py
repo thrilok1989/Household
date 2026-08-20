@@ -133,9 +133,10 @@ def mark_instrument_changed(session_state, new_instrument: str):
     invalidate_instrument_cache(session_state, new_instrument)
 
 
-#: The instrument the app lands on before anything is selected. SENSEX, so
-#: the app opens on the expiry being traded rather than needing a click first.
-DEFAULT_INSTRUMENT = "SENSEX"
+#: The instrument the app lands on before anything is selected. NIFTY, so a
+#: fresh session opens on the same index every existing alert and engine
+#: refers to; SENSEX is one click away on the sidebar toggle.
+DEFAULT_INSTRUMENT = "NIFTY"
 
 
 def get_current_instrument(session_state) -> str:
