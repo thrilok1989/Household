@@ -25,6 +25,7 @@ from indicators.money_flow_profile import calculate_money_flow_profile
 from mios_v5.story_integration import get_story_task, process_market_event
 from mios_v5.market_events import build_event, EventType, EventSeverity
 from mios_v5.clock import to_ist as _to_ist
+from mios_v5.higher_greeks import higher_greeks as _higher_greeks
 
 
 
@@ -700,12 +701,45 @@ POC_SHIFT_ALERTS_DEFAULT = False
 #    replayed. `_notify_chart_formations` owns the memory and the send.
 FORMATION_ALERTS_DEFAULT = True
 
+# ── Leg LTP → HVP-line touch alert ─────────────────────────────────────
+# Telegram when an option LTP (call or put) comes within ±5 of one of ITS OWN
+# high-volume-point lines. Latched per line + a cooldown ("sleep") so a price
+# loitering at the line does not repeat. Reuses `mios_v5.level_touch`.
+# OFF by default — opt in via the sidebar.
+LEG_HVP_TOUCH_DEFAULT = False
+LEG_HVP_BAND = 5.0            # ±5 points of the LTP, as asked
+LEG_HVP_COOLDOWN_S = 900.0    # the "sleeping facility" — 15 min per line
+
 # ── 🎯 Level-touch alerts → Telegram: spot reaching a key level within ±5 pts —
 #    the war zone, either OI wall, and the ranked support / resistance. ON by
 #    default (explicitly requested). Latched per level so a level price loiters
 #    at is alerted once, not every 20-second refresh — see
 #    `mios_v5.level_touch.evaluate` and `_notify_level_touches`.
 LEVEL_TOUCH_DEFAULT = True
+
+# ── Level Acceptance / Rejection alerts ────────────────────────────────
+# Telegram note when a level RESOLVES (accepted above/below, or rejected) — the
+# owner asked for it ON. Edge-triggered (once, on the transition) and per-zone
+# cooldown-throttled so a chopping level cannot repeat-spam.
+LEVEL_ACCEPT_ALERTS_DEFAULT = True
+#: seconds before the SAME zone may alert again — matches the level-touch sleep.
+LEVEL_ACCEPT_COOLDOWN_S = 900.0
+
+# ── Confluence entry alert (4-signal alignment) ────────────────────────
+# Telegram when NIFTY is at a level, the ATM-strike verdict is Strong Bull/Bear
+# AGREEING with the level, the trade-side leg's LTP is at its support/session-low,
+# and that side has the greater premium energy. Reuses existing engine outputs —
+# no new engine. Latched per setup + cooldown so it fires once, not every cycle.
+CONFLUENCE_ALERTS_DEFAULT = True
+CONFLUENCE_COOLDOWN_S = 900.0
+
+# ── the two sub-alerts the owner paused ────────────────────────────────
+# The ranked support/resistance TOUCH (a sub-alert of level-touch) and the VOB
+# FORMATION alert were both too noisy, so they are OFF by default. The war-zone
+# and OI-wall touches and the HVP formation alert are unaffected. Flip either to
+# True (or tick its sidebar box) to bring it back.
+SR_TOUCH_ALERTS_DEFAULT = False
+VOB_FORMATION_ALERTS_DEFAULT = False
 _RETIRED_ALERT_CLASSES = frozenset({
     'leg_entry', 'confirmed_entry', 'entry_result', 'all_aligned_entry',
     'sr_confluence', 'fresh_entry', 'bias_enter',
@@ -1248,6 +1282,36 @@ def send_telegram_message_sync(message, force=False):
 
 
 
+def _trip_dhan_backoff():
+    """Trip the global Dhan rate-limit back-off, ESCALATING. Returns the pause in
+    seconds. The first 429 pauses only briefly so the NIFTY chart and spot
+    recover fast; consecutive 429s double up to the historical 90s cap so
+    sustained DH-904 limiting still relieves. `_clear_dhan_backoff` on any
+    success resets the ladder, so an isolated blip only ever gets the short
+    first pause."""
+    from mios_v5.rate_backoff import backoff_seconds as _bs, BASE_S, CAP_S
+    _ist = pytz.timezone('Asia/Kolkata')
+    _now = datetime.now(_ist)
+    _until = st.session_state.get('_dhan_429_until')
+    # A burst of 429s within ONE cycle is a single event — don't re-escalate on
+    # every leg. Only a 429 that lands AFTER the last window expired means the
+    # limiting persisted, so only that bumps the ladder.
+    if _until and _now < _until:
+        return _bs(int(st.session_state.get('_dhan_429_count', 1) or 1), BASE_S, CAP_S)
+    n = int(st.session_state.get('_dhan_429_count', 0) or 0) + 1
+    st.session_state['_dhan_429_count'] = n
+    secs = _bs(n, BASE_S, CAP_S)
+    st.session_state['_dhan_429_until'] = _now + timedelta(seconds=secs)
+    return secs
+
+
+def _clear_dhan_backoff():
+    """A clean fetch clears the escalation ladder, so the next isolated 429 pays
+    only the short first pause rather than inheriting an old streak."""
+    if st.session_state.get('_dhan_429_count'):
+        st.session_state['_dhan_429_count'] = 0
+
+
 class DhanAPI:
     def __init__(self, access_token, client_id):
         self.access_token = access_token.strip() if access_token else ""
@@ -1266,6 +1330,7 @@ class DhanAPI:
         hammering Dhan and serve cached data instead — and suppress the
         repeated error spam."""
         if response.status_code == 200:
+            _clear_dhan_backoff()        # a clean fetch resets the escalation
             return response.json()
         if response.status_code == 401:
             st.session_state['_dhan_token_expired'] = True
@@ -1274,12 +1339,13 @@ class DhanAPI:
             _ist = pytz.timezone('Asia/Kolkata')
             _now = datetime.now(_ist)
             # Global back-off window — _opt_analyze and other callers check this.
-            st.session_state['_dhan_429_until'] = _now + timedelta(seconds=90)
+            # Escalating: a transient blip clears fast; sustained 429s back off hard.
+            _secs = _trip_dhan_backoff()
             # Notify at most once per 30s instead of spamming on every leg.
             _last = st.session_state.get('_dhan_429_notified')
             if not _last or (_now - _last).total_seconds() > 30:
                 st.session_state['_dhan_429_notified'] = _now
-                st.warning("⏸️ Dhan rate-limited (DH-904). Throttling for 90s — "
+                st.warning(f"⏸️ Dhan rate-limited (DH-904). Throttling for {_secs:.0f}s — "
                            "showing cached data until it clears.")
         else:
             st.error(f"API Error: {response.status_code} - {response.text}")
@@ -1574,9 +1640,7 @@ def _dhan_post(url, payload, max_retries=4):
                 # behind its own retry ladder. `_dhan_429_until` is the flag
                 # DhanAPI._handle_response already sets and every fetch checks.
                 try:
-                    st.session_state['_dhan_429_until'] = (
-                        datetime.now(pytz.timezone('Asia/Kolkata'))
-                        + timedelta(seconds=90))
+                    _trip_dhan_backoff()
                 except Exception:
                     pass
                 if attempt < max_retries:
@@ -2321,6 +2385,15 @@ def calculate_vanna_charm_exposure(df_summary, spot_price, contract_multiplier=2
         net_charm = (Charm_CE*OI_CE + Charm_PE*OI_PE) * mult
     Context only (informational): net vanna hints how dealer hedging flows react
     to an IV move; net charm hints the delta-decay / pin drift into expiry.
+
+    `net_vega` is added on the same OI-weighted basis when the chain carries the
+    per-strike Vega columns (`Vega_CE`/`Vega_PE`) — the book's volatility
+    sensitivity as ONE magnitude, so the Greek-behaviour layer's "Vol sensitivity"
+    read can stop saying "Not reported". Vega is a separate column from the
+    Vanna/Charm this function requires, so it is OPTIONAL: `net_vega` is `None`
+    when the columns are absent rather than 0 (an unmeasured force is not a
+    balanced one).
+
     Returns dict with a per-strike frame and totals, or None."""
     if df_summary is None or getattr(df_summary, 'empty', True):
         return None
@@ -2329,7 +2402,15 @@ def calculate_vanna_charm_exposure(df_summary, spot_price, contract_multiplier=2
                 'openInterest_CE', 'openInterest_PE'}
         if not need <= set(df_summary.columns):
             return None
+        has_vega = {'Vega_CE', 'Vega_PE'} <= set(df_summary.columns)
+        cols = set(df_summary.columns)
+        # third-order greeks, each optional & independent — a net is None (not 0)
+        # unless BOTH legs of that greek are present, same rule as Vega
+        higher = ('Vomma', 'Speed', 'Zomma', 'Veta', 'Color')
+        has_higher = {g: {f'{g}_CE', f'{g}_PE'} <= cols for g in higher}
         rows = []
+        vega_sum = 0.0
+        higher_sum = {g: 0.0 for g in higher}
         for _, row in df_summary.iterrows():
             oi_ce = float(row.get('openInterest_CE', 0) or 0)
             oi_pe = float(row.get('openInterest_PE', 0) or 0)
@@ -2339,10 +2420,23 @@ def calculate_vanna_charm_exposure(df_summary, spot_price, contract_multiplier=2
                   + float(row.get('Charm_PE', 0) or 0) * oi_pe) * contract_multiplier / 1e5
             rows.append({'Strike': row.get('Strike', 0),
                          'Net_Vanna': round(nv, 2), 'Net_Charm': round(nc, 2)})
+            if has_vega:
+                vega_sum += (float(row.get('Vega_CE', 0) or 0) * oi_ce
+                             + float(row.get('Vega_PE', 0) or 0) * oi_pe) \
+                    * contract_multiplier / 1e5
+            for g in higher:
+                if has_higher[g]:
+                    higher_sum[g] += (float(row.get(f'{g}_CE', 0) or 0) * oi_ce
+                                      + float(row.get(f'{g}_PE', 0) or 0) * oi_pe) \
+                        * contract_multiplier / 1e5
         vc_df = pd.DataFrame(rows)
-        return {'vc_df': vc_df,
-                'net_vanna': round(float(vc_df['Net_Vanna'].sum()), 2),
-                'net_charm': round(float(vc_df['Net_Charm'].sum()), 2)}
+        out = {'vc_df': vc_df,
+               'net_vanna': round(float(vc_df['Net_Vanna'].sum()), 2),
+               'net_charm': round(float(vc_df['Net_Charm'].sum()), 2),
+               'net_vega': round(vega_sum, 2) if has_vega else None}
+        for g in higher:
+            out[f'net_{g.lower()}'] = round(higher_sum[g], 2) if has_higher[g] else None
+        return out
     except Exception:
         return None
 
@@ -3816,6 +3910,13 @@ def analyze_option_chain(selected_expiry=None, pivot_data=None, vob_data=None):
         _vc_pe = calculate_vanna_charm('PE', underlying, strike, T, r, iv_pe / 100)
         df.at[idx, 'Vanna_CE'], df.at[idx, 'Charm_CE'] = _vc_ce
         df.at[idx, 'Vanna_PE'], df.at[idx, 'Charm_PE'] = _vc_pe
+        # Third-order Greeks (vomma/speed/zomma/veta/color) — the producer the
+        # Greek-behaviour layer needs so it can stop reporting them "Not reported".
+        _hg_ce = _higher_greeks(underlying, strike, T, r, iv_ce / 100)
+        _hg_pe = _higher_greeks(underlying, strike, T, r, iv_pe / 100)
+        for _g in ('vomma', 'speed', 'zomma', 'veta', 'color'):
+            df.at[idx, f'{_g.capitalize()}_CE'] = _hg_ce[_g]
+            df.at[idx, f'{_g.capitalize()}_PE'] = _hg_pe[_g]
 
     atm_strike = min(df['strikePrice'], key=lambda x: abs(x - underlying))
 
@@ -3924,6 +4025,10 @@ def analyze_option_chain(selected_expiry=None, pivot_data=None, vob_data=None):
                   # carry the 2nd-order greeks so the Vanna/Charm exposure
                   # aggregation (needs these on df_summary) can compute + show
                   'Vanna_CE', 'Vanna_PE', 'Charm_CE', 'Charm_PE',
+                  # 3rd-order greeks — carried the same way so their net-exposure
+                  # aggregation can compute for the Greek-behaviour layer
+                  'Vomma_CE', 'Vomma_PE', 'Speed_CE', 'Speed_PE', 'Zomma_CE', 'Zomma_PE',
+                  'Veta_CE', 'Veta_PE', 'Color_CE', 'Color_PE',
                   'impliedVolatility_CE', 'impliedVolatility_PE', 'bidQty_CE', 'bidQty_PE', 'askQty_CE', 'askQty_PE']
     merge_cols = [col for col in merge_cols if col in df.columns]
 
@@ -7384,7 +7489,11 @@ def compute_market_picture(spot_price, df, option_data, cat_scores=None):
         if _ds_v is not None and not getattr(_ds_v, 'empty', True):
             _vc = calculate_vanna_charm_exposure(_ds_v, _u_v)
             if _vc:
-                vc_exp = {'net_vanna': _vc['net_vanna'], 'net_charm': _vc['net_charm']}
+                vc_exp = {'net_vanna': _vc['net_vanna'], 'net_charm': _vc['net_charm'],
+                          'net_vega': _vc.get('net_vega'),
+                          'net_vomma': _vc.get('net_vomma'), 'net_speed': _vc.get('net_speed'),
+                          'net_zomma': _vc.get('net_zomma'), 'net_veta': _vc.get('net_veta'),
+                          'net_color': _vc.get('net_color')}
     except Exception:
         pass
 
@@ -8325,6 +8434,20 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
         + " · ".join(mp['reasons'][:6]) + "</div></div>",
         unsafe_allow_html=True,
     )
+    # ── detailed intelligence moved off the compact Trade Card (DISPLAY ONLY) ──
+    # The Level-Acceptance evidence, the Dealer-Magnet detail and the full Greek-
+    # Behaviour rows live here, in the investigation layer, in that order. Built
+    # once by the Trade Card renderer and stashed in `_mp_detail`; rendered here
+    # so the same long text is never drawn twice. Nothing is recomputed.
+    try:
+        _mpd = st.session_state.get('_mp_detail') or {}
+        _detail_html = (str(_mpd.get('level_acceptance') or '')
+                        + str(_mpd.get('dealer_magnet') or '')
+                        + str(_mpd.get('greek_behaviour') or ''))
+        if _detail_html.strip():
+            st.markdown(_detail_html, unsafe_allow_html=True)
+    except Exception:
+        pass
     # 🧠 AI Market Story — the same MIOS V5 Stage-36 narrative shown in the
     # Analysis & Audit panel, surfaced here under the Market Picture so the plain-
     # language read sits with the levels it describes.
@@ -11252,17 +11375,197 @@ def _notify_chart_formations():
                 except Exception:
                     pass
 
+        # VOB formation was paused by the owner (too noisy); HVP stays on. The
+        # seeding still runs when it is re-enabled — `diff` seeds on first sight
+        # regardless — so turning it back on does not replay the day's blocks.
+        _vob_on = st.session_state.get('_vob_formation_on',
+                                       VOB_FORMATION_ALERTS_DEFAULT)
         for chart in _fa.CHARTS:
             prof = profiles.get(chart) or {}
             dp = 0 if chart == 'NIFTY' else 2
             _emit('hvp', chart, prof.get('hv_points'),
                   _fa.hvp_signature, _fa.hvp_message, dp)
-            if chart in ('CALL', 'PUT'):
+            if _vob_on and chart in ('CALL', 'PUT'):
                 zones = vob_store.get(labels.get(chart)) or []
                 _emit('vob', chart, zones,
                       _fa.vob_signature, _fa.vob_message, dp)
     except Exception:
         pass  # an alert must never take the cycle down
+
+
+def _notify_leg_hvp_touch():
+    """📍 Telegram when an option LTP comes within ±5 of one of ITS OWN
+    high-volume-point (HVP) lines — call or put.
+
+    Reads what the terminal already published: each leg's HVP lines from
+    `_leg_profiles[side].hv_points` (owner: `volume_points.high_volume_pivots`)
+    and the leg's LTP from the last close of the cached leg frame. Nothing is
+    recomputed.
+
+    Anti-spam is the level-touch rule reused verbatim (`mios_v5.level_touch`):
+    each HVP line latches — it alerts once when the LTP enters the ±band and
+    re-arms only after the LTP leaves by more than the band — and a per-line
+    cooldown ("sleeping facility") suppresses any repeat within the window even
+    if the LTP keeps crossing the line. Opt-out via `_leg_hvp_touch_on`.
+    """
+    try:
+        if not st.session_state.get('_leg_hvp_touch_on', LEG_HVP_TOUCH_DEFAULT):
+            return
+        profiles = st.session_state.get('_leg_profiles') or {}
+        if not profiles:
+            return
+        from mios_v5 import bias_ball as _bb
+        from mios_v5 import level_touch as _lt
+        from mios_v5.ui.terminal_chart import atm_legs as _atm_legs
+        call_df, put_df, _ce, _pe = _atm_legs(st.session_state.get('_atm_leg_dfs'))
+        legs = {'CALL': call_df, 'PUT': put_df}
+        labels = {'CALL': profiles.get('call_label') or 'ATM Call',
+                  'PUT': profiles.get('put_label') or 'ATM Put'}
+        states = st.session_state.setdefault('_leg_hvp_touch_state', {})
+        now = time.time()
+        for side in ('CALL', 'PUT'):
+            df_l = legs.get(side)
+            try:
+                ltp = (float(df_l['close'].iloc[-1])
+                       if df_l is not None and not getattr(df_l, 'empty', True)
+                       else None)
+            except Exception:
+                ltp = None
+            if ltp is None:
+                continue
+            for p in ((profiles.get(side) or {}).get('hv_points') or ()):
+                if not isinstance(p, dict):
+                    continue
+                try:
+                    hv = float(p.get('price'))
+                except (TypeError, ValueError):
+                    continue
+                key = f"{side}:{round(hv, 1)}"
+                alert, new_state = _lt.evaluate(
+                    hv, ltp, states.get(key), band=LEG_HVP_BAND,
+                    rearm=LEG_HVP_BAND * 2, cooldown_s=LEG_HVP_COOLDOWN_S, now=now)
+                states[key] = new_state
+                if alert:
+                    _pv = str(p.get('side', '') or '').title()
+                    # NIFTY-bias ball: a HIGH pivot is resistance, a LOW is
+                    # support, then the leg rule inverts for PUT (bias_ball owns
+                    # that one rule) — so the ball reads NIFTY's direction.
+                    _bias = _bb.hvp_bias(side, p.get('side'))
+                    msg = (f"📍 <b>{labels[side]} LTP at HVP line</b>\n"
+                           f"LTP ₹{ltp:,.2f} · HVP ₹{hv:,.2f} "
+                           f"({ltp - hv:+.2f} pts)"
+                           + (f" · {_pv} pivot" if _pv else ""))
+                    msg = _bb.prefix(_bias, msg)
+                    try:
+                        send_telegram_message_sync(msg, force=True)
+                    except Exception:
+                        pass
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
+def _gather_market_snapshot():
+    """Collect everything the app has ALREADY computed into one flat dict for
+    `mios_v5.market_snapshot.build`. Every read is defensive — a missing producer
+    just drops its field, and the formatter skips empty sections."""
+    def _n(v):
+        try:
+            f = float(v)
+            return None if f != f else f
+        except (TypeError, ValueError):
+            return None
+
+    def _wall(x):
+        return x[0] if isinstance(x, (list, tuple)) and x else None
+
+    d = {}
+    ss = st.session_state
+    d['spot'] = _n(ss.get('_nifty_spot_live'))
+    d['time'] = (ss.get('_opt_data_ts') or '')[:19].replace('T', ' ') or None
+
+    mp = ss.get('_market_picture') or {}
+    d['regime'] = mp.get('regime')
+    d['p_up'], d['p_down'], d['p_side'] = mp.get('p_up'), mp.get('p_down'), mp.get('p_side')
+    d['vwap'] = _n(mp.get('vwap'))
+    d['oi_ce_wall'] = _n(_wall(mp.get('oi_ceiling')))
+    d['oi_pe_wall'] = _n(_wall(mp.get('oi_floor')))
+    d['magnet'] = _n(_wall(mp.get('oi_pin')))
+    _ab = mp.get('atm_bias') or {}
+    d['atm_verdict'] = _ab.get('verdict')
+    d['atm_score'] = (f"{_ab['score']:+.1f}" if _n(_ab.get('score')) is not None else None)
+    _dex = mp.get('dex_bias')
+    d['dex'] = (_dex.get('label') if isinstance(_dex, dict) else _dex)
+    _sk = mp.get('skew_bias')
+    d['skew'] = (_sk.get('label') if isinstance(_sk, dict) else _sk)
+    _doi = mp.get('doi_bias')
+    d['doi_bias'] = (_doi.get('label') if isinstance(_doi, dict) else _doi)
+    for _k, _src in (('global', 'global_bias'), ('news', 'news_bias'),
+                     ('commodity', 'commodity_bias')):
+        _v = mp.get(_src)
+        d[_k] = (_v.get('label') or _v.get('regime') if isinstance(_v, dict) else _v)
+    _vc = mp.get('vc_exp') or {}
+    d['net_vanna'] = (f"vanna {_vc['net_vanna']:+,.0f}" if _n(_vc.get('net_vanna')) is not None else None)
+    d['net_charm'] = (f"charm {_vc['net_charm']:+,.0f}" if _n(_vc.get('net_charm')) is not None else None)
+    d['net_vega'] = (f"vega {_vc['net_vega']:+,.0f}" if _n(_vc.get('net_vega')) is not None else None)
+
+    gx = ss.get('_gex_data') or {}
+    d['total_gex'] = (f"{gx['total_gex']:+,.0f}" if _n(gx.get('total_gex')) is not None else None)
+    d['gamma_flip'] = _n(gx.get('gamma_flip_level'))
+    d['gex_signal'] = gx.get('gex_signal')
+
+    mf = ss.get('_money_flow_data') or {}
+    d['poc'] = _n(mf.get('poc_price'))
+    d['vah'] = _n(mf.get('value_area_high'))
+    d['val'] = _n(mf.get('value_area_low'))
+
+    try:
+        from mios_v5.final_read import build_final_read
+        fr = build_final_read(ss.get('_mios_state')) or {}
+        d['support'] = _n(fr.get('strong_support'))
+        d['resistance'] = _n(fr.get('strong_resistance'))
+        _bz = fr.get('battle_zone') or {}
+        d['war_zone'] = _n(_bz.get('price')) if isinstance(_bz, dict) else None
+        d['expected_winner'] = fr.get('expected_winner')
+    except Exception:
+        pass
+
+    fmr = ss.get('_full_market_read') or {}
+    d['call_mode'], d['put_mode'] = fmr.get('call_mode'), fmr.get('put_mode')
+    d['call_strength'], d['put_strength'] = fmr.get('call_strength'), fmr.get('put_strength')
+    d['breakout'], d['rejection'] = fmr.get('breakout'), fmr.get('breakdown')
+
+    # level-acceptance observed states, from the strip's last read
+    try:
+        _zones = ss.get('_la_zones_latest') or []
+        _la = []
+        for z in _zones:
+            _obs = str(z.get('observed') or '').replace('_', ' ')
+            _pz = _n(z.get('price'))
+            if _obs and _pz is not None:
+                _la.append(f"₹{_pz:,.0f} {_obs}")
+        d['level_acceptance'] = _la or None
+    except Exception:
+        pass
+
+    # greek behaviour headline, if the strip published one
+    try:
+        _gbh = ss.get('_greek_behaviour_synth')
+        if _gbh:
+            d['greek_behaviour'] = _gbh
+    except Exception:
+        pass
+    return d
+
+
+def _send_market_snapshot():
+    """Build the full snapshot and send it to Telegram (chunked). Returns the
+    number of parts sent, or 0 on failure."""
+    from mios_v5.market_snapshot import build as _snap_build, chunks as _snap_chunks
+    text = _snap_build(_gather_market_snapshot())
+    parts = _snap_chunks(text)
+    for _p in parts:
+        send_telegram_message_sync(_p, force=True)
+    return len(parts)
 
 
 def _notify_level_touches():
@@ -11337,18 +11640,24 @@ def _notify_level_touches():
             targets.append(('oi_floor', "PE OI wall (support)", '🛡', _fp,
                             [f"{_fq:.1f}L OI" if _fq else None], _bb.NEUTRAL))
 
-        _res = _num(fr.get('strong_resistance'))
-        if _res is not None:
-            targets.append(('resistance', "resistance", '🧱', _res, [],
-                            _bb.NEUTRAL))
-        _sup = _num(fr.get('strong_support'))
-        if _sup is not None:
-            targets.append(('support', "support", '🛡', _sup, [], _bb.NEUTRAL))
+        # The ranked S/R touch was paused by the owner (too noisy); the war-zone
+        # and OI-wall touches above are unaffected. Off by default — flip
+        # `SR_TOUCH_ALERTS_DEFAULT` or tick the sidebar box to bring it back.
+        if st.session_state.get('_sr_touch_on', SR_TOUCH_ALERTS_DEFAULT):
+            _res = _num(fr.get('strong_resistance'))
+            if _res is not None:
+                targets.append(('resistance', "resistance", '🧱', _res, [],
+                                _bb.NEUTRAL))
+            _sup = _num(fr.get('strong_support'))
+            if _sup is not None:
+                targets.append(('support', "support", '🛡', _sup, [],
+                                _bb.NEUTRAL))
 
         states = st.session_state.setdefault('_level_touch_state', {})
         hits = []
         for key, label, icon, price, extra, bias in targets:
-            alert, new_state = _lt.evaluate(price, spot, states.get(key))
+            alert, new_state = _lt.evaluate(price, spot, states.get(key),
+                                            now=time.time())
             states[key] = new_state
             if alert:
                 hits.append((label, price, _bb.prefix(
@@ -11358,6 +11667,135 @@ def _notify_level_touches():
                 send_telegram_message_sync(_msg, force=True)
             except Exception:
                 pass
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
+def _notify_level_acceptance():
+    """⚔️ Telegram note when a watched level RESOLVES — ACCEPTED ABOVE/BELOW or
+    REJECTED — from the context-only Level-Acceptance strip.
+
+    Fires ONLY on the transition into a resolved state (never on TESTING /
+    BREAK ATTEMPT / FAILED-BREAK-WAIT, which are in-progress), and only once:
+    `_la_alert_state` remembers each zone's last-alerted outcome, so a zone
+    sitting in ACCEPTED does not repeat, and a per-zone cooldown throttles a
+    level that keeps flipping. Zones are already battle-zone-clustered by the
+    strip, so VAH/resistance/magnet at one price send ONE message. Reuses the
+    strip's own reads — recomputes nothing. Opt-out via `_la_alerts_on`.
+    """
+    try:
+        if not st.session_state.get('_la_alerts_on', LEVEL_ACCEPT_ALERTS_DEFAULT):
+            return
+        zones = st.session_state.get('_la_zones_latest') or []
+        if not zones:
+            return
+        from mios_v5.level_acceptance import alert_text as _la_alert_text
+        states = st.session_state.setdefault('_la_alert_state', {})
+        now = time.time()
+        for z in zones:
+            if not z.get('newly_resolved'):
+                continue
+            try:
+                key = str(round(float(z.get('price'))))
+            except (TypeError, ValueError):
+                continue
+            observed = z.get('observed')
+            prev = states.get(key) or {}
+            # skip if this exact outcome already alerted, or still cooling down
+            if prev.get('observed') == observed:
+                continue
+            if now - float(prev.get('ts') or 0) < LEVEL_ACCEPT_COOLDOWN_S:
+                continue
+            msg = _la_alert_text(z)
+            if not msg:
+                continue
+            try:
+                send_telegram_message_sync(msg, force=True)
+                states[key] = {'observed': observed, 'ts': now}
+            except Exception:
+                pass
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
+def _notify_confluence_entry():
+    """⚡ Telegram when the 4-signal confluence aligns — NIFTY at a level, the
+    ATM-strike verdict Strong Bull/Bear AGREEING with the level, the trade-side
+    leg's LTP at its support/session-low, and that side's premium energy the
+    greater. Every input is an EXISTING engine output; nothing is recomputed.
+
+    Latched per (side, level) with a cooldown so one setup fires once, not every
+    ~20s cycle. Opt-out via `_confluence_alerts_on`.
+    """
+    try:
+        if not st.session_state.get('_confluence_alerts_on', CONFLUENCE_ALERTS_DEFAULT):
+            return
+        spot = st.session_state.get('_nifty_spot_live')
+        if not spot:
+            return
+        spot = float(spot)
+        from mios_v5.entry_alignment import (evaluate as _ea_eval,
+                                             leg_at_support as _ea_leg,
+                                             message as _ea_msg)
+        from mios_v5.final_read import build_final_read
+        from mios_v5.ui.terminal_chart import atm_legs as _atm_legs
+
+        fr = build_final_read(st.session_state.get('_mios_state')) or {}
+        mp = st.session_state.get('_market_picture') or {}
+        _ab = mp.get('atm_bias') or {}
+        _verdict = str(_ab.get('verdict') or '')
+        if 'Strong' not in _verdict:
+            return                                   # only strong verdicts qualify
+
+        _bz = fr.get('battle_zone') or {}
+        _support = fr.get('strong_support')
+        _resistance = fr.get('strong_resistance')
+        _war = _bz.get('price') if isinstance(_bz, dict) else None
+
+        # per-side premium energy (already published by Stage 71.7)
+        _en = (st.session_state.get('_premium_energy') or {}).get('energy_score') or {}
+        _ce_en, _pe_en = _en.get('CALL'), _en.get('PUT')
+
+        # the ATM call/put leg frames + tags the app already cached
+        _call_df, _put_df, _ce_tag, _pe_tag = _atm_legs(
+            st.session_state.get('_atm_leg_dfs'))
+        _sr = st.session_state.get('_atm_leg_sr_behavior') or {}
+
+        def _leg_inputs(df_l, tag):
+            ltp = low = None
+            try:
+                if df_l is not None and not getattr(df_l, 'empty', True):
+                    ltp = float(df_l['close'].iloc[-1])
+                    low = float(df_l['low'].min())
+            except Exception:
+                pass
+            leg_sr = _sr.get(tag) if tag else None
+            tol = max((ltp or 0) * 0.02, 1.0)
+            return _ea_leg(leg_sr, ltp, low, tol)
+
+        _call_at_sup = _leg_inputs(_call_df, _ce_tag)
+        _put_at_sup = _leg_inputs(_put_df, _pe_tag)
+
+        sig = _ea_eval(spot=spot, support=_support, resistance=_resistance,
+                       war_zone=_war, atm_verdict=_verdict,
+                       call_at_support=_call_at_sup, put_at_support=_put_at_sup,
+                       call_energy=_ce_en, put_energy=_pe_en)
+        if not sig:
+            return
+
+        now = time.time()
+        try:
+            key = f"{sig['side']}:{round(float(sig.get('level') or 0))}"
+        except (TypeError, ValueError):
+            key = str(sig['side'])
+        prev = st.session_state.get('_confluence_alert_state') or {}
+        if prev.get('key') == key and now - float(prev.get('ts') or 0) < CONFLUENCE_COOLDOWN_S:
+            return                                   # same setup, still cooling
+        try:
+            send_telegram_message_sync(_ea_msg(sig, spot), force=True)
+            st.session_state['_confluence_alert_state'] = {'key': key, 'ts': now}
+        except Exception:
+            pass
     except Exception:
         pass  # an alert must never take the cycle down
 
@@ -11865,6 +12303,76 @@ def render_strike_mode_dashboard(spot_price, df, option_data):
                "LTP direction tracked across cycles. "
                "Row highlight = S/R role from OI walls: 🟢 bold = STRONG SUPPORT (biggest PE OI) · "
                "🟢 light = near support · 🔴 bold = STRONG RESISTANCE (biggest CE OI) · 🔴 light = near resistance.")
+
+    # ── 📊 ATM ±2 STRIKES DETAILED TABULATION (14 bias metrics, seller's view) ──
+    # Ported from seller_perspective.py, shown directly below the per-strike leg
+    # tabulation. Reuses the option chain ALREADY fetched (OI / ΔOI / Volume /
+    # LTP / IV, plus the bid/ask depth carried on df_summary) — no new fetch. The
+    # MktDepth metric uses those existing bid/ask quantities, not a depth API.
+    try:
+        from mios_v5.atm_strike_bias import (tabulation as _atm2_tab,
+                                             tabulation_html as _atm2_html)
+        _atm2_rows = []
+        for _off in (-2, -1, 0, 1, 2):
+            _sp = atm + _off * gap
+            _r = ds[ds['Strike'] == _sp]
+            if _r.empty:
+                continue
+            _rd = _r.iloc[0]
+            _atm2_rows.append((float(_sp), {
+                'oi_ce': _rd.get('openInterest_CE'), 'oi_pe': _rd.get('openInterest_PE'),
+                'chg_ce': _rd.get('changeinOpenInterest_CE'),
+                'chg_pe': _rd.get('changeinOpenInterest_PE'),
+                'vol_ce': _rd.get('totalTradedVolume_CE'),
+                'vol_pe': _rd.get('totalTradedVolume_PE'),
+                'ltp_ce': _rd.get('lastPrice_CE'), 'ltp_pe': _rd.get('lastPrice_PE'),
+                'iv_ce': _rd.get('impliedVolatility_CE'),
+                'iv_pe': _rd.get('impliedVolatility_PE'),
+                'bid_ce': _rd.get('bidQty_CE'), 'bid_pe': _rd.get('bidQty_PE'),
+                'ask_ce': _rd.get('askQty_CE'), 'ask_pe': _rd.get('askQty_PE'),
+            }))
+        if _atm2_rows:
+            _atm2 = _atm2_html(_atm2_tab(_atm2_rows, float(atm)), float(atm))
+            if _atm2:
+                st.markdown(_atm2, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+    # ── 📊 ATM ±2 FULL BIAS GRID (11 biases → verdict, owner's chain-bias set) ──
+    # Ported from the owner's option-chain bias script. Same ATM±2 window, but the
+    # LTP · OI · ΔOI · Vol · Δ · Γ · Bid/Ask · IV · ΔExp · ΓExp · DVP biases →
+    # Score/Verdict/Operator/Scalp/Fake-Real. Reuses the SAME already-fetched
+    # df_summary — including the REAL Delta/Gamma the chain build already put on
+    # it (Delta_CE/PE, Gamma_CE/PE) — so no new fetch and no Greek recompute.
+    try:
+        from mios_v5.atm_bias_grid import grid as _bg_grid, grid_html as _bg_html
+        _bg_rows = []
+        for _off in (-2, -1, 0, 1, 2):
+            _sp = atm + _off * gap
+            _r = ds[ds['Strike'] == _sp]
+            if _r.empty:
+                continue
+            _rd = _r.iloc[0]
+            _bg_rows.append((float(_sp), {
+                'ltp_ce': _rd.get('lastPrice_CE'), 'ltp_pe': _rd.get('lastPrice_PE'),
+                'oi_ce': _rd.get('openInterest_CE'), 'oi_pe': _rd.get('openInterest_PE'),
+                'chg_ce': _rd.get('changeinOpenInterest_CE'),
+                'chg_pe': _rd.get('changeinOpenInterest_PE'),
+                'vol_ce': _rd.get('totalTradedVolume_CE'),
+                'vol_pe': _rd.get('totalTradedVolume_PE'),
+                'delta_ce': _rd.get('Delta_CE'), 'delta_pe': _rd.get('Delta_PE'),
+                'gamma_ce': _rd.get('Gamma_CE'), 'gamma_pe': _rd.get('Gamma_PE'),
+                'bid_ce': _rd.get('bidQty_CE'), 'ask_ce': _rd.get('askQty_CE'),
+                'iv_ce': _rd.get('impliedVolatility_CE'),
+                'iv_pe': _rd.get('impliedVolatility_PE'),
+            }))
+        if _bg_rows:
+            _bg = _bg_html(_bg_grid(_bg_rows, float(atm), float(spot_price or atm)),
+                           float(atm))
+            if _bg:
+                st.markdown(_bg, unsafe_allow_html=True)
+    except Exception:
+        pass
 
 
 def render_atm_cvd_graphs(spot_price):
@@ -14067,6 +14575,147 @@ def render_clean_card(spot_price, option_data=None):
         except Exception:
             _charm_html = ""
 
+        # ── 🧲 Greek behaviour layer — INTERPRETS existing dealer/greek data ──
+        # No new engine, no new Greek: it reads `_gex_data` (gamma), the market
+        # picture's `vc_exp` (net charm / vanna) and the magnet level the app
+        # already ranks, and translates them into one compact behavioural strip
+        # (pull · chop/expansion · time · vol · expansion risk). Context only —
+        # it never votes, and a missing Greek reads "Not reported", never 0.
+        _gb_html = ""
+        try:
+            from mios_v5.greek_behaviour import interpret as _gb_interpret
+            from mios_v5.ui.greek_behaviour_panel import behaviour_html as _gbhtml
+            _vc = mp.get('vc_exp') or {}
+            _gx = st.session_state.get('_gex_data') or {}
+            _pin = mp.get('oi_pin')
+            if isinstance(_pin, (list, tuple)) and _pin:
+                _plevel = _pin[0]
+                _psrc = _pin[1] if len(_pin) > 1 else 'OI pin'
+            else:
+                _plevel = (option_data or {}).get('max_pain_strike')
+                _psrc = 'max pain'
+            _asof = None
+            _ots = st.session_state.get('_opt_data_ts')
+            if _ots:
+                try:
+                    _asof = datetime.fromisoformat(_ots).timestamp()
+                except Exception:
+                    _asof = None
+            # rolling per-greek windows so each third-order read self-calibrates
+            # against its OWN recent magnitude (the five nets span orders of
+            # magnitude, so a fixed band can't fit them). Bounded to the last
+            # _CTX_HIST_WINDOW reruns (~20 min at ~20s each).
+            _CTX_HIST_WINDOW = 60
+            _hist_store = st.session_state.setdefault('_greek_ctx_hist', {})
+            _ctx_hist = {}
+            for _g in ('vomma', 'speed', 'zomma', 'veta', 'color'):
+                _dq = _hist_store.setdefault(_g, [])
+                _gv = _vc.get(f'net_{_g}')
+                if _gv is not None:
+                    try:
+                        _dq.append(abs(float(_gv)))
+                        del _dq[:-_CTX_HIST_WINDOW]
+                    except (TypeError, ValueError):
+                        pass
+                _ctx_hist[_g] = list(_dq)
+            _gb_html = _gbhtml(_gb_interpret(
+                spot=spot_price, pull_level=_plevel, pull_source=_psrc,
+                net_charm=_vc.get('net_charm'), net_vanna=_vc.get('net_vanna'),
+                net_vega=_vc.get('net_vega'),
+                total_gex=_gx.get('total_gex'),
+                gamma_flip=_gx.get('gamma_flip_level'),
+                is_expiry=_is_expiry_day(option_data),
+                as_of=_asof, now=time.time(),
+                # the "other 5" third-order net exposures → their own reads,
+                # each bucketed against its own rolling history
+                vomma=_vc.get('net_vomma'), speed=_vc.get('net_speed'),
+                zomma=_vc.get('net_zomma'), veta=_vc.get('net_veta'),
+                color=_vc.get('net_color'),
+                contextual_history=_ctx_hist))
+        except Exception:
+            _gb_html = ""
+
+        # ── ⚔️ Level Acceptance / Rejection strip (context-only) ─────────
+        # Observation of what price DID after reaching a level — reuses the
+        # Stage-42 reaction engine (evaluate_reaction) across the wider level
+        # set, mapped to six words and clustered into battle zones. It touches
+        # no verdict: the predictive breakout/rejection % stays as-is; this
+        # reports separately. Never sends Telegram, never feeds Guardian.
+        _la_html = ""
+        _la_oneliner = ""
+        try:
+            from mios_v5.acceptance import evaluate_reaction as _eval_reaction
+            from mios_v5.level_acceptance import observe_levels as _observe_levels
+            from mios_v5.ui.level_acceptance_panel import acceptance_html as _lahtml
+            from mios_v5.ui.level_acceptance_panel import acceptance_oneliner as _laone
+            # reuse the SAME follow-through metrics Stage-42 already assembled
+            _la_metrics = {}
+            _mst = st.session_state.get('_mios_state') or {}
+            _st42 = _mst.get('stage42_acceptance') if hasattr(_mst, 'get') else None
+            if _st42 is not None and getattr(_st42, 'ok', False):
+                _la_metrics = (_st42.data or {}).get('metrics') or {}
+            # gather the levels from producers the app already owns (no new calc)
+            _la_levels = []
+            if _plevel is not None:
+                _la_levels.append({'label': 'Dealer magnet', 'price': _plevel})
+            _gflip = _gx.get('gamma_flip_level')
+            if _gflip is not None:
+                _la_levels.append({'label': 'Gamma flip', 'price': _gflip})
+            _rsr_la = st.session_state.get('_reaction_sr') or {}
+            for _sd, _lbl in (('resistance', 'Resistance'), ('support', 'Support')):
+                _zz = _rsr_la.get(_sd) or {}
+                if _zz.get('price') is not None:
+                    _la_levels.append({'label': _lbl, 'price': _zz.get('price'),
+                                       'strength': _zz.get('strength'),
+                                       'lifecycle': _zz.get('lifecycle')})
+            # OI walls — the market picture already ranks them (strike, size)
+            _oc = mp.get('oi_ceiling')
+            if _oc and _oc[0] is not None:
+                _la_levels.append({'label': 'OI wall (CE)', 'price': _oc[0]})
+            _ofl = mp.get('oi_floor')
+            if _ofl and _ofl[0] is not None:
+                _la_levels.append({'label': 'OI wall (PE)', 'price': _ofl[0]})
+            # POC / VAH / VAL — today's money-flow profile (already computed)
+            _mf_la = st.session_state.get('_money_flow_data') or {}
+            for _k, _lbl in (('poc_price', 'POC'), ('value_area_high', 'VAH'),
+                             ('value_area_low', 'VAL')):
+                _pv = _mf_la.get(_k)
+                if _pv:
+                    _la_levels.append({'label': _lbl, 'price': float(_pv)})
+            if _la_levels:
+                # ── reset per-level state on a NEW session or a confirmed regime
+                # flip — never on tick noise. Session = the IST trading date;
+                # regime flip = a real UP↔DOWN change, ignoring SIDEWAYS flicker.
+                _la_sess = (_ots or '')[:10]          # YYYY-MM-DD from market ts
+                _la_reg = str(mp.get('regime') or '').upper()
+                _la_keys = st.session_state.get('_la_reset_keys') or {}
+                _reset_la = False
+                if (_la_sess and _la_keys.get('session')
+                        and _la_keys['session'] != _la_sess):
+                    _reset_la = True                  # a new trading session
+                if _la_reg in ('UP', 'DOWN'):
+                    if _la_keys.get('regime_dir') and _la_keys['regime_dir'] != _la_reg:
+                        _reset_la = True              # confirmed UP↔DOWN flip
+                    _la_keys['regime_dir'] = _la_reg  # updated only on direction
+                if _la_sess:
+                    _la_keys['session'] = _la_sess
+                st.session_state['_la_reset_keys'] = _la_keys
+                if _reset_la:
+                    st.session_state['_level_accept_mem'] = {}
+                    st.session_state['_la_alert_state'] = {}
+                _la_store = st.session_state.setdefault('_level_accept_mem', {})
+                _la_iband = st.session_state.get('_la_interaction_band') or 5.0
+                _la_read = _observe_levels(_la_levels, spot_price, _la_metrics,
+                                           _la_store, _eval_reaction,
+                                           interaction_band=_la_iband, now=_ots)
+                _la_html = _lahtml(_la_read)          # full evidence → Market Picture
+                _la_oneliner = _laone(_la_read)       # compact state → Trade Card
+                # hand the resolved zones to the main-loop notifier (edge +
+                # cooldown live there, next to the other Telegram alerts)
+                st.session_state['_la_zones_latest'] = _la_read.get('zones') or []
+        except Exception:
+            _la_html = ""
+
         # ── ⚙️ dealer & volatility context, in one line ─────────────────
         # The Adaptive Greeks read, from the object Dashboard V6 published this
         # cycle. Read-only and short by design: the card already carries three
@@ -14306,40 +14955,38 @@ def render_clean_card(spot_price, option_data=None):
             _spot_html + _vp_html + _gap_html + _ctx_facts_html),
             unsafe_allow_html=True)
 
-        _c5, _c6, _cd = st.columns(3)
+        # ── information hierarchy (DISPLAY ONLY) ───────────────────────
+        # The Trade Card is the "what is happening now" summary; the Market
+        # Picture is the "why / how" detail. The verbose strips — the full Greek-
+        # Behaviour rows, the Dealer-Magnet detail and the Level-Acceptance
+        # evidence — are built here (nothing recomputed) but rendered in the
+        # Market Picture instead, so the card stays compact and the same long
+        # text is never drawn twice. `render_market_picture` reads this stash.
+        st.session_state['_mp_detail'] = {
+            'level_acceptance': _la_html,
+            'dealer_magnet': _charm_html,
+            'greek_behaviour': _gb_html,
+        }
 
-        # ── 2 · MIOS V5 — the Conflict-Engine arbitrated read ──
-        with _c5:
-            st.markdown(_sec(
-                "🧭 MIOS V5 · conflict-arbitrated", _col_m,
-                f"<div style='text-align:center;font-size:26px;font-weight:900;"
-                f"color:{_col_m};line-height:1.08;'>{_em_m} {_lbl_m}"
-                f"<div style='color:#ffffff;font-size:14px;font-weight:700;'>"
-                f"{_sub_m} ({_dom}%)</div></div>"
-                + _prep_html + _cal_html + _ctx_v5_html),
-                unsafe_allow_html=True)
-
-        # ── 3 · MIOS V6 — families · reaction · structure · footprint ──
-        with _c6:
-            st.markdown(_sec(
-                "🧬 MIOS V6 · observational", "#4da6ff",
-                _v6_html + _dayt_html + _sess_html
-                + (f"<div style='text-align:center;margin-top:4px;'>"
-                   f"{_sr_intel_html}</div>" if _sr_intel_html else
-                   f"<div style='text-align:center;font-size:16px;margin-top:4px;"
-                   f"font-weight:800;'>{_sr_line}</div>")
-                + _wz_html + _pe_html + _charm_html + _ag_html + _fs_html
-                + _zh_html),
-                unsafe_allow_html=True)
-
-        # ── 4 · DECISIONS — the three action verdicts, side by side. The Entry
-        # Gate is the native (pre-MIOS) one and still the only one that drives
-        # a live alert; v0 and v2 are observational until Wave 6 promotes them.
-        with _cd:
-            st.markdown(_sec(
-                "🎯 Decisions · gate ‖ v0 ‖ v2", "#a78bfa",
-                _action_html + _signal_html + _dec_v2_html + _why_html),
-                unsafe_allow_html=True)
+        # ── MIOS V6 — the observational read, FULL WIDTH ──────────────
+        # KEY POINTS ONLY: the V6 read (market state), the structure line, the
+        # war zone, the COMPACT level-acceptance state (`_la_oneliner`) and the
+        # one-line dealer/greek/fade summary (`_ag_html`). The detailed Greek
+        # rows, dealer-magnet detail and acceptance evidence moved to the Market
+        # Picture (stashed above) — they are no longer drawn on the card.
+        #
+        # ⚠️ Display only. The Entry Gate, v0 and v2 verdicts still compute and
+        # the native gate still drives its live Telegram alert exactly as before.
+        st.markdown(_sec(
+            "🧬 MIOS V6 · observational", "#4da6ff",
+            _v6_html + _dayt_html + _sess_html
+            + (f"<div style='text-align:center;margin-top:4px;'>"
+               f"{_sr_intel_html}</div>" if _sr_intel_html else
+               f"<div style='text-align:center;font-size:16px;margin-top:4px;"
+               f"font-weight:800;'>{_sr_line}</div>")
+            + _wz_html + _la_oneliner + _pe_html + _ag_html
+            + _fs_html + _zh_html),
+            unsafe_allow_html=True)
     except Exception:
         pass
 
@@ -14412,7 +15059,7 @@ def _leg_intraday(api, sid, seg, render_id, ttl_s=60):
                     instrument="OPTIDX", interval="1", days_back=1)
             except Exception as err:
                 if '429' in str(err):
-                    st.session_state['_dhan_429_until'] = now + timedelta(seconds=90)
+                    _trip_dhan_backoff()
                 if not entry:
                     return None, None
                 raw, age = entry['data'], (now - entry['ts']).total_seconds()
@@ -14690,6 +15337,22 @@ def _render_main_analyzer():
     # ── sidebar: only what changes what is fetched ──────────────────────
     st.sidebar.header("Configuration")
 
+    # ── 📤 one-click market snapshot → Telegram (for AI analysis) ─────
+    # Gathers everything the app already computed this cycle into one structured
+    # message and sends it, so it can be forwarded to an AI to analyse the market.
+    if st.sidebar.button("📤 Send market snapshot → Telegram (for AI)",
+                         help="Sends one structured message with the full market "
+                              "picture — regime, levels, ATM verdict, dealer/"
+                              "greeks, flow, level acceptance and context — to "
+                              "forward to an AI for a complete analysis. Reuses "
+                              "existing reads; sends nothing else."):
+        try:
+            _n_parts = _send_market_snapshot()
+            st.sidebar.success(f"Snapshot sent to Telegram "
+                               f"({_n_parts} message{'s' if _n_parts != 1 else ''}).")
+        except Exception as _snap_err:
+            st.sidebar.error(f"Snapshot failed: {_snap_err}")
+
     # ── 📨 MIOS V6 entry / exit signals to Telegram ────────────────────
     # The default lives in `MIOS_V6_TELEGRAM_DEFAULT` (top of file) so it is
     # one findable line rather than a literal buried in the sidebar. The owner
@@ -14750,6 +15413,14 @@ def _render_main_analyzer():
              "is sent once; what already exists when the app loads is not "
              "re-announced.")
 
+    # ── 📍 option LTP reaching its HVP line (±5) → Telegram ────────────
+    st.session_state["_leg_hvp_touch_on"] = st.sidebar.checkbox(
+        "📍 LTP at its HVP line (±5) → Telegram", value=LEG_HVP_TOUCH_DEFAULT,
+        help="A Telegram note when the Call or Put LTP comes within ±5 points of "
+             "one of its own high-volume-point lines. Latched per line and given "
+             "a 15-minute cooldown (sleep), so a price sitting at the line does "
+             "not repeat. Off by default — enable it here.")
+
     # ── 🎯 spot reaching a key level (±5 pts) → Telegram ──────────────
     # War zone, either OI wall, and the ranked support / resistance. Latched per
     # level so a price loitered at alerts once. Consumed in
@@ -14759,6 +15430,49 @@ def _render_main_analyzer():
         help="A Telegram note when spot comes within ±5 points of the war zone, "
              "an OI wall, or the ranked support / resistance. Sent once on "
              "arrival; re-arms only after price leaves the level.")
+
+    # ── ⚔️ level ACCEPTED / REJECTED → Telegram ───────────────────────
+    # Fires when a level resolves (accepted above/below, or rejected), not on
+    # mere touch. Edge-triggered + per-zone cooldown. Consumed in
+    # `_notify_level_acceptance`.
+    st.session_state["_la_alerts_on"] = st.sidebar.checkbox(
+        "⚔️ Level accepted / rejected → Telegram", value=LEVEL_ACCEPT_ALERTS_DEFAULT,
+        help="A Telegram note when a level RESOLVES — accepted above/below, or "
+             "rejected — from the Level-Acceptance strip. Sent once on the "
+             "transition; a per-zone cooldown stops a flipping level spamming. "
+             "Observation only; it does not change any verdict.")
+
+    # ── ⚡ 4-signal confluence entry → Telegram ───────────────────────
+    st.session_state["_confluence_alerts_on"] = st.sidebar.checkbox(
+        "⚡ Confluence entry (level + verdict + leg + energy) → Telegram",
+        value=CONFLUENCE_ALERTS_DEFAULT,
+        help="A Telegram note when four existing engine reads align in one "
+             "direction: NIFTY at a support/resistance/war-zone, the ATM-strike "
+             "verdict Strong Bull/Bear agreeing with the level, the trade-side "
+             "leg's LTP at its support/session-low, and that side's premium "
+             "energy the greater. Fires once per setup (cooldown). Reuses "
+             "existing engines; changes no verdict.")
+
+    # ── the two sub-alerts the owner paused (off by default) ──────────
+    # Ranked S/R touch is a subset of the level-touch alert above; VOB formation
+    # a subset of the formation alert. Both were too noisy, so they are opt-in.
+    st.session_state["_sr_touch_on"] = st.sidebar.checkbox(
+        "   ↳ include ranked S/R touch", value=SR_TOUCH_ALERTS_DEFAULT,
+        help="Paused — the ranked support/resistance touch was noisy. The "
+             "war-zone and OI-wall touches above are unaffected.")
+    st.session_state["_vob_formation_on"] = st.sidebar.checkbox(
+        "   ↳ include VOB formation", value=VOB_FORMATION_ALERTS_DEFAULT,
+        help="Paused — new-VOB alerts were noisy. High-volume pivot (HVP) "
+             "formation alerts are unaffected.")
+
+    # ── 📐 Advanced Price Action chart overlay (default OFF) ───────────
+    st.session_state["_apa_on"] = st.sidebar.checkbox(
+        "📐 Advanced Price Action on charts (BOS · CHoCH · Fib · patterns)",
+        value=False,
+        help="Overlay swing points, Break of Structure / Change of Character, "
+             "the Fibonacci retracement pocket, and geometric patterns (H&S, "
+             "triangles, flags) on ALL three charts — NIFTY, Call and Put. Off "
+             "by default; enable it here. Display only; changes no verdict.")
 
     if _mios_tg:
         st.session_state["_mios_transport"] = mios_v6_transport
@@ -15428,6 +16142,10 @@ def _render_main_analyzer():
         _notify_chart_formations()
     except Exception:
         pass
+    try:
+        _notify_leg_hvp_touch()
+    except Exception:
+        pass
 
     # 🎯 Spot-at-a-key-level (±5 pts) alerts — war zone, OI walls, ranked S/R.
     # Same placement: the MIOS state and `_market_picture` are current by now,
@@ -15435,6 +16153,14 @@ def _render_main_analyzer():
     # is on.
     try:
         _notify_level_touches()
+    except Exception:
+        pass
+    try:
+        _notify_level_acceptance()
+    except Exception:
+        pass
+    try:
+        _notify_confluence_entry()
     except Exception:
         pass
 
