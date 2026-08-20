@@ -15595,12 +15595,12 @@ def _render_main_analyzer():
         st.session_state.pop("_mios_transport", None)
 
     # ── 🎯 Instrument toggle (NIFTY/SENSEX) for LTP chart ──────────────
-    _current_instrument = st.session_state.get('_selected_instrument', 'NIFTY')
+    _current_instrument = st.session_state.get('_selected_instrument', 'SENSEX')
     _selected_instrument = st.sidebar.selectbox(
         "🎯 Instrument",
-        options=["NIFTY", "SENSEX"],
-        index=0 if _current_instrument == "NIFTY" else 1,
-        help="Switch between NIFTY (NSE) and SENSEX (BSE). LTP chart displays "
+        options=["SENSEX", "NIFTY"],
+        index=0 if _current_instrument == "SENSEX" else 1,
+        help="Switch between SENSEX (BSE) and NIFTY (NSE). LTP chart displays "
              "the selected instrument. Entry gates scale to instrument specs.")
     if _selected_instrument != _current_instrument:
         st.session_state['_selected_instrument'] = _selected_instrument
@@ -15771,11 +15771,11 @@ def _render_main_analyzer():
     _v5_container = st.container()
     _bias_container = st.container()
 
-    # Get instrument context for LTP chart (SENSEX if selected, NIFTY default)
+    # Get instrument context for LTP chart (SENSEX default, NIFTY fallback)
     _ctx_ltp = st.session_state.get('_current_instrument_context')
-    _sec_id_ltp = str(_ctx_ltp.security_id) if _ctx_ltp else "13"
+    _sec_id_ltp = int(_ctx_ltp.security_id) if _ctx_ltp else 40
     _seg_ltp = _ctx_ltp.exchange_segment if _ctx_ltp else "IDX_I"
-    _sym_ltp = _ctx_ltp.symbol if _ctx_ltp else "NIFTY"
+    _sym_ltp = _ctx_ltp.symbol if _ctx_ltp else "SENSEX"
 
     # ── 1 · Index candles + spot (NIFTY or SENSEX based on selection) ────
     df = pd.DataFrame()
