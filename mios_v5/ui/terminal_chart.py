@@ -431,7 +431,8 @@ def terminal_charts_split(nifty_df=None, call_df=None, put_df=None,
                           put_zones: Optional[Sequence[Dict[str, Any]]] = None,
                           nifty_profile: Optional[Dict[str, Any]] = None,
                           call_profile: Optional[Dict[str, Any]] = None,
-                          put_profile: Optional[Dict[str, Any]] = None):
+                          put_profile: Optional[Dict[str, Any]] = None,
+                          price_action: bool = False):
     """NIFTY, ATM Call and ATM Put as THREE independent figures.
 
     `terminal_chart` above draws one figure so Streamlit's single Fullscreen
@@ -460,6 +461,8 @@ def terminal_charts_split(nifty_df=None, call_df=None, put_df=None,
     panels = [("NIFTY", today_slice(nifty_df)),
               (call_label, today_slice(call_df)),
               (put_label, today_slice(put_df))]
+    # the today-sliced frames per chart key, for the opt-in price-action overlay
+    sliced = {k: df for k, (_n, df) in zip(SPLIT_KEYS, panels)}
     parsed = [(name, _ohlc(df)) for name, df in panels]
     notes = [name for name, p in parsed if p is None]
 
@@ -492,6 +495,16 @@ def terminal_charts_split(nifty_df=None, call_df=None, put_df=None,
             continue
         fig = make_subplots(rows=1, cols=1, subplot_titles=[name])
         _add_series(go, fig, name, p, 1, 1)
+
+        # opt-in Advanced Price-Action overlay (BOS/CHoCH/Fib/patterns) — default
+        # OFF, drawn on ALL three charts when the trader enables it. Silent on any
+        # failure so the candles always render.
+        if price_action:
+            try:
+                from .price_action_overlay import draw as _pa_draw
+                _pa_draw(fig, sliced.get(key), 1, 1)
+            except Exception:
+                pass
 
         prof = profiles.get(key)
         if prof:
