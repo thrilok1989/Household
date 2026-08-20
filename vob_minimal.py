@@ -7800,7 +7800,10 @@ def compute_market_picture(spot_price, df, option_data, cat_scores=None):
                   'strength': None, 'building': False, 'net': up - down,
                   'why': []}
     try:
-        _prox = 25.0
+        # Use instrument context for proximity band (±25 for NIFTY, scales for others)
+        _ctx = st.session_state.get('_current_instrument_context')
+        _atm_range = (_ctx.atm_range if _ctx else 100)
+        _prox = (_atm_range / 100.0) * 25.0  # scale ±25 by atm_range ratio
         _fmr_g = st.session_state.get('_full_market_read') or {}
         _sup_lv = (sup or {}).get('price') or (oi_floor[0] if oi_floor else None)
         _res_lv = (res or {}).get('price') or (oi_ceiling[0] if oi_ceiling else None)
@@ -7887,18 +7890,21 @@ def compute_market_picture(spot_price, df, option_data, cat_scores=None):
                                'strength': round(_str), 'building': _building})
             _zone_ok = (_str >= 55) or _building
             # ── A) room / R:R to the opposite zone ──────────────────
+            # Invalidation distance scales with atm_range: ±30 for NIFTY (100 atm_range)
+            _inval_offset = (_atm_range / 100.0) * 30.0
             if _zone == 'SUPPORT':
                 _target = _res_lv or (_lv + 60)
-                _inval = _lv - 30
+                _inval = _lv - _inval_offset
                 _room = (_target - spot_price) if _target else 0
                 _risk = max(spot_price - _inval, 1.0)
             else:
                 _target = _sup_lv or (_lv - 60)
-                _inval = _lv + 30
+                _inval = _lv + _inval_offset
                 _room = (spot_price - _target) if _target else 0
                 _risk = max(_inval - spot_price, 1.0)
             _rr = (_room / _risk) if _risk > 0 else 0
-            _room_ok = _room >= 40 and _rr >= 1.5
+            _room_min = (_atm_range / 100.0) * 40.0  # room minimum scales with atm_range
+            _room_ok = _room >= _room_min and _rr >= 1.5
             entry_gate.update({'target': _target, 'invalidation': _inval,
                                'rr': round(_rr, 2), 'room': round(_room)})
             # ── B) chop / range filter (accumulation/distribution) ──
@@ -8485,17 +8491,19 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
                 # attempt + one Supabase row (even if Telegram is throttled)
                 st.session_state['_entry_gate_last_sig'] = _sig
                 # 🎯/❌ trade frame: target = opposite zone; invalidation =
-                # 30 pts beyond the zone (past the ±25 band = zone truly broke)
+                # atm_range-scaled pts beyond the zone (past the ±prox band = zone truly broke)
                 _sup_lv_x = (mp.get('sup') or {}).get('price') or \
                     (mp['oi_floor'][0] if mp.get('oi_floor') else None)
                 _res_lv_x = (mp.get('res') or {}).get('price') or \
                     (mp['oi_ceiling'][0] if mp.get('oi_ceiling') else None)
+                _inval_offset_msg = (_atm_range / 100.0) * 30.0
+                _sym = _ctx.symbol if _ctx else 'NIFTY'
                 if _st_a == 'CALL':
                     _tgt_a = _res_lv_x or (_lv_a + 60)
-                    _inv_a = _lv_a - 30
+                    _inv_a = _lv_a - _inval_offset_msg
                 else:
                     _tgt_a = _sup_lv_x or (_lv_a - 60)
-                    _inv_a = _lv_a + 30
+                    _inv_a = _lv_a + _inval_offset_msg
                 _em_a = '🟢' if _st_a == 'CALL' else '🔴'
                 _msg_a = (
                     f"{_em_a} <b>ENTRY GATE — BUY {_st_a} ZONE ACTIVE</b>\n"
@@ -8506,7 +8514,7 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
                     f"Engines net: {(_eg_a.get('net') or 0):+d} · "
                     f"Regime {mp.get('regime', '—')}\n"
                     f"🎯 Target ₹{_tgt_a:.0f} · ❌ Invalidation ₹{_inv_a:.0f}\n"
-                    f"NIFTY Spot ₹{spot_price:,.1f}\n"
+                    f"{_sym} Spot ₹{spot_price:,.1f}\n"
                     f"⏱️ All 3 gates met (zone + strength + alignment) — "
                     f"your decision, no auto-entry")
                 _sent_a = _throttled_telegram_send(
@@ -8594,7 +8602,7 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
                     + f" · engines net {(_eg_a.get('net') or 0):+d}\n"
                     + (f"🎯 Target ₹{_tgt_ar:.0f} · R:R {_eg_a.get('rr', '—')} "
                        f"· ❌ Invalidation ₹{_inv_ar:.0f}\n" if _tgt_ar and _inv_ar else "")
-                    + f"NIFTY Spot ₹{spot_price:,.1f}\n"
+                    + f"{_sym} Spot ₹{spot_price:,.1f}\n"
                     f"⚠️ Price has ENTERED the zone — <b>WAIT for the confirmation "
                     f"candle</b>. Don't chase the first touch (fake-break / SL-hunt "
                     f"filter active). A separate CONFIRMED alert follows if the zone "
