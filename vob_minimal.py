@@ -1024,6 +1024,13 @@ def send_telegram_alert_bot(message):
     TELEGRAM_ALERT_CHAT_ID in secrets). Carries only the high-conviction
     entry alerts so they never drown in the main bot's stream. Best-effort:
     no-op when unconfigured; failures stored for diagnostics."""
+    # Auto-prefix with instrument name if context available and not already prefixed
+    if not message.startswith("[NIFTY]") and not message.startswith("[SENSEX]"):
+        ctx = st.session_state.get('_current_instrument_context')
+        if ctx:
+            from mios_v5.instrument_adapters import format_instrument_message
+            message = format_instrument_message(ctx, message, include_symbol=True)
+
     if not TELEGRAM_ALERT_BOT_TOKEN or not TELEGRAM_ALERT_CHAT_ID or not message:
         return None
     url = f"https://api.telegram.org/bot{TELEGRAM_ALERT_BOT_TOKEN}/sendMessage"
@@ -1250,6 +1257,13 @@ def mios_v6_transport(payload, edits=None):
 
 
 def send_telegram_message_sync(message, force=False):
+    # Auto-prefix with instrument name if context available and not already prefixed
+    if not message.startswith("[NIFTY]") and not message.startswith("[SENSEX]"):
+        ctx = st.session_state.get('_current_instrument_context')
+        if ctx:
+            from mios_v5.instrument_adapters import format_instrument_message
+            message = format_instrument_message(ctx, message, include_symbol=True)
+
     # ROUTING — only ENTRY-TIER automated alerts reach the main Telegram bot;
     # every other automated alert (active or muted) is Discord-only and
     # archived to Supabase. Bypassed when force=True so manual "Send Signal"
@@ -15468,6 +15482,12 @@ def _render_main_analyzer():
     """
     _render_id = st.session_state.get('_render_seq', 0) + 1
     st.session_state['_render_seq'] = _render_id
+
+    # ── Store current instrument context for this render cycle ────────────
+    # All functions can retrieve via st.session_state['_current_instrument_context']
+    # This avoids massive refactoring while making context available app-wide.
+    _ctx = _get_current_instrument_context()
+    st.session_state['_current_instrument_context'] = _ctx
 
     # Supabase is not optional: Stage 33/40 persistence, the candle cache and
     # the market-memory backfill all read it. Without credentials there is
