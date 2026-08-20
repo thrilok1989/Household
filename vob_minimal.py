@@ -226,6 +226,17 @@ def _get_instrument_context(session_state, selected_instrument: str = "NIFTY"):
     return None
 
 
+def _get_current_instrument_context():
+    """Get the currently selected instrument's context (NIFTY by default).
+
+    This is the single source of truth for instrument specs in this render.
+    Call this at the start of main() to get the context for all data fetches.
+    """
+    from mios_v5.instrument_cache_manager import get_current_instrument
+    current_instrument = get_current_instrument(st.session_state)
+    return _get_instrument_context(st.session_state, current_instrument)
+
+
 
 
 # ── restored: referenced by name, never called directly ─────────────
@@ -1615,7 +1626,7 @@ class DhanAPI:
                 st.session_state['_nifty_fut_err'] = f"ltp net err: {str(e)[:120]}"
         return None
 
-def get_dhan_expiry_list_cached(underlying_scrip: int, underlying_seg: str):
+def get_dhan_expiry_list_cached(underlying_scrip: int = None, underlying_seg: str = None, context=None):
     """The expiry list, with the last good answer kept as a fallback.
 
     This used to be a bare `@st.cache_data(ttl=300)` around the fetch, which
@@ -1627,7 +1638,15 @@ def get_dhan_expiry_list_cached(underlying_scrip: int, underlying_seg: str):
     The expiry list changes at most once a day. Serving yesterday's answer
     through a blip is strictly better than serving nothing, so a good result is
     remembered in session state and reused whenever the fetch comes back empty.
+
+    Can be called with:
+    - get_dhan_expiry_list_cached(13, "IDX_I") [original]
+    - get_dhan_expiry_list_cached(context=ctx) [context-driven]
     """
+    if context:
+        underlying_scrip = context.security_id
+        underlying_seg = context.exchange_segment
+
     key = f"_expiry_cache_{underlying_scrip}_{underlying_seg}"
     cached = st.session_state.get(key)
     if cached and (time.time() - cached['ts']) < 300:
@@ -1734,7 +1753,19 @@ def _dhan_post(url, payload, max_retries=4):
             return None
     return None
 
-def get_dhan_option_chain(underlying_scrip: int, underlying_seg: str, expiry: str, max_retries: int = 4):
+def get_dhan_option_chain(underlying_scrip: int = None, underlying_seg: str = None, expiry: str = None, max_retries: int = 4, context=None):
+    """Fetch option chain from Dhan.
+
+    Can be called with:
+    - get_dhan_option_chain(13, "IDX_I", "2026-08-27") [original]
+    - get_dhan_option_chain(expiry="2026-08-27", context=ctx) [context-driven]
+    """
+    if context:
+        underlying_scrip = context.security_id
+        underlying_seg = context.exchange_segment
+        if expiry is None:
+            expiry = context.current_expiry
+
     return _dhan_post("https://api.dhan.co/v2/optionchain",
                       {"UnderlyingScrip": underlying_scrip, "UnderlyingSeg": underlying_seg, "Expiry": expiry},
                       max_retries)
@@ -1777,7 +1808,7 @@ def iv_store():
     return {"samples": []}
 
 
-def get_index_spot_ltp(scrip: int = NIFTY_UNDERLYING_SCRIP, seg: str = NIFTY_UNDERLYING_SEG):
+def get_index_spot_ltp(scrip: int = None, seg: str = None, context=None):
     """Live index spot from Dhan's marketfeed/ltp endpoint (NIFTY 50 = 13/IDX_I).
 
     The option-chain payload's `last_price` is the underlying spot too, but it
@@ -1785,7 +1816,19 @@ def get_index_spot_ltp(scrip: int = NIFTY_UNDERLYING_SCRIP, seg: str = NIFTY_UND
     seconds. This dedicated quote is the most direct read of the current spot.
     Cached ~4s in session_state, and skipped during a 429 back-off so it never
     adds pressure when Dhan is throttling. Returns a float, or None on failure.
+
+    Can be called with:
+    - get_index_spot_ltp(13, "IDX_I") [original]
+    - get_index_spot_ltp(context=ctx) [context-driven]
     """
+    if context:
+        scrip = context.security_id
+        seg = context.exchange_segment
+    elif scrip is None or seg is None:
+        # Fallback to NIFTY defaults if nothing provided
+        scrip = NIFTY_UNDERLYING_SCRIP
+        seg = NIFTY_UNDERLYING_SEG
+
     try:
         _ist = pytz.timezone('Asia/Kolkata')
         _now = datetime.now(_ist)
@@ -1810,7 +1853,17 @@ def get_index_spot_ltp(scrip: int = NIFTY_UNDERLYING_SCRIP, seg: str = NIFTY_UND
         pass
     return None
 
-def get_dhan_expiry_list(underlying_scrip: int, underlying_seg: str, max_retries: int = 4):
+def get_dhan_expiry_list(underlying_scrip: int = None, underlying_seg: str = None, max_retries: int = 4, context=None):
+    """Fetch expiry list from Dhan.
+
+    Can be called with:
+    - get_dhan_expiry_list(13, "IDX_I") [original]
+    - get_dhan_expiry_list(context=ctx) [context-driven]
+    """
+    if context:
+        underlying_scrip = context.security_id
+        underlying_seg = context.exchange_segment
+
     return _dhan_post("https://api.dhan.co/v2/optionchain/expirylist",
                       {"UnderlyingScrip": underlying_scrip, "UnderlyingSeg": underlying_seg},
                       max_retries)
