@@ -15725,20 +15725,26 @@ def _render_main_analyzer():
     _v5_container = st.container()
     _bias_container = st.container()
 
-    # ── 1 · NIFTY candles + spot ────────────────────────────────────────
+    # Get instrument context for LTP chart (SENSEX if selected, NIFTY default)
+    _ctx_ltp = st.session_state.get('_current_instrument_context')
+    _sec_id_ltp = str(_ctx_ltp.security_id) if _ctx_ltp else "13"
+    _seg_ltp = _ctx_ltp.exchange_segment if _ctx_ltp else "IDX_I"
+    _sym_ltp = _ctx_ltp.symbol if _ctx_ltp else "NIFTY"
+
+    # ── 1 · Index candles + spot (NIFTY or SENSEX based on selection) ────
     df = pd.DataFrame()
     try:
-        _raw = api.get_intraday_data(security_id="13", exchange_segment="IDX_I",
+        _raw = api.get_intraday_data(security_id=_sec_id_ltp, exchange_segment=_seg_ltp,
                                      instrument="INDEX", interval=interval,
                                      days_back=days_back)
         if _raw:
             df = process_candle_data(_raw, interval)
-            db.upsert_candles("NIFTY50", "IDX_I", interval, df)
+            db.upsert_candles(_sym_ltp, _seg_ltp, interval, df)
     except Exception as err:
         st.caption(f"Candle fetch unavailable: {err}")
     if df.empty:
         try:
-            df = db.get_candles("NIFTY50", "IDX_I", interval, hours_back=days_back * 24)
+            df = db.get_candles(_sym_ltp, _seg_ltp, interval, hours_back=days_back * 24)
         except Exception:
             df = pd.DataFrame()
 
@@ -15746,7 +15752,7 @@ def _render_main_analyzer():
     # does, so this is one network call, not the two the full app made.
     spot = None
     try:
-        spot = get_index_spot_ltp(NIFTY_UNDERLYING_SCRIP, NIFTY_UNDERLYING_SEG)
+        spot = get_index_spot_ltp(int(_sec_id_ltp), _seg_ltp)
     except Exception:
         spot = None
     if not spot and not df.empty:
@@ -15780,7 +15786,7 @@ def _render_main_analyzer():
 
     # 5-minute frame for Stage 3 market memory and Stage 4's opening print.
     try:
-        _r5 = api.get_intraday_data(security_id="13", exchange_segment="IDX_I",
+        _r5 = api.get_intraday_data(security_id=_sec_id_ltp, exchange_segment=_seg_ltp,
                                     instrument="INDEX", interval="5",
                                     days_back=max(days_back, 3))
         if _r5:
