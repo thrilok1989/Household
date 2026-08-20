@@ -40,17 +40,20 @@ def _f(v: Any) -> Optional[float]:
 
 
 def evaluate(level: Any, spot: Any, state: Optional[Mapping[str, Any]],
-             band: float = BAND, rearm: float = REARM
+             band: float = BAND, rearm: float = REARM,
+             cooldown_s: Optional[float] = None, now: Optional[float] = None
              ) -> Tuple[bool, Dict[str, Any]]:
     """Should this reading of ONE level fire, and what state carries forward?
 
-    `state` is the previous `{'level', 'armed'}` for this level key (or None /
-    {} the first time). Returns `(alert, new_state)`:
+    `state` is the previous `{'level', 'armed', 'last_alert_time'}` for this level
+    key (or None / {} the first time). Returns `(alert, new_state)`:
 
     * price within `band` of the level AND armed → alert once, then disarm;
     * price at least `rearm` from the level → re-arm (ready for the next touch);
     * a level that differs from the remembered one re-arms immediately, so the
-      new level's first touch is never swallowed by the old one's latch.
+      new level's first touch is never swallowed by the old one's latch;
+    * if `cooldown_s` is set and now < last_alert_time + cooldown_s, suppress
+      alerts even if armed (sleeping facility).
 
     Returns `(False, state)` unchanged when either number is unreadable — a
     missing level or spot is not a touch.
@@ -64,16 +67,27 @@ def evaluate(level: Any, spot: Any, state: Optional[Mapping[str, Any]],
     prev_lv = _f(prev.get("level"))
     same_level = prev_lv is not None and abs(prev_lv - lv) <= LEVEL_EPS
     armed = bool(prev.get("armed", True)) if same_level else True
+    last_alert_time = prev.get("last_alert_time")
 
     dist = abs(sp - lv)
     alert = False
-    if dist <= band and armed:
+
+    # Check if in cooldown (sleeping facility)
+    in_cooldown = False
+    if cooldown_s is not None and now is not None and last_alert_time is not None:
+        in_cooldown = (now - last_alert_time) < cooldown_s
+
+    if dist <= band and armed and not in_cooldown:
         alert = True
         armed = False            # latch: no re-alert while price loiters here
+        last_alert_time = now if now is not None else last_alert_time
     elif dist >= rearm:
         armed = True             # price has left — ready for the next touch
 
-    return alert, {"level": lv, "armed": armed}
+    new_state = {"level": lv, "armed": armed}
+    if last_alert_time is not None:
+        new_state["last_alert_time"] = last_alert_time
+    return alert, new_state
 
 
 def message(label: str, price: float, spot: float, icon: str = "🎯",
