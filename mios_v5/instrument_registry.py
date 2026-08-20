@@ -82,11 +82,15 @@ class InstrumentRegistry:
             # (Dhan doesn't have a public instruments endpoint, so we use option chain
             # discovery: try to fetch option chain for known symbols and infer ID from response)
 
-            # Known mappings (minimal, verified against Dhan only)
-            # These are ONLY starting points; final specs come from API response
+            # Read off Dhan's scrip master (api-scrip-master.csv, rows where
+            # SEM_INSTRUMENT_NAME == 'INDEX') — not guesses. An earlier
+            # invented SENSEX id (40) returned no data, and because the caller
+            # only replaces its frame on a non-empty fetch, the SENSEX chart
+            # silently kept drawing NIFTY. These are the verified fallbacks;
+            # prefer a live scrip-master lookup where one is available.
             known_ids = {
-                "NIFTY": 13,    # NSE NIFTY
-                "SENSEX": 40,   # NSE SENSEX index (check if available on Dhan)
+                "NIFTY": 13,    # NSE, SEM_TRADING_SYMBOL 'NIFTY'
+                "SENSEX": 51,   # BSE, SEM_TRADING_SYMBOL 'SENSEX'
             }
 
             if symbol not in known_ids:
@@ -172,21 +176,24 @@ class InstrumentRegistry:
         specs = {}
 
         try:
-            # Standard specs by symbol (fallback to known values)
+            # Fallback specs, taken from Dhan's scrip master OPTIDX rows
+            # (SEM_LOT_UNITS, and the modal gap between SEM_STRIKE_PRICE
+            # values on the nearest expiry). Refined from the live chain below
+            # when it carries strikes.
             if symbol == "NIFTY":
                 specs = {
-                    "contract_multiplier": 25.0,  # ₹ per point
-                    "strike_step": 100,  # 100-point steps
-                    "atm_range": 100,  # ±100 points
-                    "lot_size": 1,
+                    "contract_multiplier": 65.0,  # lot units, ₹ per point/lot
+                    "strike_step": 50,   # observed modal gap on NIFTY strikes
+                    "atm_range": 100,
+                    "lot_size": 65,
                     "tick_size": 0.05,
                 }
             elif symbol == "SENSEX":
                 specs = {
-                    "contract_multiplier": 1.0,  # Verify from Dhan
-                    "strike_step": 100,  # Verify from chain
+                    "contract_multiplier": 20.0,  # lot units, ₹ per point/lot
+                    "strike_step": 100,  # observed modal gap on SENSEX strikes
                     "atm_range": 100,
-                    "lot_size": 1,
+                    "lot_size": 20,
                     "tick_size": 0.05,
                 }
 
