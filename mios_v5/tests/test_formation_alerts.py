@@ -145,3 +145,19 @@ def test_the_sidebar_toggle_reads_the_named_constant():
     default = next((kw.value for kw in checks[0].keywords if kw.arg == "value"),
                    None)
     assert isinstance(default, ast.Name) and default.id == "FORMATION_ALERTS_DEFAULT"
+
+
+def test_vob_formation_is_paused_by_default_but_gated_not_removed():
+    """The owner paused the VOB formation alert — off by default, gated on a
+    session flag so it can be re-enabled. HVP formation is NOT gated by it."""
+    const = next(n for n in _TREE.body if isinstance(n, ast.Assign)
+                 and any(getattr(t, "id", "") == "VOB_FORMATION_ALERTS_DEFAULT"
+                         for t in n.targets))
+    assert isinstance(const.value, ast.Constant) and const.value.value is False
+    helper = _fn("_notify_chart_formations")
+    consts = {n.value for n in ast.walk(helper)
+              if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "_vob_formation_on" in consts
+    # both emits still present in source (hvp always, vob gated)
+    seg = ast.get_source_segment(_SRC, helper) or ""
+    assert "'hvp'" in seg and "'vob'" in seg

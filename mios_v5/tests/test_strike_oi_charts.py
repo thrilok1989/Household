@@ -191,6 +191,55 @@ def test_a_long_build_makes_no_claim_about_the_index():
     assert SC.side_read(oi, ltp, "ce")["means"] is None
 
 
+# ── building-vs-covering is the RECENT trend, not the session drift ──
+
+def test_direction_is_the_recent_trend_not_the_session_drift():
+    """⭐ The bug: the panel could only ever say BUILDING.
+
+    OI accumulates through a session, so `oi_last - oi_first` (and the
+    day-cumulative ΔOI) net positive almost always — pinning the read to a
+    BUILDING row. What tells writers-adding from writers-covering is which way OI
+    is moving NOW. Here OI climbed for most of the window but has turned DOWN over
+    the recent lookback while premium rises: SHORT COVERING, not building — even
+    though the session net change in OI is still up.
+    """
+    # OI rises 10→59 then falls back over the last ~18 points; premium rising late
+    oi = list(range(10, 60)) + list(range(58, 40, -1))
+    assert oi[-1] > oi[0], "session drift is still net-up — the old read said building"
+    ltp = [100.0] * 50 + [100.0 + i for i in range(1, 19)]
+    r = SC.side_read(oi, ltp, "ce")
+    assert r["state"] == "SHORT COVERING"
+    assert r["means"] == "resistance weakening"
+
+
+def test_recent_downtrend_with_falling_premium_is_long_unwinding():
+    oi = list(range(10, 60)) + list(range(58, 40, -1))     # OI turning down
+    ltp = [100.0] * 50 + [100.0 - i for i in range(1, 19)]  # premium falling
+    assert SC.side_read(oi, ltp, "pe")["state"] == "LONG UNWINDING"
+
+
+def test_a_two_point_before_after_pair_is_unchanged():
+    """The window on two points is those two points, so a caller that passes a
+    plain before/after pair still gets the standard quadrant."""
+    assert SC.side_read([100.0, 130.0], [50.0, 40.0], "ce")["state"] == "SHORT BUILDING"
+    assert SC.side_read([130.0, 100.0], [40.0, 50.0], "ce")["state"] == "SHORT COVERING"
+
+
+def test_strike_read_surfaces_covering_from_a_recent_oi_downturn():
+    """End to end through the store: OI accumulates for the first half of the
+    session, then turns down — the panel now says SHORT COVERING where before it
+    was pinned to a BUILDING row."""
+    s = {"snaps": []}
+    ce_oi_path = ([9e6 + i * 1e5 for i in range(20)]        # rising
+                  + [11e6 - i * 1e5 for i in range(1, 21)])  # then falling
+    for i, oi in enumerate(ce_oi_path):
+        df, spot = _chain(ce_oi=oi, ce_ltp=100.0 + i)       # premium rising
+        SH.record(s, df, spot, now=NOW + i * SH.MIN_GAP_S)
+    r = SC.strike_read(s, 24600)
+    assert r["ce"]["state"] == "SHORT COVERING"
+    assert r["ce"]["means"] == "resistance weakening"
+
+
 def test_one_sample_reads_nothing():
     assert SC.side_read([100.0], [50.0], "ce")["state"] is None
     assert SC.side_read([], [], "pe")["state"] is None

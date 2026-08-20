@@ -78,9 +78,49 @@ def test_a_missing_winner_drops_the_arrow_rather_than_pointing_at_a_dash():
 
 def test_it_never_raises():
     for junk in (None, {}, {"battle_zone": "x"}, {"probabilities": "x"},
-                 {"battle_zone": {"price": object()}}):
+                 {"battle_zone": {"price": object()}},
+                 _fr(strong_support="n/a", strong_resistance=object())):
         W.compact_html(junk)
         W.full_html(junk)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  the bracket — both walls, so the whole box is visible
+# ══════════════════════════════════════════════════════════════════════
+
+def test_the_strip_shows_both_walls_when_they_are_published():
+    """The whole ask: not only the side price is fighting at. Both the ranked
+    resistance above and support below appear on the dashboard strip."""
+    html = W.full_html(_fr(strong_support=24330, strong_resistance=24498))
+    assert "Support" in html and "24,330" in html
+    assert "Resistance" in html and "24,498" in html
+
+
+def test_the_active_side_is_marked_and_the_other_is_muted():
+    """The move is on SUPPORT here, so the support wall carries the ⚔️ and the
+    bright ink; resistance is present but muted — the picture at a glance."""
+    from mios_v5.ui.theme import INK, MUTED
+    html = W.full_html(_fr(battle_zone={"type": "SUPPORT", "price": 24330},
+                           strong_support=24330, strong_resistance=24498))
+    # the active wall is bright and the muted colour is used for the other.
+    # rfind, not find: the header "⚔️ War zone" is the first ⚔️; the bracket's
+    # mark is the last one. SUPPORT active → mark sits after the support row,
+    # which the bracket draws below resistance.
+    assert INK in html and MUTED in html
+    assert html.index("🧱 Resistance") < html.index("🛡 Support") < html.rfind("⚔️")
+    # flipping the fight to the resistance side moves the mark up onto it
+    res_html = W.full_html(_fr(battle_zone={"type": "RESISTANCE", "price": 24498},
+                               strong_support=24330, strong_resistance=24498))
+    assert res_html.index("🧱 Resistance") < res_html.rfind("⚔️") < \
+        res_html.index("🛡 Support")
+
+
+def test_no_walls_means_no_bracket_but_still_a_fight_line():
+    """A cycle without the ranked walls falls back to the single fight line — no
+    empty bracket, and the active fight still renders."""
+    html = W.full_html(_fr())          # _fr has no strong_support/resistance
+    assert "SUPPORT" in html and "24,571" in html
+    assert "🛡 Support" not in html and "🧱 Resistance" not in html
 
 
 # ══════════════════════════════════════════════════════════════════════

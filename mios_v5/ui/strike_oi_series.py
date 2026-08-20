@@ -5,7 +5,7 @@ plus the verdict the reference layout puts under each chart: which side is heavi
 (support vs resistance) and, from OI direction against LTP direction, whether that
 is building or covering.
 
-⚠️ **Every conclusion here is arithmetic on two stored series** — no engine is
+⚠️ **Every conclusion here is arithmetic on the stored series** — no engine is
 consulted and none is second-guessed. The OI/LTP quadrant rule is the standard
 one, stated once in `POSITION_READ` rather than as four scattered branches:
 
@@ -13,6 +13,13 @@ one, stated once in `POSITION_READ` rather than as four scattered branches:
     OI ↑ + price ↓   short building (writing)
     OI ↓ + price ↑   short covering
     OI ↓ + price ↓   long unwinding
+
+⚠️ The "OI ↑/↓" here is the **recent trend** — the change over the last
+`TREND_LOOKBACK` snapshots — NOT the drift since snapshotting began, and NOT the
+day-cumulative ΔOI. Both of those net positive through a normal session (OI
+accumulates), so they can only ever surface the two BUILDING rows; only the
+recent direction turns negative when writers are covering *now*, which is what
+lets the covering/unwinding rows appear — see `side_read`.
 
 For a CE leg, writing is resistance; for a PE leg, writing is support. The flip is
 applied in one place, `side_read`, for the same reason.
@@ -53,20 +60,43 @@ def _sign(x: Any, eps: float = 0.0) -> int:
     return 1 if v > eps else (-1 if v < -eps else 0)
 
 
-def _first_last(vals: Sequence[Any]) -> Tuple[Optional[float], Optional[float]]:
+#: how many snapshots back "recent" spans for the building-vs-covering read. At
+#: the ~18s snapshot cadence this is roughly the last 5 minutes — long enough not
+#: to flip on one noisy print, short enough to show the CURRENT phase.
+TREND_LOOKBACK = 15
+
+
+def _window(vals: Sequence[Any],
+            lookback: int) -> Tuple[Optional[float], Optional[float]]:
+    """`(earlier, latest)` over the last `lookback` snapshots — or the whole
+    series when it is shorter. `(None, None)` with fewer than two points."""
     nums = [v for v in vals if isinstance(v, (int, float))]
-    return (nums[0], nums[-1]) if len(nums) >= 2 else (None, None)
+    if len(nums) < 2:
+        return None, None
+    earlier = nums[max(0, len(nums) - 1 - int(lookback))]
+    return earlier, nums[-1]
 
 
-def side_read(oi: Sequence[Any], ltp: Sequence[Any], side: str) -> Dict[str, Any]:
+def side_read(oi: Sequence[Any], ltp: Sequence[Any], side: str,
+              lookback: int = TREND_LOOKBACK) -> Dict[str, Any]:
     """`{state, oi_pct, ltp_pct, means}` for one side of one strike.
 
     `means` is what the state implies for price — resistance or support — and is
     only set for the two WRITING/COVERING cases, because a long build in an option
     is not a statement about the index level.
+
+    ⚠️ **Direction is the RECENT trend, over the last `lookback` snapshots — not
+    the drift since collection began, and not the day-cumulative ΔOI.** Both of
+    those net *positive* through a normal session (OI accumulates), so the panel
+    could only ever say BUILDING — which is exactly the bug reported: every strike
+    stuck on LONG/SHORT BUILDING, never covering. What separates writers *adding*
+    from writers *covering* is which way OI is moving **now**, so a strike whose
+    OI has turned down in the last few minutes reads as covering even while the
+    day is still net-long OI. On a series of two points the window is those two,
+    so the quadrant rule is unchanged for callers that pass a before/after pair.
     """
-    o_a, o_b = _first_last(oi)
-    l_a, l_b = _first_last(ltp)
+    o_a, o_b = _window(oi, lookback)
+    l_a, l_b = _window(ltp, lookback)
     if o_a is None or l_a is None:
         return {"state": None, "oi_pct": None, "ltp_pct": None, "means": None}
     d_oi, d_ltp = _sign(o_b - o_a), _sign(l_b - l_a)
@@ -89,6 +119,7 @@ def strike_read(store: Any, strike: Any) -> Dict[str, Any]:
                               ("pe", "pe_oi", "pe_ltp")):
         oi = SH.series(store, strike, oi_f)["v"]
         ltp = SH.series(store, strike, ltp_f)["v"]
+        # the RECENT trend of OI drives building-vs-covering; see `side_read`.
         out[side] = side_read(oi, ltp, side)
         out[f"{side}_oi"] = oi[-1] if oi else None
     ce, pe = out.get("ce_oi"), out.get("pe_oi")
