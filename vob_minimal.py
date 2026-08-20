@@ -733,6 +733,9 @@ LEVEL_ACCEPT_COOLDOWN_S = 900.0
 CONFLUENCE_ALERTS_DEFAULT = True
 CONFLUENCE_COOLDOWN_S = 900.0
 
+ENTRY_REVERSED_ALERT_DEFAULT = True
+ENTRY_REVERSED_COOLDOWN_S = 300.0
+
 # ── the two sub-alerts the owner paused ────────────────────────────────
 # The ranked support/resistance TOUCH (a sub-alert of level-touch) and the VOB
 # FORMATION alert were both too noisy, so they are OFF by default. The war-zone
@@ -11800,6 +11803,89 @@ def _notify_confluence_entry():
         pass  # an alert must never take the cycle down
 
 
+def _notify_entry_reversed():
+    """⚠️ Alert to Telegram when NIFTY is at a price zone but the bias has
+    reversed against the trade setup. This catches whipsaw scenarios where
+    price reached the level but conditions deteriorated (trend weakened,
+    opposite writers appeared, etc.).
+
+    Latched per reversal with a cooldown so it fires once, not every cycle.
+    Opt-out via `_entry_reversed_on`.
+    """
+    try:
+        if not st.session_state.get('_entry_reversed_on', ENTRY_REVERSED_ALERT_DEFAULT):
+            return
+        if not TELEGRAM_ALERT_BOT_TOKEN or not TELEGRAM_ALERT_CHAT_ID:
+            return
+        from mios_v5.final_read import build_final_read
+
+        mp = st.session_state.get('_market_picture') or {}
+        spot = st.session_state.get('_nifty_spot_live')
+        if not spot or not mp:
+            return
+        spot = float(spot)
+
+        eg = mp.get('entry_gate') or {}
+        state = eg.get('state', '')
+
+        if state != 'REVERSED':
+            return
+
+        level = eg.get('level')
+        zone = eg.get('zone', '')
+        if not level:
+            return
+
+        # Latch with cooldown so we alert once per reversal, not every cycle
+        states = st.session_state.setdefault('_entry_reversed_state', {})
+        now = time.time()
+        key = f"reversed:{round(level, 1)}"
+        prev = states.get(key, {})
+
+        last_alert = prev.get('last_alert_time')
+        if last_alert and (now - last_alert) < ENTRY_REVERSED_COOLDOWN_S:
+            return  # sleeping (cooldown active)
+
+        # Alert once on entry to the reversed state
+        if prev.get('state_seen'):
+            return  # already alerted for this reversal
+
+        fr = build_final_read(st.session_state.get('_mios_state')) or {}
+        _ab = mp.get('atm_bias') or {}
+        reason = eg.get('reason', '')
+
+        msg = (
+            f"⚠️ <b>Entry Reversal at ₹{level:,.0f}</b>\n"
+            f"Zone: {zone} · ATM: {_ab.get('verdict', 'N/A')}\n"
+            f"Reason: {reason}\n"
+            f"Current: 🎯 ₹{spot:,.1f}"
+        )
+
+        try:
+            # Send to alert bot, not main bot
+            url = f"https://api.telegram.org/bot{TELEGRAM_ALERT_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": TELEGRAM_ALERT_CHAT_ID,
+                "text": msg,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True
+            }
+            requests.post(url, json=payload, timeout=5)
+        except Exception:
+            pass
+
+        # Mark as alerted
+        states[key] = {'state_seen': True, 'last_alert_time': now}
+
+        # Reset alert tracker if spot moves far from the level (so next reversal at same level re-alerts)
+        dist = abs(spot - level)
+        if dist > eg.get('band', 5) * 3:  # 3x the entry band means we've clearly left
+            states.pop(key, None)
+
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
 def capture_stage2_market_events(spot_price, df, option_data):
     """Feed the Market Event Engine (Discord feed + Supabase audit trail)
     from conditions this app already computes each cycle — the 6-8 event
@@ -15453,6 +15539,15 @@ def _render_main_analyzer():
              "energy the greater. Fires once per setup (cooldown). Reuses "
              "existing engines; changes no verdict.")
 
+    # ── ⚠️ Entry reversal (bias-against at zone) → Telegram ────────────
+    st.session_state["_entry_reversed_on"] = st.sidebar.checkbox(
+        "⚠️ Entry reversal (bias-against at zone) → Alert Telegram",
+        value=ENTRY_REVERSED_ALERT_DEFAULT,
+        help="A Telegram note to the alert bot when NIFTY reaches a mapped "
+             "price zone but the bias has reversed (trend weakened, opposite "
+             "writers appeared, etc.). Whipsaw alert — catches traps. Fires "
+             "once per reversal (cooldown). Reuses existing engines.")
+
     # ── the two sub-alerts the owner paused (off by default) ──────────
     # Ranked S/R touch is a subset of the level-touch alert above; VOB formation
     # a subset of the formation alert. Both were too noisy, so they are opt-in.
@@ -16161,6 +16256,10 @@ def _render_main_analyzer():
         pass
     try:
         _notify_confluence_entry()
+    except Exception:
+        pass
+    try:
+        _notify_entry_reversed()
     except Exception:
         pass
 
