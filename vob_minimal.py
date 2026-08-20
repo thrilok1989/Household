@@ -15594,6 +15594,52 @@ def _render_main_analyzer():
     else:
         st.session_state.pop("_mios_transport", None)
 
+    # ── 🎯 Instrument toggle (NIFTY/SENSEX) for LTP chart ──────────────
+    _current_instrument = st.session_state.get('_selected_instrument', 'NIFTY')
+    _selected_instrument = st.sidebar.selectbox(
+        "🎯 Instrument",
+        options=["NIFTY", "SENSEX"],
+        index=0 if _current_instrument == "NIFTY" else 1,
+        help="Switch between NIFTY (NSE) and SENSEX (BSE). LTP chart displays "
+             "the selected instrument. Entry gates scale to instrument specs.")
+    if _selected_instrument != _current_instrument:
+        st.session_state['_selected_instrument'] = _selected_instrument
+        st.rerun()
+    st.session_state['_selected_instrument'] = _selected_instrument
+
+    # Set instrument context for the render cycle
+    try:
+        from mios_v5.instrument_registry import InstrumentContext
+        if _selected_instrument == "SENSEX":
+            _ctx = InstrumentContext(
+                symbol="SENSEX",
+                security_id=40,
+                exchange_segment="IDX_I",
+                contract_multiplier=1.0,
+                strike_step=100,
+                current_expiry="2026-08-27",  # Will be updated from Dhan discovery
+                expiry_list=[],  # Will be populated from Dhan
+                atm_range=100,
+                lot_size=1,
+                tick_size=0.05,
+            )
+        else:  # NIFTY default
+            _ctx = InstrumentContext(
+                symbol="NIFTY",
+                security_id=13,
+                exchange_segment="IDX_I",
+                contract_multiplier=25.0,
+                strike_step=100,
+                current_expiry="2026-08-27",  # Will be updated from Dhan discovery
+                expiry_list=[],  # Will be populated from Dhan
+                atm_range=100,
+                lot_size=1,
+                tick_size=0.05,
+            )
+        st.session_state['_current_instrument_context'] = _ctx
+    except Exception as e:
+        st.session_state['_current_instrument_context'] = None
+
     timeframes = {"1 min": "1", "3 min": "3", "5 min": "5",
                   "15 min": "15", "25 min": "25", "60 min": "60"}
     interval = timeframes[st.sidebar.selectbox(
