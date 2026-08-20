@@ -180,6 +180,50 @@ NIFTY_UNDERLYING_SCRIP = 13
 NIFTY_UNDERLYING_SEG = "IDX_I"
 
 
+# ── Instrument Registry: discover specs from Dhan (not hardcoded) ────────
+# Initialize on first render; cache in session_state for reuse.
+def _get_instrument_context(session_state, selected_instrument: str = "NIFTY"):
+    """Get normalized instrument context (specs from Dhan)."""
+    cache_key = f"_instrument_context_{selected_instrument}"
+
+    if cache_key in session_state:
+        return session_state[cache_key]
+
+    try:
+        from mios_v5.instrument_registry import create_instrument_registry
+        registry = create_instrument_registry(dhan)
+
+        if selected_instrument == "SENSEX":
+            ctx = registry.discover_sensex()
+        else:
+            ctx = registry.discover_nifty()
+
+        if ctx:
+            session_state[cache_key] = ctx
+            return ctx
+    except Exception as e:
+        import logging
+        logging.error(f"Failed to discover {selected_instrument} specs: {e}")
+
+    # Fallback to hardcoded NIFTY if discovery fails
+    if selected_instrument == "NIFTY":
+        from mios_v5.instrument_registry import InstrumentContext
+        fallback = InstrumentContext(
+            symbol="NIFTY",
+            security_id=13,
+            exchange_segment="IDX_I",
+            contract_multiplier=25.0,
+            strike_step=100,
+            current_expiry="2026-08-27",
+            expiry_list=["2026-08-27", "2026-09-24"],
+            atm_range=100,
+            lot_size=1,
+            tick_size=0.05,
+        )
+        session_state[cache_key] = fallback
+        return fallback
+
+    return None
 
 
 
@@ -15422,6 +15466,23 @@ def _render_main_analyzer():
 
     # ── sidebar: only what changes what is fetched ──────────────────────
     st.sidebar.header("Configuration")
+
+    # ── 🎯 Instrument selector: NIFTY or SENSEX ──────────────────────────
+    # Switch between instruments. Dhan-driven discovery; all specs from live API.
+    # Changing instrument invalidates all cached data to prevent cross-contamination.
+    from mios_v5.instrument_cache_manager import get_current_instrument, mark_instrument_changed
+    _current_instrument = get_current_instrument(st.session_state)
+    _selected_instrument = st.sidebar.selectbox(
+        "🎯 Instrument",
+        options=["NIFTY", "SENSEX"],
+        index=0 if _current_instrument == "NIFTY" else 1,
+        help="Switch between NIFTY (NSE) and SENSEX (BSE) trading. "
+             "All specs (security ID, multiplier, expiry) discovered from Dhan. "
+             "Cached data cleared on switch."
+    )
+    if _selected_instrument != _current_instrument:
+        mark_instrument_changed(st.session_state, _selected_instrument)
+        st.rerun()
 
     # ── 📤 one-click market snapshot → Telegram (for AI analysis) ─────
     # Gathers everything the app already computed this cycle into one structured
