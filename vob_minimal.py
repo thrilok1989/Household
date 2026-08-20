@@ -12,6 +12,8 @@ import json
 import hashlib
 import numpy as np
 import math
+from mios_v5.index_option_specs import (
+    INDEX_OPTION_SPECS, index_option_segment, option_spec)
 from scipy.stats import norm
 from pytz import timezone
 import io
@@ -1892,10 +1894,14 @@ def get_nifty_futures_security_id():
         return None
 
 @st.cache_data(ttl=21600)
-def get_nifty_option_security_ids(expiry: str):
-    """Resolve Dhan security IDs for all NIFTY OPTIDX strikes of one expiry from
+def get_nifty_option_security_ids(expiry: str, symbol: str = "NIFTY"):
+    """Resolve Dhan security IDs for all OPTIDX strikes of one expiry from
     the scrip-master CSV. Returns {(strike_float, 'CE'/'PE'): security_id_int}.
-    Cached 6h. expiry is the Dhan option-chain expiry string (e.g. '2026-06-19')."""
+    Cached 6h. expiry is the Dhan option-chain expiry string (e.g. '2026-06-19').
+
+    `symbol` selects the instrument via INDEX_OPTION_SPECS; it defaults to
+    NIFTY so existing callers are unchanged.
+    """
     try:
         url = "https://images.dhan.co/api-data/api-scrip-master.csv"
         df = pd.read_csv(url, low_memory=False)
@@ -1912,16 +1918,18 @@ def get_nifty_option_security_ids(expiry: str):
                 f"scrip master option columns missing — got {list(df.columns)[:10]}…"
             )
             return {}
+        spec = option_spec(symbol)
         mask = df[inst_col].astype(str).str.upper().str.strip().eq('OPTIDX')
         if exch_col:
-            mask &= df[exch_col].astype(str).str.upper().str.strip().eq('NSE')
+            mask &= df[exch_col].astype(str).str.upper().str.strip().eq(spec["exchange"])
         sym_up = df[sym_col].astype(str).str.upper()
-        mask &= sym_up.str.contains('NIFTY')
-        for excl in ('BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'NIFTYNXT'):
-            mask &= ~sym_up.str.contains(excl)
+        # Exact symbol before the first '-', so SENSEX never picks up SENSEX50
+        # and NIFTY never picks up BANKNIFTY. `contains` would take both.
+        mask &= sym_up.str.split('-').str[0].str.strip().eq(spec["prefix"])
         opt = df[mask].copy()
         if opt.empty:
-            st.session_state['_nifty_opt_err'] = "no NIFTY OPTIDX rows in scrip master"
+            st.session_state['_nifty_opt_err'] = (
+                f"no {spec['prefix']} OPTIDX rows in scrip master")
             return {}
         # Match expiry by date
         opt['_exp'] = pd.to_datetime(opt[expiry_col], errors='coerce').dt.date
@@ -15268,19 +15276,40 @@ def _publish_atm_legs(api, spot, option_data, render_id):
     the day, and letting stale strikes accumulate is what produced repeated
     legs and double-counted bias rows.
     """
+    # 🎯 Which index's legs these are. The LTP panels follow the instrument
+    # toggle, so on SENSEX they are SENSEX option legs: SENSEX expiries, SENSEX
+    # strikes, SENSEX security ids, quoted on BSE_FNO. `option_data` stays the
+    # NIFTY chain — it feeds the Greeks and the market picture, which are
+    # deliberately still NIFTY-only — so none of it is used for SENSEX legs.
+    _ctx_legs = st.session_state.get('_current_instrument_context')
+    _leg_sym = (_ctx_legs.symbol if _ctx_legs else 'NIFTY')
+    _is_alt = _leg_sym != 'NIFTY'
+
     opt = option_data or {}
-    summary = opt.get('df_summary')
-    expiry = (opt.get('expiry') or opt.get('selected_expiry')
-              or (st.session_state.get('_cached_raw_chain_latest') or {}).get('expiry'))
-    if not expiry:
+    summary = None if _is_alt else opt.get('df_summary')
+    if _is_alt:
+        # SENSEX's own nearest expiry — the NIFTY chain's expiry is a different
+        # weekday and would resolve to no strikes at all.
+        expiry = None
         try:
             listed = (get_dhan_expiry_list_cached(
-                NIFTY_UNDERLYING_SCRIP, NIFTY_UNDERLYING_SEG) or {}).get('data') or []
+                _ctx_legs.security_id, _ctx_legs.exchange_segment)
+                or {}).get('data') or []
             expiry = listed[0] if listed else None
         except Exception:
             expiry = None
+    else:
+        expiry = (opt.get('expiry') or opt.get('selected_expiry')
+                  or (st.session_state.get('_cached_raw_chain_latest') or {}).get('expiry'))
+        if not expiry:
+            try:
+                listed = (get_dhan_expiry_list_cached(
+                    NIFTY_UNDERLYING_SCRIP, NIFTY_UNDERLYING_SEG) or {}).get('data') or []
+                expiry = listed[0] if listed else None
+            except Exception:
+                expiry = None
     try:
-        sid_map = get_nifty_option_security_ids(expiry) or {} if expiry else {}
+        sid_map = get_nifty_option_security_ids(expiry, _leg_sym) or {} if expiry else {}
     except Exception:
         sid_map = {}
 
@@ -15288,10 +15317,25 @@ def _publish_atm_legs(api, spot, option_data, render_id):
         strikes = sorted(summary['Strike'].dropna().unique().tolist())
     else:
         strikes = sorted({k[0] for k in sid_map.keys()})
+
+    # The legs must be centred on THEIR OWN index. Pricing SENSEX strikes off
+    # a ~24,000 NIFTY spot picks the lowest listed SENSEX strike as "ATM".
+    if _is_alt:
+        try:
+            _alt_spot = get_index_spot_ltp(int(_ctx_legs.security_id),
+                                           _ctx_legs.exchange_segment)
+        except Exception:
+            _alt_spot = None
+        if not _alt_spot:
+            st.session_state['_atm_leg_err'] = (
+                f"No {_leg_sym} spot — cannot centre the {_leg_sym} option legs.")
+            return
+        spot = _alt_spot
+
     if not strikes or not spot:
         return
 
-    seg = 'NSE_FNO'
+    seg = index_option_segment(_leg_sym)
     atm = min(strikes, key=lambda x: abs(x - spot))
     diffs = [strikes[i + 1] - strikes[i] for i in range(len(strikes) - 1)]
     gap = min(diffs) if diffs else 50
