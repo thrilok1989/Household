@@ -46,14 +46,15 @@ def _index_title(fig):
 
 # ── the app lands on SENSEX ────────────────────────────────────────────
 
-def test_default_instrument_is_sensex():
-    """Opening the app puts you on SENSEX without a click."""
-    assert DEFAULT_INSTRUMENT == "SENSEX"
-    assert get_current_instrument({}) == "SENSEX"
+def test_default_instrument_is_nifty():
+    """A fresh session opens on NIFTY — the index every existing alert and
+    engine refers to. SENSEX is a click away on the sidebar toggle."""
+    assert DEFAULT_INSTRUMENT == "NIFTY"
+    assert get_current_instrument({}) == "NIFTY"
 
 
 def test_an_explicit_selection_still_wins():
-    assert get_current_instrument({"_selected_instrument": "NIFTY"}) == "NIFTY"
+    assert get_current_instrument({"_selected_instrument": "SENSEX"}) == "SENSEX"
 
 
 # ── the frame's instrument reaches the label ───────────────────────────
@@ -93,3 +94,34 @@ def test_relabelling_does_not_disturb_the_figure_keys():
     assert set(figs) == set(SPLIT_KEYS)
     assert not notes
     assert all(figs[k] is not None for k in SPLIT_KEYS)
+
+
+# ── one toggle, not two ────────────────────────────────────────────────
+
+def test_only_one_instrument_selectbox_is_rendered():
+    """Regression: the sidebar carried TWO "🎯 Instrument" selectboxes.
+
+    Streamlit keys a widget by its parameters, and the two differed in `help`
+    text — so they got separate ids and both rendered instead of colliding.
+    The lower one then assigned `_selected_instrument` unconditionally on every
+    run, overwriting whatever the upper one had just set, which left the upper
+    dropdown inert. Two controls for one setting is the bug whether or not they
+    fight; pin it to one.
+    """
+    import ast
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[2] / "vob_minimal.py").read_text()
+
+    found = 0
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (isinstance(fn, ast.Attribute) and fn.attr == "selectbox"):
+            continue
+        label = node.args[0] if node.args else None
+        if isinstance(label, ast.Constant) and "Instrument" in str(label.value):
+            found += 1
+
+    assert found == 1, f"expected exactly one Instrument selectbox, found {found}"

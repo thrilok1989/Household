@@ -84,14 +84,14 @@ def test_cache_invalidation_clears_keys():
 
 
 def test_get_current_instrument_default():
-    """get_current_instrument falls back to DEFAULT_INSTRUMENT (SENSEX).
+    """get_current_instrument falls back to DEFAULT_INSTRUMENT (NIFTY).
 
-    Was NIFTY. Changed deliberately so the app opens on the expiry being
-    traded; `test_instrument_chart_wiring` pins the value itself.
+    `test_instrument_chart_wiring` pins the value itself; this pins that the
+    fallback is wired to the constant rather than to a second literal.
     """
     empty_session = {}
     assert get_current_instrument(empty_session) == DEFAULT_INSTRUMENT
-    assert get_current_instrument(empty_session) == "SENSEX"
+    assert get_current_instrument(empty_session) == "NIFTY"
 
 
 def test_get_current_instrument_returns_selected():

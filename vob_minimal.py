@@ -15560,11 +15560,12 @@ def _render_main_analyzer():
     _current_instrument = get_current_instrument(st.session_state)
     _selected_instrument = st.sidebar.selectbox(
         "🎯 Instrument",
-        options=["SENSEX", "NIFTY"],
-        index=0 if _current_instrument == "SENSEX" else 1,
-        help="Switch between NIFTY (NSE) and SENSEX (BSE) trading. "
-             "All specs (security ID, multiplier, expiry) discovered from Dhan. "
-             "Cached data cleared on switch."
+        options=["NIFTY", "SENSEX"],
+        index=0 if _current_instrument == "NIFTY" else 1,
+        help="Switch between NIFTY (NSE) and SENSEX (BSE). The index chart and "
+             "the ATM Call/Put LTP panels both follow this; the option chain, "
+             "Greeks and Market Picture stay NIFTY. Specs come from Dhan's "
+             "scrip master, and cached data is cleared on switch."
     )
     if _selected_instrument != _current_instrument:
         mark_instrument_changed(st.session_state, _selected_instrument)
@@ -15760,18 +15761,14 @@ def _render_main_analyzer():
     else:
         st.session_state.pop("_mios_transport", None)
 
-    # ── 🎯 Instrument toggle (NIFTY/SENSEX) for LTP chart ──────────────
-    _current_instrument = st.session_state.get('_selected_instrument', 'SENSEX')
-    _selected_instrument = st.sidebar.selectbox(
-        "🎯 Instrument",
-        options=["SENSEX", "NIFTY"],
-        index=0 if _current_instrument == "SENSEX" else 1,
-        help="Switch between SENSEX (BSE) and NIFTY (NSE). LTP chart displays "
-             "the selected instrument. Entry gates scale to instrument specs.")
-    if _selected_instrument != _current_instrument:
-        st.session_state['_selected_instrument'] = _selected_instrument
-        st.rerun()
-    st.session_state['_selected_instrument'] = _selected_instrument
+    # 🎯 The instrument comes from the ONE toggle built above. There used to be
+    # a second, identical "🎯 Instrument" selectbox here — two dropdowns in the
+    # sidebar, and because Streamlit keys a widget by its parameters and the two
+    # carried different `help` text, they got separate ids and both rendered
+    # rather than colliding. This one then wrote `_selected_instrument`
+    # unconditionally on every run, so it overwrote whatever the first dropdown
+    # had just set: changing the top toggle did nothing.
+    _selected_instrument = get_current_instrument(st.session_state)
 
     # Set instrument context for the render cycle. Every spec below is a value
     # read off Dhan's scrip master, not an assumption — an invented SENSEX id
