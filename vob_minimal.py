@@ -705,7 +705,8 @@ FORMATION_ALERTS_DEFAULT = True
 # Telegram when an option LTP (call or put) comes within ±5 of one of ITS OWN
 # high-volume-point lines. Latched per line + a cooldown ("sleep") so a price
 # loitering at the line does not repeat. Reuses `mios_v5.level_touch`.
-LEG_HVP_TOUCH_DEFAULT = True
+# OFF by default — opt in via the sidebar.
+LEG_HVP_TOUCH_DEFAULT = False
 LEG_HVP_BAND = 5.0            # ±5 points of the LTP, as asked
 LEG_HVP_COOLDOWN_S = 900.0    # the "sleeping facility" — 15 min per line
 
@@ -15298,7 +15299,7 @@ def _render_main_analyzer():
         help="A Telegram note when the Call or Put LTP comes within ±5 points of "
              "one of its own high-volume-point lines. Latched per line and given "
              "a 15-minute cooldown (sleep), so a price sitting at the line does "
-             "not repeat.")
+             "not repeat. Off by default — enable it here.")
 
     # ── 🎯 spot reaching a key level (±5 pts) → Telegram ──────────────
     # War zone, either OI wall, and the ranked support / resistance. Latched per
