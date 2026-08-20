@@ -209,3 +209,36 @@ def test_format_snapshot_signal_is_bold():
     msgs = format_snapshot(data)
     full_text = '\n'.join(msgs)
     assert '<b>SIGNAL: BUY CALL</b>' in full_text
+
+
+def test_gather_mios_v6_data_handles_none_oi_lists():
+    """None values for OI lists don't crash subscripting."""
+    data = {
+        "_market_picture": {
+            "oi_ceiling": None,  # This would cause NoneType subscript error
+            "oi_floor": [24400],  # Valid list
+            "oi_pin": None
+        }
+    }
+    d = gather_mios_v6_data(data)
+    # Should not crash; should return None for None values
+    assert d.get('oi_ceiling') is None
+    assert d.get('oi_floor') == 24400.0
+    assert d.get('oi_pin') is None
+
+
+def test_gather_mios_v6_data_handles_energy_score_missing():
+    """Missing energy_score dict is handled gracefully."""
+    data = {
+        "_premium_energy": {
+            # energy_score missing entirely
+            "call_spike_state": "active",
+            "put_spike_state": None
+        }
+    }
+    d = gather_mios_v6_data(data)
+    # Should not crash
+    assert d.get('total_energy') is None
+    assert d.get('call_energy') is None
+    assert d.get('put_energy') is None
+    assert d.get('call_spike') == "active"

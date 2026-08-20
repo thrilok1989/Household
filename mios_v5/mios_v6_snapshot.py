@@ -109,9 +109,12 @@ def gather_mios_v6_data(session_state: Mapping[str, Any]) -> Dict[str, Any]:
 
     # ── Dealer / OI ──
     d['max_pain'] = _f(mp.get('max_pain'))
-    d['oi_ceiling'] = _f(mp.get('oi_ceiling', [None])[0])
-    d['oi_floor'] = _f(mp.get('oi_floor', [None])[0])
-    d['oi_pin'] = _f(mp.get('oi_pin', [None])[0])
+    _oc = mp.get('oi_ceiling')
+    d['oi_ceiling'] = _f(_oc[0] if _oc else None)
+    _of = mp.get('oi_floor')
+    d['oi_floor'] = _f(_of[0] if _of else None)
+    _op = mp.get('oi_pin')
+    d['oi_pin'] = _f(_op[0] if _op else None)
 
     # ── Greeks ──
     _gx = ss.get('_gex_data') or {}
