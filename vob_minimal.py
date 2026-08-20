@@ -11464,6 +11464,110 @@ def _notify_leg_hvp_touch():
         pass  # an alert must never take the cycle down
 
 
+def _gather_market_snapshot():
+    """Collect everything the app has ALREADY computed into one flat dict for
+    `mios_v5.market_snapshot.build`. Every read is defensive — a missing producer
+    just drops its field, and the formatter skips empty sections."""
+    def _n(v):
+        try:
+            f = float(v)
+            return None if f != f else f
+        except (TypeError, ValueError):
+            return None
+
+    def _wall(x):
+        return x[0] if isinstance(x, (list, tuple)) and x else None
+
+    d = {}
+    ss = st.session_state
+    d['spot'] = _n(ss.get('_nifty_spot_live'))
+    d['time'] = (ss.get('_opt_data_ts') or '')[:19].replace('T', ' ') or None
+
+    mp = ss.get('_market_picture') or {}
+    d['regime'] = mp.get('regime')
+    d['p_up'], d['p_down'], d['p_side'] = mp.get('p_up'), mp.get('p_down'), mp.get('p_side')
+    d['vwap'] = _n(mp.get('vwap'))
+    d['oi_ce_wall'] = _n(_wall(mp.get('oi_ceiling')))
+    d['oi_pe_wall'] = _n(_wall(mp.get('oi_floor')))
+    d['magnet'] = _n(_wall(mp.get('oi_pin')))
+    _ab = mp.get('atm_bias') or {}
+    d['atm_verdict'] = _ab.get('verdict')
+    d['atm_score'] = (f"{_ab['score']:+.1f}" if _n(_ab.get('score')) is not None else None)
+    _dex = mp.get('dex_bias')
+    d['dex'] = (_dex.get('label') if isinstance(_dex, dict) else _dex)
+    _sk = mp.get('skew_bias')
+    d['skew'] = (_sk.get('label') if isinstance(_sk, dict) else _sk)
+    _doi = mp.get('doi_bias')
+    d['doi_bias'] = (_doi.get('label') if isinstance(_doi, dict) else _doi)
+    for _k, _src in (('global', 'global_bias'), ('news', 'news_bias'),
+                     ('commodity', 'commodity_bias')):
+        _v = mp.get(_src)
+        d[_k] = (_v.get('label') or _v.get('regime') if isinstance(_v, dict) else _v)
+    _vc = mp.get('vc_exp') or {}
+    d['net_vanna'] = (f"vanna {_vc['net_vanna']:+,.0f}" if _n(_vc.get('net_vanna')) is not None else None)
+    d['net_charm'] = (f"charm {_vc['net_charm']:+,.0f}" if _n(_vc.get('net_charm')) is not None else None)
+    d['net_vega'] = (f"vega {_vc['net_vega']:+,.0f}" if _n(_vc.get('net_vega')) is not None else None)
+
+    gx = ss.get('_gex_data') or {}
+    d['total_gex'] = (f"{gx['total_gex']:+,.0f}" if _n(gx.get('total_gex')) is not None else None)
+    d['gamma_flip'] = _n(gx.get('gamma_flip_level'))
+    d['gex_signal'] = gx.get('gex_signal')
+
+    mf = ss.get('_money_flow_data') or {}
+    d['poc'] = _n(mf.get('poc_price'))
+    d['vah'] = _n(mf.get('value_area_high'))
+    d['val'] = _n(mf.get('value_area_low'))
+
+    try:
+        from mios_v5.final_read import build_final_read
+        fr = build_final_read(ss.get('_mios_state')) or {}
+        d['support'] = _n(fr.get('strong_support'))
+        d['resistance'] = _n(fr.get('strong_resistance'))
+        _bz = fr.get('battle_zone') or {}
+        d['war_zone'] = _n(_bz.get('price')) if isinstance(_bz, dict) else None
+        d['expected_winner'] = fr.get('expected_winner')
+    except Exception:
+        pass
+
+    fmr = ss.get('_full_market_read') or {}
+    d['call_mode'], d['put_mode'] = fmr.get('call_mode'), fmr.get('put_mode')
+    d['call_strength'], d['put_strength'] = fmr.get('call_strength'), fmr.get('put_strength')
+    d['breakout'], d['rejection'] = fmr.get('breakout'), fmr.get('breakdown')
+
+    # level-acceptance observed states, from the strip's last read
+    try:
+        _zones = ss.get('_la_zones_latest') or []
+        _la = []
+        for z in _zones:
+            _obs = str(z.get('observed') or '').replace('_', ' ')
+            _pz = _n(z.get('price'))
+            if _obs and _pz is not None:
+                _la.append(f"₹{_pz:,.0f} {_obs}")
+        d['level_acceptance'] = _la or None
+    except Exception:
+        pass
+
+    # greek behaviour headline, if the strip published one
+    try:
+        _gbh = ss.get('_greek_behaviour_synth')
+        if _gbh:
+            d['greek_behaviour'] = _gbh
+    except Exception:
+        pass
+    return d
+
+
+def _send_market_snapshot():
+    """Build the full snapshot and send it to Telegram (chunked). Returns the
+    number of parts sent, or 0 on failure."""
+    from mios_v5.market_snapshot import build as _snap_build, chunks as _snap_chunks
+    text = _snap_build(_gather_market_snapshot())
+    parts = _snap_chunks(text)
+    for _p in parts:
+        send_telegram_message_sync(_p, force=True)
+    return len(parts)
+
+
 def _notify_level_touches():
     """🎯 Telegram note when spot reaches a key level within ±5 points.
 
@@ -15232,6 +15336,22 @@ def _render_main_analyzer():
 
     # ── sidebar: only what changes what is fetched ──────────────────────
     st.sidebar.header("Configuration")
+
+    # ── 📤 one-click market snapshot → Telegram (for AI analysis) ─────
+    # Gathers everything the app already computed this cycle into one structured
+    # message and sends it, so it can be forwarded to an AI to analyse the market.
+    if st.sidebar.button("📤 Send market snapshot → Telegram (for AI)",
+                         help="Sends one structured message with the full market "
+                              "picture — regime, levels, ATM verdict, dealer/"
+                              "greeks, flow, level acceptance and context — to "
+                              "forward to an AI for a complete analysis. Reuses "
+                              "existing reads; sends nothing else."):
+        try:
+            _n_parts = _send_market_snapshot()
+            st.sidebar.success(f"Snapshot sent to Telegram "
+                               f"({_n_parts} message{'s' if _n_parts != 1 else ''}).")
+        except Exception as _snap_err:
+            st.sidebar.error(f"Snapshot failed: {_snap_err}")
 
     # ── 📨 MIOS V6 entry / exit signals to Telegram ────────────────────
     # The default lives in `MIOS_V6_TELEGRAM_DEFAULT` (top of file) so it is
