@@ -701,6 +701,15 @@ POC_SHIFT_ALERTS_DEFAULT = False
 #    replayed. `_notify_chart_formations` owns the memory and the send.
 FORMATION_ALERTS_DEFAULT = True
 
+# ── Leg LTP → HVP-line touch alert ─────────────────────────────────────
+# Telegram when an option LTP (call or put) comes within ±5 of one of ITS OWN
+# high-volume-point lines. Latched per line + a cooldown ("sleep") so a price
+# loitering at the line does not repeat. Reuses `mios_v5.level_touch`.
+# OFF by default — opt in via the sidebar.
+LEG_HVP_TOUCH_DEFAULT = False
+LEG_HVP_BAND = 5.0            # ±5 points of the LTP, as asked
+LEG_HVP_COOLDOWN_S = 900.0    # the "sleeping facility" — 15 min per line
+
 # ── 🎯 Level-touch alerts → Telegram: spot reaching a key level within ±5 pts —
 #    the war zone, either OI wall, and the ranked support / resistance. ON by
 #    default (explicitly requested). Latched per level so a level price loiters
@@ -715,6 +724,17 @@ LEVEL_TOUCH_DEFAULT = True
 LEVEL_ACCEPT_ALERTS_DEFAULT = True
 #: seconds before the SAME zone may alert again — matches the level-touch sleep.
 LEVEL_ACCEPT_COOLDOWN_S = 900.0
+
+# ── Confluence entry alert (4-signal alignment) ────────────────────────
+# Telegram when NIFTY is at a level, the ATM-strike verdict is Strong Bull/Bear
+# AGREEING with the level, the trade-side leg's LTP is at its support/session-low,
+# and that side has the greater premium energy. Reuses existing engine outputs —
+# no new engine. Latched per setup + cooldown so it fires once, not every cycle.
+CONFLUENCE_ALERTS_DEFAULT = True
+CONFLUENCE_COOLDOWN_S = 900.0
+
+ENTRY_REVERSED_ALERT_DEFAULT = True
+ENTRY_REVERSED_COOLDOWN_S = 300.0
 
 # ── the two sub-alerts the owner paused ────────────────────────────────
 # The ranked support/resistance TOUCH (a sub-alert of level-touch) and the VOB
@@ -11376,6 +11396,181 @@ def _notify_chart_formations():
         pass  # an alert must never take the cycle down
 
 
+def _notify_leg_hvp_touch():
+    """📍 Telegram when an option LTP comes within ±5 of one of ITS OWN
+    high-volume-point (HVP) lines — call or put.
+
+    Reads what the terminal already published: each leg's HVP lines from
+    `_leg_profiles[side].hv_points` (owner: `volume_points.high_volume_pivots`)
+    and the leg's LTP from the last close of the cached leg frame. Nothing is
+    recomputed.
+
+    Anti-spam is the level-touch rule reused verbatim (`mios_v5.level_touch`):
+    each HVP line latches — it alerts once when the LTP enters the ±band and
+    re-arms only after the LTP leaves by more than the band — and a per-line
+    cooldown ("sleeping facility") suppresses any repeat within the window even
+    if the LTP keeps crossing the line. Opt-out via `_leg_hvp_touch_on`.
+    """
+    try:
+        if not st.session_state.get('_leg_hvp_touch_on', LEG_HVP_TOUCH_DEFAULT):
+            return
+        profiles = st.session_state.get('_leg_profiles') or {}
+        if not profiles:
+            return
+        from mios_v5 import bias_ball as _bb
+        from mios_v5 import level_touch as _lt
+        from mios_v5.ui.terminal_chart import atm_legs as _atm_legs
+        call_df, put_df, _ce, _pe = _atm_legs(st.session_state.get('_atm_leg_dfs'))
+        legs = {'CALL': call_df, 'PUT': put_df}
+        labels = {'CALL': profiles.get('call_label') or 'ATM Call',
+                  'PUT': profiles.get('put_label') or 'ATM Put'}
+        states = st.session_state.setdefault('_leg_hvp_touch_state', {})
+        now = time.time()
+        for side in ('CALL', 'PUT'):
+            df_l = legs.get(side)
+            try:
+                ltp = (float(df_l['close'].iloc[-1])
+                       if df_l is not None and not getattr(df_l, 'empty', True)
+                       else None)
+            except Exception:
+                ltp = None
+            if ltp is None:
+                continue
+            for p in ((profiles.get(side) or {}).get('hv_points') or ()):
+                if not isinstance(p, dict):
+                    continue
+                try:
+                    hv = float(p.get('price'))
+                except (TypeError, ValueError):
+                    continue
+                key = f"{side}:{round(hv, 1)}"
+                alert, new_state = _lt.evaluate(
+                    hv, ltp, states.get(key), band=LEG_HVP_BAND,
+                    rearm=LEG_HVP_BAND * 2, cooldown_s=LEG_HVP_COOLDOWN_S, now=now)
+                states[key] = new_state
+                if alert:
+                    _pv = str(p.get('side', '') or '').title()
+                    # NIFTY-bias ball: a HIGH pivot is resistance, a LOW is
+                    # support, then the leg rule inverts for PUT (bias_ball owns
+                    # that one rule) — so the ball reads NIFTY's direction.
+                    _bias = _bb.hvp_bias(side, p.get('side'))
+                    msg = (f"📍 <b>{labels[side]} LTP at HVP line</b>\n"
+                           f"LTP ₹{ltp:,.2f} · HVP ₹{hv:,.2f} "
+                           f"({ltp - hv:+.2f} pts)"
+                           + (f" · {_pv} pivot" if _pv else ""))
+                    msg = _bb.prefix(_bias, msg)
+                    try:
+                        send_telegram_message_sync(msg, force=True)
+                    except Exception:
+                        pass
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
+def _gather_market_snapshot():
+    """Collect everything the app has ALREADY computed into one flat dict for
+    `mios_v5.market_snapshot.build`. Every read is defensive — a missing producer
+    just drops its field, and the formatter skips empty sections."""
+    def _n(v):
+        try:
+            f = float(v)
+            return None if f != f else f
+        except (TypeError, ValueError):
+            return None
+
+    def _wall(x):
+        return x[0] if isinstance(x, (list, tuple)) and x else None
+
+    d = {}
+    ss = st.session_state
+    d['spot'] = _n(ss.get('_nifty_spot_live'))
+    d['time'] = (ss.get('_opt_data_ts') or '')[:19].replace('T', ' ') or None
+
+    mp = ss.get('_market_picture') or {}
+    d['regime'] = mp.get('regime')
+    d['p_up'], d['p_down'], d['p_side'] = mp.get('p_up'), mp.get('p_down'), mp.get('p_side')
+    d['vwap'] = _n(mp.get('vwap'))
+    d['oi_ce_wall'] = _n(_wall(mp.get('oi_ceiling')))
+    d['oi_pe_wall'] = _n(_wall(mp.get('oi_floor')))
+    d['magnet'] = _n(_wall(mp.get('oi_pin')))
+    _ab = mp.get('atm_bias') or {}
+    d['atm_verdict'] = _ab.get('verdict')
+    d['atm_score'] = (f"{_ab['score']:+.1f}" if _n(_ab.get('score')) is not None else None)
+    _dex = mp.get('dex_bias')
+    d['dex'] = (_dex.get('label') if isinstance(_dex, dict) else _dex)
+    _sk = mp.get('skew_bias')
+    d['skew'] = (_sk.get('label') if isinstance(_sk, dict) else _sk)
+    _doi = mp.get('doi_bias')
+    d['doi_bias'] = (_doi.get('label') if isinstance(_doi, dict) else _doi)
+    for _k, _src in (('global', 'global_bias'), ('news', 'news_bias'),
+                     ('commodity', 'commodity_bias')):
+        _v = mp.get(_src)
+        d[_k] = (_v.get('label') or _v.get('regime') if isinstance(_v, dict) else _v)
+    _vc = mp.get('vc_exp') or {}
+    d['net_vanna'] = (f"vanna {_vc['net_vanna']:+,.0f}" if _n(_vc.get('net_vanna')) is not None else None)
+    d['net_charm'] = (f"charm {_vc['net_charm']:+,.0f}" if _n(_vc.get('net_charm')) is not None else None)
+    d['net_vega'] = (f"vega {_vc['net_vega']:+,.0f}" if _n(_vc.get('net_vega')) is not None else None)
+
+    gx = ss.get('_gex_data') or {}
+    d['total_gex'] = (f"{gx['total_gex']:+,.0f}" if _n(gx.get('total_gex')) is not None else None)
+    d['gamma_flip'] = _n(gx.get('gamma_flip_level'))
+    d['gex_signal'] = gx.get('gex_signal')
+
+    mf = ss.get('_money_flow_data') or {}
+    d['poc'] = _n(mf.get('poc_price'))
+    d['vah'] = _n(mf.get('value_area_high'))
+    d['val'] = _n(mf.get('value_area_low'))
+
+    try:
+        from mios_v5.final_read import build_final_read
+        fr = build_final_read(ss.get('_mios_state')) or {}
+        d['support'] = _n(fr.get('strong_support'))
+        d['resistance'] = _n(fr.get('strong_resistance'))
+        _bz = fr.get('battle_zone') or {}
+        d['war_zone'] = _n(_bz.get('price')) if isinstance(_bz, dict) else None
+        d['expected_winner'] = fr.get('expected_winner')
+    except Exception:
+        pass
+
+    fmr = ss.get('_full_market_read') or {}
+    d['call_mode'], d['put_mode'] = fmr.get('call_mode'), fmr.get('put_mode')
+    d['call_strength'], d['put_strength'] = fmr.get('call_strength'), fmr.get('put_strength')
+    d['breakout'], d['rejection'] = fmr.get('breakout'), fmr.get('breakdown')
+
+    # level-acceptance observed states, from the strip's last read
+    try:
+        _zones = ss.get('_la_zones_latest') or []
+        _la = []
+        for z in _zones:
+            _obs = str(z.get('observed') or '').replace('_', ' ')
+            _pz = _n(z.get('price'))
+            if _obs and _pz is not None:
+                _la.append(f"₹{_pz:,.0f} {_obs}")
+        d['level_acceptance'] = _la or None
+    except Exception:
+        pass
+
+    # greek behaviour headline, if the strip published one
+    try:
+        _gbh = ss.get('_greek_behaviour_synth')
+        if _gbh:
+            d['greek_behaviour'] = _gbh
+    except Exception:
+        pass
+    return d
+
+
+def _send_market_snapshot():
+    """Build the full snapshot and send it to Telegram (chunked). Returns the
+    number of parts sent, or 0 on failure."""
+    from mios_v5.market_snapshot import build as _snap_build, chunks as _snap_chunks
+    text = _snap_build(_gather_market_snapshot())
+    parts = _snap_chunks(text)
+    for _p in parts:
+        send_telegram_message_sync(_p, force=True)
+    return len(parts)
+
+
 def _notify_level_touches():
     """🎯 Telegram note when spot reaches a key level within ±5 points.
 
@@ -11522,6 +11717,171 @@ def _notify_level_acceptance():
                 states[key] = {'observed': observed, 'ts': now}
             except Exception:
                 pass
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
+def _notify_confluence_entry():
+    """⚡ Telegram when the 4-signal confluence aligns — NIFTY at a level, the
+    ATM-strike verdict Strong Bull/Bear AGREEING with the level, the trade-side
+    leg's LTP at its support/session-low, and that side's premium energy the
+    greater. Every input is an EXISTING engine output; nothing is recomputed.
+
+    Latched per (side, level) with a cooldown so one setup fires once, not every
+    ~20s cycle. Opt-out via `_confluence_alerts_on`.
+    """
+    try:
+        if not st.session_state.get('_confluence_alerts_on', CONFLUENCE_ALERTS_DEFAULT):
+            return
+        spot = st.session_state.get('_nifty_spot_live')
+        if not spot:
+            return
+        spot = float(spot)
+        from mios_v5.entry_alignment import (evaluate as _ea_eval,
+                                             leg_at_support as _ea_leg,
+                                             message as _ea_msg)
+        from mios_v5.final_read import build_final_read
+        from mios_v5.ui.terminal_chart import atm_legs as _atm_legs
+
+        fr = build_final_read(st.session_state.get('_mios_state')) or {}
+        mp = st.session_state.get('_market_picture') or {}
+        _ab = mp.get('atm_bias') or {}
+        _verdict = str(_ab.get('verdict') or '')
+        if 'Strong' not in _verdict:
+            return                                   # only strong verdicts qualify
+
+        _bz = fr.get('battle_zone') or {}
+        _support = fr.get('strong_support')
+        _resistance = fr.get('strong_resistance')
+        _war = _bz.get('price') if isinstance(_bz, dict) else None
+
+        # per-side premium energy (already published by Stage 71.7)
+        _en = (st.session_state.get('_premium_energy') or {}).get('energy_score') or {}
+        _ce_en, _pe_en = _en.get('CALL'), _en.get('PUT')
+
+        # the ATM call/put leg frames + tags the app already cached
+        _call_df, _put_df, _ce_tag, _pe_tag = _atm_legs(
+            st.session_state.get('_atm_leg_dfs'))
+        _sr = st.session_state.get('_atm_leg_sr_behavior') or {}
+
+        def _leg_inputs(df_l, tag):
+            ltp = low = None
+            try:
+                if df_l is not None and not getattr(df_l, 'empty', True):
+                    ltp = float(df_l['close'].iloc[-1])
+                    low = float(df_l['low'].min())
+            except Exception:
+                pass
+            leg_sr = _sr.get(tag) if tag else None
+            tol = max((ltp or 0) * 0.02, 1.0)
+            return _ea_leg(leg_sr, ltp, low, tol)
+
+        _call_at_sup = _leg_inputs(_call_df, _ce_tag)
+        _put_at_sup = _leg_inputs(_put_df, _pe_tag)
+
+        sig = _ea_eval(spot=spot, support=_support, resistance=_resistance,
+                       war_zone=_war, atm_verdict=_verdict,
+                       call_at_support=_call_at_sup, put_at_support=_put_at_sup,
+                       call_energy=_ce_en, put_energy=_pe_en)
+        if not sig:
+            return
+
+        now = time.time()
+        try:
+            key = f"{sig['side']}:{round(float(sig.get('level') or 0))}"
+        except (TypeError, ValueError):
+            key = str(sig['side'])
+        prev = st.session_state.get('_confluence_alert_state') or {}
+        if prev.get('key') == key and now - float(prev.get('ts') or 0) < CONFLUENCE_COOLDOWN_S:
+            return                                   # same setup, still cooling
+        try:
+            send_telegram_message_sync(_ea_msg(sig, spot), force=True)
+            st.session_state['_confluence_alert_state'] = {'key': key, 'ts': now}
+        except Exception:
+            pass
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
+def _notify_entry_reversed():
+    """⚠️ Alert to Telegram when NIFTY is at a price zone but the bias has
+    reversed against the trade setup. This catches whipsaw scenarios where
+    price reached the level but conditions deteriorated (trend weakened,
+    opposite writers appeared, etc.).
+
+    Latched per reversal with a cooldown so it fires once, not every cycle.
+    Opt-out via `_entry_reversed_on`.
+    """
+    try:
+        if not st.session_state.get('_entry_reversed_on', ENTRY_REVERSED_ALERT_DEFAULT):
+            return
+        if not TELEGRAM_ALERT_BOT_TOKEN or not TELEGRAM_ALERT_CHAT_ID:
+            return
+        from mios_v5.final_read import build_final_read
+
+        mp = st.session_state.get('_market_picture') or {}
+        spot = st.session_state.get('_nifty_spot_live')
+        if not spot or not mp:
+            return
+        spot = float(spot)
+
+        eg = mp.get('entry_gate') or {}
+        state = eg.get('state', '')
+
+        if state != 'REVERSED':
+            return
+
+        level = eg.get('level')
+        zone = eg.get('zone', '')
+        if not level:
+            return
+
+        # Latch with cooldown so we alert once per reversal, not every cycle
+        states = st.session_state.setdefault('_entry_reversed_state', {})
+        now = time.time()
+        key = f"reversed:{round(level, 1)}"
+        prev = states.get(key, {})
+
+        last_alert = prev.get('last_alert_time')
+        if last_alert and (now - last_alert) < ENTRY_REVERSED_COOLDOWN_S:
+            return  # sleeping (cooldown active)
+
+        # Alert once on entry to the reversed state
+        if prev.get('state_seen'):
+            return  # already alerted for this reversal
+
+        fr = build_final_read(st.session_state.get('_mios_state')) or {}
+        _ab = mp.get('atm_bias') or {}
+        reason = eg.get('reason', '')
+
+        msg = (
+            f"⚠️ <b>Entry Reversal at ₹{level:,.0f}</b>\n"
+            f"Zone: {zone} · ATM: {_ab.get('verdict', 'N/A')}\n"
+            f"Reason: {reason}\n"
+            f"Current: 🎯 ₹{spot:,.1f}"
+        )
+
+        try:
+            # Send to alert bot, not main bot
+            url = f"https://api.telegram.org/bot{TELEGRAM_ALERT_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": TELEGRAM_ALERT_CHAT_ID,
+                "text": msg,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True
+            }
+            requests.post(url, json=payload, timeout=5)
+        except Exception:
+            pass
+
+        # Mark as alerted
+        states[key] = {'state_seen': True, 'last_alert_time': now}
+
+        # Reset alert tracker if spot moves far from the level (so next reversal at same level re-alerts)
+        dist = abs(spot - level)
+        if dist > eg.get('band', 5) * 3:  # 3x the entry band means we've clearly left
+            states.pop(key, None)
+
     except Exception:
         pass  # an alert must never take the cycle down
 
@@ -12061,6 +12421,42 @@ def render_strike_mode_dashboard(spot_price, df, option_data):
             _atm2 = _atm2_html(_atm2_tab(_atm2_rows, float(atm)), float(atm))
             if _atm2:
                 st.markdown(_atm2, unsafe_allow_html=True)
+    except Exception:
+        pass
+
+    # ── 📊 ATM ±2 FULL BIAS GRID (11 biases → verdict, owner's chain-bias set) ──
+    # Ported from the owner's option-chain bias script. Same ATM±2 window, but the
+    # LTP · OI · ΔOI · Vol · Δ · Γ · Bid/Ask · IV · ΔExp · ΓExp · DVP biases →
+    # Score/Verdict/Operator/Scalp/Fake-Real. Reuses the SAME already-fetched
+    # df_summary — including the REAL Delta/Gamma the chain build already put on
+    # it (Delta_CE/PE, Gamma_CE/PE) — so no new fetch and no Greek recompute.
+    try:
+        from mios_v5.atm_bias_grid import grid as _bg_grid, grid_html as _bg_html
+        _bg_rows = []
+        for _off in (-2, -1, 0, 1, 2):
+            _sp = atm + _off * gap
+            _r = ds[ds['Strike'] == _sp]
+            if _r.empty:
+                continue
+            _rd = _r.iloc[0]
+            _bg_rows.append((float(_sp), {
+                'ltp_ce': _rd.get('lastPrice_CE'), 'ltp_pe': _rd.get('lastPrice_PE'),
+                'oi_ce': _rd.get('openInterest_CE'), 'oi_pe': _rd.get('openInterest_PE'),
+                'chg_ce': _rd.get('changeinOpenInterest_CE'),
+                'chg_pe': _rd.get('changeinOpenInterest_PE'),
+                'vol_ce': _rd.get('totalTradedVolume_CE'),
+                'vol_pe': _rd.get('totalTradedVolume_PE'),
+                'delta_ce': _rd.get('Delta_CE'), 'delta_pe': _rd.get('Delta_PE'),
+                'gamma_ce': _rd.get('Gamma_CE'), 'gamma_pe': _rd.get('Gamma_PE'),
+                'bid_ce': _rd.get('bidQty_CE'), 'ask_ce': _rd.get('askQty_CE'),
+                'iv_ce': _rd.get('impliedVolatility_CE'),
+                'iv_pe': _rd.get('impliedVolatility_PE'),
+            }))
+        if _bg_rows:
+            _bg = _bg_html(_bg_grid(_bg_rows, float(atm), float(spot_price or atm)),
+                           float(atm))
+            if _bg:
+                st.markdown(_bg, unsafe_allow_html=True)
     except Exception:
         pass
 
@@ -15027,6 +15423,49 @@ def _render_main_analyzer():
     # ── sidebar: only what changes what is fetched ──────────────────────
     st.sidebar.header("Configuration")
 
+    # ── 📤 one-click market snapshot → Telegram (for AI analysis) ─────
+    # Gathers everything the app already computed this cycle into one structured
+    # message and sends it, so it can be forwarded to an AI to analyse the market.
+    if st.sidebar.button("📤 Send market snapshot → Telegram (for AI)",
+                         help="Sends one structured message with the full market "
+                              "picture — regime, levels, ATM verdict, dealer/"
+                              "greeks, flow, level acceptance and context — to "
+                              "forward to an AI for a complete analysis. Reuses "
+                              "existing reads; sends nothing else."):
+        try:
+            _n_parts = _send_market_snapshot()
+            st.sidebar.success(f"Snapshot sent to Telegram "
+                               f"({_n_parts} message{'s' if _n_parts != 1 else ''}).")
+        except Exception as _snap_err:
+            st.sidebar.error(f"Snapshot failed: {_snap_err}")
+
+    # ── 🧬 MIOS V6 snapshot → Telegram (12 messages, complete context) ─────
+    # Pure formatter that gathers all existing MIOS V6 published values and
+    # splits them across 10-12 separate Telegram messages for external AI analysis.
+    # One message per major section: Time/Price, Market, S/R, Premium, Flow, Dealer,
+    # Greeks, Behaviour, Liquidity, Global, News, Signal.
+    if st.sidebar.button("🧬 Send MIOS V6 snapshot → Telegram (12 sections)",
+                         help="Sends complete MIOS V6 market analysis across 12 "
+                              "Telegram messages — one per section (Time, Market, "
+                              "S/R, Premium, Flow, Dealer, Greeks, Behaviour, "
+                              "Liquidity, Global, News, Signal). Phone-readable "
+                              "format for forwarding to external AI. Pure formatter, "
+                              "gathers only existing V6 data."):
+        try:
+            from mios_v5.mios_v6_snapshot import gather_mios_v6_data, format_snapshot
+            v6_data = gather_mios_v6_data(st.session_state)
+            v6_msgs = format_snapshot(v6_data)
+            if v6_msgs:
+                for v6_msg in v6_msgs:
+                    if v6_msg.strip():
+                        send_telegram_message_sync(v6_msg, force=True)
+                st.sidebar.success(f"MIOS V6 snapshot sent to Telegram "
+                                   f"({len(v6_msgs)} message{'s' if len(v6_msgs) != 1 else ''}).")
+            else:
+                st.sidebar.warning("No MIOS V6 data available to send.")
+        except Exception as _v6_err:
+            st.sidebar.error(f"MIOS V6 snapshot failed: {_v6_err}")
+
     # ── 📨 MIOS V6 entry / exit signals to Telegram ────────────────────
     # The default lives in `MIOS_V6_TELEGRAM_DEFAULT` (top of file) so it is
     # one findable line rather than a literal buried in the sidebar. The owner
@@ -15087,6 +15526,14 @@ def _render_main_analyzer():
              "is sent once; what already exists when the app loads is not "
              "re-announced.")
 
+    # ── 📍 option LTP reaching its HVP line (±5) → Telegram ────────────
+    st.session_state["_leg_hvp_touch_on"] = st.sidebar.checkbox(
+        "📍 LTP at its HVP line (±5) → Telegram", value=LEG_HVP_TOUCH_DEFAULT,
+        help="A Telegram note when the Call or Put LTP comes within ±5 points of "
+             "one of its own high-volume-point lines. Latched per line and given "
+             "a 15-minute cooldown (sleep), so a price sitting at the line does "
+             "not repeat. Off by default — enable it here.")
+
     # ── 🎯 spot reaching a key level (±5 pts) → Telegram ──────────────
     # War zone, either OI wall, and the ranked support / resistance. Latched per
     # level so a price loitered at alerts once. Consumed in
@@ -15108,6 +15555,26 @@ def _render_main_analyzer():
              "transition; a per-zone cooldown stops a flipping level spamming. "
              "Observation only; it does not change any verdict.")
 
+    # ── ⚡ 4-signal confluence entry → Telegram ───────────────────────
+    st.session_state["_confluence_alerts_on"] = st.sidebar.checkbox(
+        "⚡ Confluence entry (level + verdict + leg + energy) → Telegram",
+        value=CONFLUENCE_ALERTS_DEFAULT,
+        help="A Telegram note when four existing engine reads align in one "
+             "direction: NIFTY at a support/resistance/war-zone, the ATM-strike "
+             "verdict Strong Bull/Bear agreeing with the level, the trade-side "
+             "leg's LTP at its support/session-low, and that side's premium "
+             "energy the greater. Fires once per setup (cooldown). Reuses "
+             "existing engines; changes no verdict.")
+
+    # ── ⚠️ Entry reversal (bias-against at zone) → Telegram ────────────
+    st.session_state["_entry_reversed_on"] = st.sidebar.checkbox(
+        "⚠️ Entry reversal (bias-against at zone) → Alert Telegram",
+        value=ENTRY_REVERSED_ALERT_DEFAULT,
+        help="A Telegram note to the alert bot when NIFTY reaches a mapped "
+             "price zone but the bias has reversed (trend weakened, opposite "
+             "writers appeared, etc.). Whipsaw alert — catches traps. Fires "
+             "once per reversal (cooldown). Reuses existing engines.")
+
     # ── the two sub-alerts the owner paused (off by default) ──────────
     # Ranked S/R touch is a subset of the level-touch alert above; VOB formation
     # a subset of the formation alert. Both were too noisy, so they are opt-in.
@@ -15119,6 +15586,15 @@ def _render_main_analyzer():
         "   ↳ include VOB formation", value=VOB_FORMATION_ALERTS_DEFAULT,
         help="Paused — new-VOB alerts were noisy. High-volume pivot (HVP) "
              "formation alerts are unaffected.")
+
+    # ── 📐 Advanced Price Action chart overlay (default OFF) ───────────
+    st.session_state["_apa_on"] = st.sidebar.checkbox(
+        "📐 Advanced Price Action on charts (BOS · CHoCH · Fib · patterns)",
+        value=False,
+        help="Overlay swing points, Break of Structure / Change of Character, "
+             "the Fibonacci retracement pocket, and geometric patterns (H&S, "
+             "triangles, flags) on ALL three charts — NIFTY, Call and Put. Off "
+             "by default; enable it here. Display only; changes no verdict.")
 
     if _mios_tg:
         st.session_state["_mios_transport"] = mios_v6_transport
@@ -15788,6 +16264,10 @@ def _render_main_analyzer():
         _notify_chart_formations()
     except Exception:
         pass
+    try:
+        _notify_leg_hvp_touch()
+    except Exception:
+        pass
 
     # 🎯 Spot-at-a-key-level (±5 pts) alerts — war zone, OI walls, ranked S/R.
     # Same placement: the MIOS state and `_market_picture` are current by now,
@@ -15799,6 +16279,14 @@ def _render_main_analyzer():
         pass
     try:
         _notify_level_acceptance()
+    except Exception:
+        pass
+    try:
+        _notify_confluence_entry()
+    except Exception:
+        pass
+    try:
+        _notify_entry_reversed()
     except Exception:
         pass
 
