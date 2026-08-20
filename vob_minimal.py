@@ -15516,8 +15516,8 @@ def _render_main_analyzer():
     _current_instrument = get_current_instrument(st.session_state)
     _selected_instrument = st.sidebar.selectbox(
         "🎯 Instrument",
-        options=["NIFTY", "SENSEX"],
-        index=0 if _current_instrument == "NIFTY" else 1,
+        options=["SENSEX", "NIFTY"],
+        index=0 if _current_instrument == "SENSEX" else 1,
         help="Switch between NIFTY (NSE) and SENSEX (BSE) trading. "
              "All specs (security ID, multiplier, expiry) discovered from Dhan. "
              "Cached data cleared on switch."

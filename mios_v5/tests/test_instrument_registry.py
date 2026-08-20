@@ -9,6 +9,7 @@ Verifies:
 
 from mios_v5.instrument_registry import InstrumentContext, InstrumentRegistry
 from mios_v5.instrument_cache_manager import (
+    DEFAULT_INSTRUMENT,
     invalidate_instrument_cache,
     get_current_instrument,
     instrument_changed_this_render,
@@ -83,9 +84,14 @@ def test_cache_invalidation_clears_keys():
 
 
 def test_get_current_instrument_default():
-    """get_current_instrument defaults to NIFTY."""
+    """get_current_instrument falls back to DEFAULT_INSTRUMENT (SENSEX).
+
+    Was NIFTY. Changed deliberately so the app opens on the expiry being
+    traded; `test_instrument_chart_wiring` pins the value itself.
+    """
     empty_session = {}
-    assert get_current_instrument(empty_session) == "NIFTY"
+    assert get_current_instrument(empty_session) == DEFAULT_INSTRUMENT
+    assert get_current_instrument(empty_session) == "SENSEX"
 
 
 def test_get_current_instrument_returns_selected():
