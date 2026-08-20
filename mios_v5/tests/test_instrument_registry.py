@@ -180,3 +180,62 @@ def test_sensex_context_specs():
     assert ctx.symbol == "SENSEX"
     assert ctx.security_id == 40
     assert ctx.contract_multiplier == 1.0
+
+
+class _FakeDhan:
+    """Records what the registry asks Dhan for, so the ids it uses are testable."""
+
+    def __init__(self):
+        self.asked = []
+
+    def optionchain_expirylist(self, security_id, exchange_segment):
+        self.asked.append((security_id, exchange_segment))
+        return {"data": {"expiryDate": ["2026-08-27", "2026-09-24"]}}
+
+    def optionchain(self, security_id, exchange_segment, expiry_date):
+        return {"data": []}
+
+
+def test_sensex_security_id_is_dhan_verified_51():
+    """SENSEX must resolve to 51 (Dhan scrip master, BSE / 'SENSEX').
+
+    Regression: an invented id (40) returned no candles, and because the chart
+    only replaces its frame on a non-empty fetch, selecting SENSEX silently
+    kept drawing NIFTY. A wrong id here is invisible at runtime — pin it.
+    """
+    fake = _FakeDhan()
+    ctx = InstrumentRegistry(fake).discover_sensex()
+
+    assert ctx is not None, "SENSEX discovery returned nothing"
+    assert ctx.security_id == 51, f"expected 51, got {ctx.security_id}"
+    assert ctx.security_id != 40, "40 was the fabricated id — never reintroduce it"
+    assert (51, "IDX_I") in fake.asked
+
+
+def test_nifty_security_id_is_dhan_verified_13():
+    """NIFTY must resolve to 13 (Dhan scrip master, NSE / 'NIFTY')."""
+    fake = _FakeDhan()
+    ctx = InstrumentRegistry(fake).discover_nifty()
+
+    assert ctx is not None
+    assert ctx.security_id == 13
+    assert (13, "IDX_I") in fake.asked
+
+
+def test_lot_sizes_match_dhan_scrip_master():
+    """Lot sizes come from SEM_LOT_UNITS on the OPTIDX rows, not from 1."""
+    nifty = InstrumentRegistry(_FakeDhan()).discover_nifty()
+    sensex = InstrumentRegistry(_FakeDhan()).discover_sensex()
+
+    assert nifty.lot_size == 65, f"NIFTY lot is 65, got {nifty.lot_size}"
+    assert sensex.lot_size == 20, f"SENSEX lot is 20, got {sensex.lot_size}"
+
+
+def test_strike_steps_differ_between_instruments():
+    """NIFTY strikes step 50; SENSEX steps 100. Assuming one value for both
+    was wrong and would mis-round every ATM strike on one of them."""
+    nifty = InstrumentRegistry(_FakeDhan()).discover_nifty()
+    sensex = InstrumentRegistry(_FakeDhan()).discover_sensex()
+
+    assert nifty.strike_step == 50, f"NIFTY step is 50, got {nifty.strike_step}"
+    assert sensex.strike_step == 100, f"SENSEX step is 100, got {sensex.strike_step}"

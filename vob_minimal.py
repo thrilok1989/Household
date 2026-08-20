@@ -1816,6 +1816,40 @@ def get_dhan_expiry_list(underlying_scrip: int, underlying_seg: str, max_retries
                       max_retries)
 
 @st.cache_data(ttl=21600)
+def resolve_index_security_id(trading_symbol: str, exchange: str):
+    """Resolve an INDEX security id from Dhan's scrip master CSV — the same
+    authoritative source `get_nifty_futures_security_id` already uses.
+
+    Hardcoding these is how the SENSEX chart silently drew NIFTY candles: a
+    wrong id returns no data, and the caller kept the previous frame. Dhan is
+    the only thing that actually knows the id, so ask it.
+
+    `trading_symbol` matches SEM_TRADING_SYMBOL exactly (e.g. 'SENSEX',
+    'NIFTY'); `exchange` is the SEM_EXM_EXCH_ID ('BSE' / 'NSE'). Cached 6h.
+    Returns an int security id, or None when the lookup fails.
+    """
+    try:
+        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
+        df = pd.read_csv(url, low_memory=False)
+        df.columns = [c.strip().upper() for c in df.columns]
+        sym_col = next((c for c in df.columns if 'TRADING_SYMBOL' in c), None)
+        inst_col = next((c for c in df.columns if 'INSTRUMENT' in c and 'NAME' in c), None)
+        secid_col = next((c for c in df.columns if 'SECURITY_ID' in c), None)
+        exch_col = next((c for c in df.columns if 'EXCH_ID' in c), None)
+        if not all([sym_col, inst_col, secid_col, exch_col]):
+            return None
+        mask = (df[inst_col].astype(str).str.upper().str.strip().eq('INDEX')
+                & df[sym_col].astype(str).str.upper().str.strip().eq(trading_symbol.upper())
+                & df[exch_col].astype(str).str.upper().str.strip().eq(exchange.upper()))
+        hit = df[mask]
+        if hit.empty:
+            return None
+        return int(hit.iloc[0][secid_col])
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=21600)
 def get_nifty_futures_security_id():
     """Resolve the current/nearest-month NIFTY FUTIDX security id from Dhan's
     scrip master CSV. Cached 6h; auto-rolls to the next month's contract."""
@@ -15695,38 +15729,38 @@ def _render_main_analyzer():
         st.rerun()
     st.session_state['_selected_instrument'] = _selected_instrument
 
-    # Set instrument context for the render cycle
+    # Set instrument context for the render cycle. Every spec below is a value
+    # read off Dhan's scrip master, not an assumption — an invented SENSEX id
+    # is what made the chart silently keep drawing NIFTY.
     try:
         from mios_v5.instrument_registry import InstrumentContext
         if _selected_instrument == "SENSEX":
+            _sec_id = resolve_index_security_id("SENSEX", "BSE") or 51
             _ctx = InstrumentContext(
-                symbol="SENSEX",
-                security_id=40,
-                exchange_segment="IDX_I",
-                contract_multiplier=1.0,
-                strike_step=100,
-                current_expiry="2026-08-27",  # Will be updated from Dhan discovery
-                expiry_list=[],  # Will be populated from Dhan
-                atm_range=100,
-                lot_size=1,
-                tick_size=0.05,
-            )
-        else:  # NIFTY default
+                symbol="SENSEX", security_id=_sec_id, exchange_segment="IDX_I",
+                contract_multiplier=20.0,   # SEM_LOT_UNITS for SENSEX OPTIDX
+                strike_step=100,            # observed gap across SENSEX strikes
+                current_expiry="", expiry_list=[],
+                atm_range=100, lot_size=20, tick_size=0.05)
+        else:
+            _sec_id = resolve_index_security_id("NIFTY", "NSE") or 13
             _ctx = InstrumentContext(
-                symbol="NIFTY",
-                security_id=13,
-                exchange_segment="IDX_I",
-                contract_multiplier=25.0,
-                strike_step=100,
-                current_expiry="2026-08-27",  # Will be updated from Dhan discovery
-                expiry_list=[],  # Will be populated from Dhan
-                atm_range=100,
-                lot_size=1,
-                tick_size=0.05,
-            )
+                symbol="NIFTY", security_id=_sec_id, exchange_segment="IDX_I",
+                contract_multiplier=65.0,   # SEM_LOT_UNITS for NIFTY OPTIDX
+                strike_step=50,             # observed gap across NIFTY strikes
+                current_expiry="", expiry_list=[],
+                atm_range=100, lot_size=65, tick_size=0.05)
         st.session_state['_current_instrument_context'] = _ctx
-    except Exception as e:
+        st.sidebar.caption(
+            f"{_ctx.symbol} · id {_ctx.security_id} · {_ctx.exchange_segment}")
+    except Exception as _e_ctx:
+        # Loudly. A swallowed ImportError here is exactly how the toggle came
+        # to do nothing at all: context stayed None, every reader fell back to
+        # its NIFTY default, and the chart looked like it was ignoring you.
         st.session_state['_current_instrument_context'] = None
+        st.sidebar.error(
+            f"⚠️ Instrument context unavailable — the toggle will NOT switch "
+            f"the chart. {type(_e_ctx).__name__}: {str(_e_ctx)[:120]}")
 
     timeframes = {"1 min": "1", "3 min": "3", "5 min": "5",
                   "15 min": "15", "25 min": "25", "60 min": "60"}
@@ -15859,11 +15893,11 @@ def _render_main_analyzer():
     _v5_container = st.container()
     _bias_container = st.container()
 
-    # Get instrument context for LTP chart (SENSEX default, NIFTY fallback)
+    # Get instrument context for the chart (selected in the sidebar above).
     _ctx_ltp = st.session_state.get('_current_instrument_context')
-    _sec_id_ltp = int(_ctx_ltp.security_id) if _ctx_ltp else 40
+    _sec_id_ltp = int(_ctx_ltp.security_id) if _ctx_ltp else 13
     _seg_ltp = _ctx_ltp.exchange_segment if _ctx_ltp else "IDX_I"
-    _sym_ltp = _ctx_ltp.symbol if _ctx_ltp else "SENSEX"
+    _sym_ltp = _ctx_ltp.symbol if _ctx_ltp else "NIFTY"
 
     # ── 1 · Index candles + spot (NIFTY or SENSEX based on selection) ────
     df = pd.DataFrame()
@@ -15881,6 +15915,22 @@ def _render_main_analyzer():
             df = db.get_candles(_sym_ltp, _seg_ltp, interval, hours_back=days_back * 24)
         except Exception:
             df = pd.DataFrame()
+    # 🚨 A failed instrument fetch must NOT look like a working one. The frame
+    # below is only overwritten `if not df.empty`, so an empty SENSEX fetch
+    # used to leave the previous NIFTY frame on screen — the chart appeared to
+    # simply ignore the toggle. Say which instrument the frame actually is, and
+    # drop a stale frame belonging to the other instrument rather than pass it
+    # off as this one.
+    if df.empty:
+        st.error(
+            f"❌ No {_sym_ltp} candles from Dhan (id {_sec_id_ltp} · {_seg_ltp}) "
+            f"and none cached. The chart below is NOT {_sym_ltp} — it is the "
+            f"last frame that did load. Check the instrument id / market hours.")
+        if st.session_state.get('_chart_instrument') not in (None, _sym_ltp):
+            for _k in ('_nifty_df_live', '_last_df', '_df_5m'):
+                st.session_state.pop(_k, None)
+    else:
+        st.session_state['_chart_instrument'] = _sym_ltp
 
     # `get_index_spot_ltp` caches for 4s and hits the same endpoint the chain
     # does, so this is one network call, not the two the full app made.
@@ -15895,7 +15945,8 @@ def _render_main_analyzer():
         st.session_state['_nifty_spot_live'] = float(spot)
         st.session_state['_nifty_spot_live_ts'] = time.time()
         try:
-            db.upsert_spot_data(spot, security_id='13', exchange_segment='IDX_I')
+            db.upsert_spot_data(spot, security_id=str(_sec_id_ltp),
+                                exchange_segment=_seg_ltp)
         except Exception:
             pass
         try:
