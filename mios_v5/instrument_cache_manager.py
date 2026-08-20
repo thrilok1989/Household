@@ -133,13 +133,18 @@ def mark_instrument_changed(session_state, new_instrument: str):
     invalidate_instrument_cache(session_state, new_instrument)
 
 
+#: The instrument the app lands on before anything is selected. SENSEX, so
+#: the app opens on the expiry being traded rather than needing a click first.
+DEFAULT_INSTRUMENT = "SENSEX"
+
+
 def get_current_instrument(session_state) -> str:
-    """Get currently selected instrument, default NIFTY."""
-    return session_state.get("_selected_instrument", "NIFTY")
+    """Get currently selected instrument, defaulting to DEFAULT_INSTRUMENT."""
+    return session_state.get("_selected_instrument", DEFAULT_INSTRUMENT)
 
 
 def instrument_changed_this_render(session_state) -> bool:
     """Check if instrument was switched in this render cycle."""
     old = session_state.get("_prev_selected_instrument")
-    new = session_state.get("_selected_instrument", "NIFTY")
+    new = session_state.get("_selected_instrument", DEFAULT_INSTRUMENT)
     return old != new

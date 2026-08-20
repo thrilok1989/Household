@@ -432,7 +432,8 @@ def terminal_charts_split(nifty_df=None, call_df=None, put_df=None,
                           nifty_profile: Optional[Dict[str, Any]] = None,
                           call_profile: Optional[Dict[str, Any]] = None,
                           put_profile: Optional[Dict[str, Any]] = None,
-                          price_action: bool = False):
+                          price_action: bool = False,
+                          index_label: str = "NIFTY"):
     """NIFTY, ATM Call and ATM Put as THREE independent figures.
 
     `terminal_chart` above draws one figure so Streamlit's single Fullscreen
@@ -458,7 +459,11 @@ def terminal_charts_split(nifty_df=None, call_df=None, put_df=None,
     from plotly.subplots import make_subplots
 
     from ..clock import today_slice
-    panels = [("NIFTY", today_slice(nifty_df)),
+    # `index_label` names the panel; SPLIT_KEYS still keys it as "NIFTY" so
+    # every profile/height/figure lookup below is untouched. Without this the
+    # index panel read "NIFTY" even when the frame held SENSEX candles — the
+    # chart had switched and there was no way to see that it had.
+    panels = [(index_label, today_slice(nifty_df)),
               (call_label, today_slice(call_df)),
               (put_label, today_slice(put_df))]
     # the today-sliced frames per chart key, for the opt-in price-action overlay

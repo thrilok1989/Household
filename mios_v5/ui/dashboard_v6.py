@@ -2525,6 +2525,21 @@ def _panel_profile(st, tag, df=None, ready: Optional[Dict[str, Any]] = None):
     return profile
 
 
+def _index_label(st) -> str:
+    """Which index the chart's frame actually holds.
+
+    The panel used to be captioned "NIFTY" unconditionally, so switching the
+    instrument redrew the chart with SENSEX candles under a NIFTY title and
+    looked like nothing had happened. `_chart_instrument` is stamped by the
+    fetch that publishes the frame, so it names what is really on screen
+    rather than what is merely selected.
+    """
+    try:
+        return str(st.session_state.get("_chart_instrument") or "NIFTY")
+    except Exception:
+        return "NIFTY"
+
+
 def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
     """NIFTY ‖ ATM Call ‖ ATM Put — three figures, each with its own Fullscreen
     button, kept on one shared timeline and one zoom window so they still line
@@ -2627,7 +2642,8 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
             nifty_profile=_nifty_prof,
             call_profile=_call_prof,
             put_profile=_put_prof,
-            price_action=bool(st.session_state.get("_apa_on", False)))
+            price_action=bool(st.session_state.get("_apa_on", False)),
+            index_label=_index_label(st))
         # NIFTY wide on the left, the two legs stacked on the right — the same
         # 60/40 proportions the combined terminal used, so the page still reads
         # as the terminal it replaces. Each `plotly_chart` gets the shared
