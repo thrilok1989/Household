@@ -15439,6 +15439,33 @@ def _render_main_analyzer():
         except Exception as _snap_err:
             st.sidebar.error(f"Snapshot failed: {_snap_err}")
 
+    # ── 🧬 MIOS V6 snapshot → Telegram (12 messages, complete context) ─────
+    # Pure formatter that gathers all existing MIOS V6 published values and
+    # splits them across 10-12 separate Telegram messages for external AI analysis.
+    # One message per major section: Time/Price, Market, S/R, Premium, Flow, Dealer,
+    # Greeks, Behaviour, Liquidity, Global, News, Signal.
+    if st.sidebar.button("🧬 Send MIOS V6 snapshot → Telegram (12 sections)",
+                         help="Sends complete MIOS V6 market analysis across 12 "
+                              "Telegram messages — one per section (Time, Market, "
+                              "S/R, Premium, Flow, Dealer, Greeks, Behaviour, "
+                              "Liquidity, Global, News, Signal). Phone-readable "
+                              "format for forwarding to external AI. Pure formatter, "
+                              "gathers only existing V6 data."):
+        try:
+            from mios_v5.mios_v6_snapshot import gather_mios_v6_data, format_snapshot
+            v6_data = gather_mios_v6_data(st.session_state)
+            v6_msgs = format_snapshot(v6_data)
+            if v6_msgs:
+                for v6_msg in v6_msgs:
+                    if v6_msg.strip():
+                        send_telegram_message_sync(v6_msg, force=True)
+                st.sidebar.success(f"MIOS V6 snapshot sent to Telegram "
+                                   f"({len(v6_msgs)} message{'s' if len(v6_msgs) != 1 else ''}).")
+            else:
+                st.sidebar.warning("No MIOS V6 data available to send.")
+        except Exception as _v6_err:
+            st.sidebar.error(f"MIOS V6 snapshot failed: {_v6_err}")
+
     # ── 📨 MIOS V6 entry / exit signals to Telegram ────────────────────
     # The default lives in `MIOS_V6_TELEGRAM_DEFAULT` (top of file) so it is
     # one findable line rather than a literal buried in the sidebar. The owner
