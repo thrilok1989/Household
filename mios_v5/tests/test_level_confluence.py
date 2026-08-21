@@ -366,3 +366,115 @@ def test_both_tables_word_a_blank_the_same_way():
         rendered = _reason_text(key)
         core = wording.split("—")[-1].strip().lower()
         assert core[:12] in rendered.lower(), (key, rendered)
+
+
+# ── OI: fresh positioning vs unwinding, never a direction ──────────────
+
+OI_UP = {"oi": 4.2e6, "chg_oi": 320000}
+OI_DOWN = {"oi": 4.2e6, "chg_oi": -180000}
+
+
+def test_rising_oi_confirms_and_falling_oi_contradicts():
+    """Not "is OI bullish" — that has no answer without knowing who wrote
+    what. Fresh positioning corroborates an interaction; unwinding is the
+    same price doing less work."""
+    up = evaluate_level(_read("REJECTING", "resistance", 110.0), 110.0, oi=OI_UP)
+    down = evaluate_level(_read("REJECTING", "resistance", 110.0), 110.0,
+                          oi=OI_DOWN)
+    assert _verdicts(up)["oi"] == CONFIRMED
+    assert _verdicts(down)["oi"] == CONTRADICTED
+
+
+def test_oi_reads_the_same_whichever_way_the_level_points():
+    """Direction-neutral by design: the same ΔOI must not flip meaning
+    between a break and a rejection."""
+    for state in ("REJECTING", "BREAKING"):
+        for side in ("resistance", "support"):
+            row = evaluate_level(_read(state, side, 110.0), 110.0, oi=OI_UP)
+            assert _verdicts(row)["oi"] == CONFIRMED, (state, side)
+
+
+@pytest.mark.parametrize("state", ["BUILDING", "ACCEPTING"])
+def test_oi_is_scored_for_proximity_states_too(state):
+    """The one flow-family column that means something for BUILDING:
+    "positions building here" is exactly what the state describes, and it
+    needs no direction to say so."""
+    row = evaluate_level(_read(state, "resistance", 110.0), 110.0, oi=OI_UP)
+    assert _verdicts(row)["oi"] == CONFIRMED
+    assert _verdicts(row)["depth"] == NOT_REPORTED   # depth still abstains
+
+
+def test_missing_or_flat_oi_is_not_counted():
+    for oi in (None, {}, {"oi": 4.2e6}, {"chg_oi": 0}):
+        row = evaluate_level(_read("REJECTING", "resistance", 110.0), 110.0,
+                             oi=oi)
+        assert _verdicts(row)["oi"] == NOT_REPORTED, oi
+        assert row["contradicted"] == 0
+
+
+def test_oi_note_names_what_it_saw():
+    row = evaluate_level(_read("REJECTING", "resistance", 110.0), 110.0,
+                         oi=OI_UP)
+    assert "fresh" in row["components"]["oi"]["note"]
+
+
+# ── Depth: resting size, directional like delta ────────────────────────
+
+ASK_HEAVY = {"bid_qty": 900, "ask_qty": 2400}
+BID_HEAVY = {"bid_qty": 2400, "ask_qty": 900}
+
+
+def test_depth_confirms_the_interaction_not_a_direction():
+    """Ask-heavy is sellers waiting: it supports a rejection at resistance
+    and contradicts a break of it — the same rule delta follows."""
+    rej = evaluate_level(_read("REJECTING", "resistance", 110.0), 110.0,
+                         depth=ASK_HEAVY)
+    brk = evaluate_level(_read("BREAKING", "resistance", 110.0), 110.0,
+                         depth=ASK_HEAVY)
+    assert _verdicts(rej)["depth"] == CONFIRMED
+    assert _verdicts(brk)["depth"] == CONTRADICTED
+
+
+def test_depth_mirrors_at_support():
+    row = evaluate_level(_read("REJECTING", "support", 90.0), 90.0,
+                         depth=BID_HEAVY)
+    assert _verdicts(row)["depth"] == CONFIRMED
+
+
+@pytest.mark.parametrize("state", ["BUILDING", "ACCEPTING"])
+def test_depth_abstains_on_proximity_states(state):
+    row = evaluate_level(_read(state, "resistance", 110.0), 110.0,
+                         depth=ASK_HEAVY)
+    assert _verdicts(row)["depth"] == NOT_REPORTED
+
+
+def test_missing_or_balanced_depth_is_not_counted():
+    for depth in (None, {}, {"bid_qty": 0, "ask_qty": 0},
+                  {"bid_qty": 500, "ask_qty": 500}, {"bid_qty": 500}):
+        row = evaluate_level(_read("REJECTING", "resistance", 110.0), 110.0,
+                             depth=depth)
+        assert _verdicts(row)["depth"] == NOT_REPORTED, depth
+        assert row["contradicted"] == 0
+
+
+def test_depth_note_quantifies_the_imbalance():
+    row = evaluate_level(_read("REJECTING", "resistance", 110.0), 110.0,
+                         depth=ASK_HEAVY)
+    assert "x" in row["components"]["depth"]["note"]
+
+
+# ── they are contract-level, and the module says so ────────────────────
+
+def test_oi_and_depth_are_marked_contract_level():
+    """Neither can say whether ₹109.88 is a real resistance for that call —
+    they describe the contract. Flagging that in the module is what stops
+    them being read as structural evidence about the level."""
+    from mios_v5.level_confluence import CONTRACT_LEVEL, COMPONENTS
+    assert set(CONTRACT_LEVEL) == {"oi", "depth"}
+    assert set(CONTRACT_LEVEL) <= set(COMPONENTS)
+
+
+def test_both_new_columns_have_headings():
+    from mios_v5.ui.level_confluence_table import HEADINGS
+    from mios_v5.level_confluence import COMPONENTS
+    assert set(HEADINGS) == set(COMPONENTS)

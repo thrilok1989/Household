@@ -2569,6 +2569,43 @@ def _leg_nodes(st, tag):
     return [], []
 
 
+def _leg_contract_reads(st, tag):
+    """`(oi, depth)` for the contract behind this leg tag.
+
+    Both come off the chain's `df_summary` row for that strike — the store the
+    app already fills — so nothing is recomputed. The tag carries the strike
+    and the side ("ATM CE 24250"), which is what selects the row and column.
+
+    ⚠️ These describe the CONTRACT, not a price level on the leg's premium
+    chart. See `level_confluence.CONTRACT_LEVEL`.
+    """
+    try:
+        parts = str(tag or "").split()
+        side, strike = parts[-2].upper(), float(parts[-1])
+        ds = (st.session_state.get("_cached_option_data") or {}).get("df_summary")
+        if ds is None or getattr(ds, "empty", True) or "Strike" not in ds.columns:
+            return None, None
+        row = ds[ds["Strike"] == strike]
+        if row.empty:
+            return None, None
+        r = row.iloc[0]
+
+        def _n(col):
+            try:
+                v = r.get(col)
+                return None if v is None else float(v)
+            except Exception:
+                return None
+
+        oi = {"oi": _n(f"openInterest_{side}"),
+              "chg_oi": _n(f"changeinOpenInterest_{side}")}
+        depth = {"bid_qty": _n(f"bidQty_{side}"), "ask_qty": _n(f"askQty_{side}")}
+        return (oi if oi["chg_oi"] is not None else None,
+                depth if depth["bid_qty"] is not None else None)
+    except Exception:
+        return None, None
+
+
 def _last_close(df) -> Optional[float]:
     """A leg's latest traded premium, or None when the frame cannot supply one.
 
@@ -2810,17 +2847,21 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
         # already filled this cycle.
         try:
             from .level_confluence_table import build_table as _lc_table
-            _lch = _lc_table([
-                {"sr": _leg_store(st, "_atm_leg_sr_behavior", tag),
-                 "ltp": _last_close(frame),
-                 "label": lbl,
-                 "mfp": _leg_mfp(st, tag),
-                 "hvn": _leg_nodes(st, tag)[0],
-                 "lvn": _leg_nodes(st, tag)[1],
-                 "zones": _leg_store(st, "_atm_leg_vob_volume", tag),
-                 "delta": _leg_store(st, "_atm_leg_ltf_delta", tag)}
-                for tag, frame, lbl in ((ce, call_df, "CE"), (pe, put_df, "PE"))
-            ], theme=_active_theme_name(st))
+            _lc_legs = []
+            for tag, frame, lbl in ((ce, call_df, "CE"), (pe, put_df, "PE")):
+                # Each helper is called ONCE per leg — both of these parse the
+                # tag and scan a frame, and the dict-comprehension form was
+                # quietly doing that twice for the two halves of one answer.
+                _oi, _depth = _leg_contract_reads(st, tag)
+                _hvn, _lvn = _leg_nodes(st, tag)
+                _lc_legs.append({
+                    "sr": _leg_store(st, "_atm_leg_sr_behavior", tag),
+                    "ltp": _last_close(frame), "label": lbl,
+                    "mfp": _leg_mfp(st, tag), "hvn": _hvn, "lvn": _lvn,
+                    "zones": _leg_store(st, "_atm_leg_vob_volume", tag),
+                    "delta": _leg_store(st, "_atm_leg_ltf_delta", tag),
+                    "oi": _oi, "depth": _depth})
+            _lch = _lc_table(_lc_legs, theme=_active_theme_name(st))
             if _lch:
                 st.markdown(_lch, unsafe_allow_html=True)
         except Exception:

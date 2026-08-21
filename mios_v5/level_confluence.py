@@ -46,7 +46,14 @@ NOT_REPORTED = "not_reported"
 GLYPH = {CONFIRMED: "✓", CONTRADICTED: "✕", NOT_REPORTED: "?"}
 
 #: Components, in the order they read on screen.
-COMPONENTS = ("structure", "mfp", "hvn", "vob", "delta", "cvd")
+COMPONENTS = ("structure", "mfp", "hvn", "vob", "oi", "depth", "delta", "cvd")
+
+#: ⚠️ OI and depth belong to the CONTRACT — a strike and a side — not to a
+#: price level on the leg's own premium chart. Neither can tell you whether
+#: ₹109.88 is a real resistance for that call; they describe the pressure on
+#: the leg as a whole. They are included on the same footing as the flow
+#: columns, and never as structural evidence about the level itself.
+CONTRACT_LEVEL = ("oi", "depth")
 
 #: Explanatory only. Never BUY / SELL / ENTRY / TRADE / TARGET / PROFIT — this
 #: layer describes evidence, it does not advise.
@@ -198,6 +205,57 @@ def _vob_detail(zone, wants_positive: Optional[bool]):
     return _verdict(buyer_heavy is wants_positive), note
 
 
+def _oi_detail(oi: Optional[Mapping[str, Any]]):
+    """(verdict, note) from the leg's own open interest.
+
+    Deliberately NOT directional. "Is OI bullish?" has no answer without
+    knowing who wrote what; what OI does say is whether positions are being
+    ADDED at this level or closed out. Fresh positioning corroborates an
+    interaction; unwinding is the same price doing less work.
+
+    That makes it the one flow-family column that means something for the
+    proximity states too — "positions building here" is precisely what
+    BUILDING describes, and it needs no direction to say so.
+    """
+    if not oi:
+        return NOT_REPORTED, "no OI"
+    chg = _f(oi.get("chg_oi"))
+    if chg is None:
+        return NOT_REPORTED, "no ΔOI"
+    if chg == 0:
+        return NOT_REPORTED, "flat"
+    scale = f" ({chg / 1e5:+.2f}L)" if abs(chg) >= 1e4 else ""
+    if chg > 0:
+        return CONFIRMED, f"OI rising — fresh positions{scale}"
+    return CONTRADICTED, f"OI falling — unwinding{scale}"
+
+
+def _depth_detail(depth: Optional[Mapping[str, Any]],
+                  wants_positive: Optional[bool]):
+    """(verdict, note) from resting bid/ask quantity on this leg.
+
+    A snapshot of orders WAITING, not trades DONE — which is what separates it
+    from the delta column beside it. Resting size can be pulled; executed
+    volume cannot. Treated as directional pressure, so like delta it says
+    nothing about a proximity state.
+    """
+    if not depth:
+        return NOT_REPORTED, "no depth"
+    bid = _f(depth.get("bid_qty"))
+    ask = _f(depth.get("ask_qty"))
+    if bid is None or ask is None or (bid + ask) <= 0:
+        return NOT_REPORTED, "no depth"
+    if wants_positive is None:
+        return NOT_REPORTED, "proximity state"
+    if bid == ask:
+        return NOT_REPORTED, "balanced"
+    bid_heavy = bid > ask
+    ratio = (bid / ask) if ask else float("inf")
+    note = (f"bids {ratio:.1f}x asks" if bid_heavy
+            else f"asks {(ask / bid if bid else float('inf')):.1f}x bids")
+    return _verdict(bid_heavy is wants_positive), note
+
+
 def _flow_detail(delta: Optional[Mapping[str, Any]],
                  wants_positive: Optional[bool]):
     """(verdict, note) for the estimated delta."""
@@ -257,7 +315,9 @@ def evaluate_level(read: Optional[Mapping[str, Any]], ltp=None, *,
                    hvn: Optional[Sequence[Any]] = None,
                    lvn: Optional[Sequence[Any]] = None,
                    zones: Optional[Sequence[Any]] = None,
-                   delta: Optional[Mapping[str, Any]] = None
+                   delta: Optional[Mapping[str, Any]] = None,
+                   oi: Optional[Mapping[str, Any]] = None,
+                   depth: Optional[Mapping[str, Any]] = None
                    ) -> Dict[str, Any]:
     """One level's evidence tally.
 
@@ -305,6 +365,8 @@ def evaluate_level(read: Optional[Mapping[str, Any]], ltp=None, *,
         "mfp": _mfp_detail(level, mfp, tol),
         "hvn": _node_detail(level, hvn, lvn, tol),
         "vob": _vob_detail(zone, wants_positive),
+        "oi": _oi_detail(oi),
+        "depth": _depth_detail(depth, wants_positive),
         "delta": _flow_detail(delta, wants_positive),
         "cvd": _cvd_detail(delta, wants_positive),
     }
@@ -337,8 +399,8 @@ def evaluate_level(read: Optional[Mapping[str, Any]], ltp=None, *,
 
 def evaluate_leg(sr: Optional[Mapping[str, Any]], ltp=None, *,
                  label: Optional[str] = None, reason: Optional[str] = None,
-                 mfp=None, hvn=None, lvn=None, zones=None, delta=None
-                 ) -> List[Dict[str, Any]]:
+                 mfp=None, hvn=None, lvn=None, zones=None, delta=None,
+                 oi=None, depth=None) -> List[Dict[str, Any]]:
     """Both sides of one leg — resistance first, then support.
 
     `sr["sides"]` carries each side's own read. An absent side is returned
@@ -358,7 +420,8 @@ def evaluate_leg(sr: Optional[Mapping[str, Any]], ltp=None, *,
     out: List[Dict[str, Any]] = []
     for side in ("resistance", "support"):
         row = evaluate_level(per_side.get(side), ltp, side=side, mfp=mfp,
-                             hvn=hvn, lvn=lvn, zones=zones, delta=delta)
+                             hvn=hvn, lvn=lvn, zones=zones, delta=delta,
+                             oi=oi, depth=depth)
         row["label"] = str(label or "")
         if not row["reported"] and reason:
             row["reason"] = reason
