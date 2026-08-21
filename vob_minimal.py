@@ -7249,11 +7249,31 @@ def classify_leg_sr_behavior(df_l, ltp):
                     candidates.append((1, 'BUILDING', side, level, 'bull'))
                 else:
                     candidates.append((1, 'BUILDING', side, level, 'bear'))
+        # ── both sides are measured, so publish both ──────────────────
+        # The winner below is the headline — the level price is reacting to
+        # most strongly — and it is what the chart marks and what every
+        # existing consumer reads. But the loop above evaluates resistance AND
+        # support, and returning only the winner threw the other away: a leg
+        # sitting between its two levels reported one of them and looked as if
+        # the other did not exist. `sides` keeps each side's own best read,
+        # additively, so nothing that reads `state`/`side`/`level` changes.
+        by_side = {}
+        for pri, st_, sd, lv, dr in candidates:
+            best = by_side.get(sd)
+            if best is None or pri > best['priority']:
+                by_side[sd] = {'state': st_, 'side': sd, 'level': float(lv),
+                               'direction': dr, 'priority': pri}
+
         if not candidates:
-            return {'state': 'NONE', 'side': None, 'level': None, 'direction': 'none'}
+            return {'state': 'NONE', 'side': None, 'level': None,
+                    'direction': 'none', 'sides': {}}
+        # Ties break toward resistance purely because it is iterated first.
+        # That is arbitrary, so it is recorded rather than relied upon: with
+        # `sides` published, a tie no longer hides the other level.
         candidates.sort(key=lambda x: -x[0])
         _, state, side, level, direction = candidates[0]
-        return {'state': state, 'side': side, 'level': float(level), 'direction': direction}
+        return {'state': state, 'side': side, 'level': float(level),
+                'direction': direction, 'sides': by_side}
     except Exception:
         return None
 
