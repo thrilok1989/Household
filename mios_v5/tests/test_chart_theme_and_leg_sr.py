@@ -140,33 +140,71 @@ def test_no_theme_still_draws_dark():
 
 # ── the leg S/R read ───────────────────────────────────────────────────
 
+# `_leg_levels` publishes the behaviour level under "support"/"resistance",
+# so these mirror what the panel really receives: the level AND the read.
+def _lv(side, level):
+    return {side: level, "vwap": level * 0.95}
+
+
 @pytest.mark.parametrize("state", sorted(SR_STATE_TONE))
-def test_each_state_is_labelled_on_the_leg_panel(state):
+def test_each_state_is_written_onto_the_level(state):
     sr = {"state": state, "side": "resistance", "level": 124.5}
     figs, _ = terminal_charts_split(_frame(24400), _frame(120), _frame(90), {},
+                                    call_levels=_lv("resistance", 124.5),
                                     call_sr=sr)
     assert any(state in t for t in _texts(figs["CALL"])), _texts(figs["CALL"])
+
+
+def test_the_state_does_not_draw_a_second_line_at_the_same_price():
+    """Regression: the state was first drawn as its own hline, which put TWO
+    lines at the identical price — the `Resistance ₹124.50` that `_leg_levels`
+    already publishes, plus a `BREAKING resistance ₹124.50` on top of it. One
+    level, one line, one label."""
+    sr = {"state": "BREAKING", "side": "resistance", "level": 124.5}
+    figs, _ = terminal_charts_split(_frame(24400), _frame(120), _frame(90), {},
+                                    call_levels=_lv("resistance", 124.5),
+                                    call_sr=sr)
+    at_level = [t for t in _texts(figs["CALL"]) if "124.50" in t]
+    assert len(at_level) == 1, at_level
+    assert "BREAKING" in at_level[0]
 
 
 def test_the_level_is_shown_with_the_state():
     sr = {"state": "BUILDING", "side": "support", "level": 88.25}
     figs, _ = terminal_charts_split(_frame(24400), _frame(120), _frame(90), {},
-                                    put_sr=sr)
-    assert any("88.25" in t for t in _texts(figs["PUT"]))
+                                    put_levels=_lv("support", 88.25), put_sr=sr)
+    assert any("88.25" in t and "BUILDING" in t for t in _texts(figs["PUT"]))
 
 
-def test_state_none_draws_nothing():
+def test_the_state_lands_on_the_side_it_belongs_to():
+    """A support read must not decorate the resistance line."""
+    figs, _ = terminal_charts_split(
+        _frame(24400), _frame(120), _frame(90), {},
+        call_levels={"support": 90.0, "resistance": 124.5},
+        call_sr={"state": "BUILDING", "side": "support", "level": 90.0})
+    for t in _texts(figs["CALL"]):
+        if "124.50" in t:
+            assert "BUILDING" not in t, t
+        if "90.00" in t:
+            assert "BUILDING" in t, t
+
+
+def test_state_none_leaves_the_level_undecorated():
     for sr in ({"state": "NONE", "side": None, "level": None}, {}, None):
         figs, _ = terminal_charts_split(_frame(24400), _frame(120), _frame(90),
-                                        {}, call_sr=sr)
-        assert _texts(figs["CALL"]) == ["ATM Call"], sr
+                                        {}, call_levels=_lv("resistance", 124.5),
+                                        call_sr=sr)
+        assert any(t == "Resistance ₹124.50" for t in _texts(figs["CALL"])), sr
 
 
-def test_a_state_without_a_level_draws_nothing():
-    """A verdict with nowhere to put it is not drawable."""
-    figs, _ = terminal_charts_split(_frame(24400), _frame(120), _frame(90), {},
-                                    call_sr={"state": "BREAKING", "level": None})
-    assert _texts(figs["CALL"]) == ["ATM Call"]
+def test_a_state_whose_level_is_not_on_the_panel_decorates_nothing():
+    """The read is only written onto a line at the SAME price — otherwise a
+    stale level would relabel whatever line happened to be there."""
+    figs, _ = terminal_charts_split(
+        _frame(24400), _frame(120), _frame(90), {},
+        call_levels={"resistance": 200.0},
+        call_sr={"state": "BREAKING", "side": "resistance", "level": 124.5})
+    assert not any("BREAKING" in t for t in _texts(figs["CALL"]))
 
 
 def test_the_index_panel_does_not_take_a_leg_read():
@@ -181,6 +219,7 @@ def test_the_index_panel_does_not_take_a_leg_read():
 def test_call_and_put_reads_do_not_bleed_into_each_other():
     figs, _ = terminal_charts_split(
         _frame(24400), _frame(120), _frame(90), {},
+        call_levels=_lv("resistance", 124.5), put_levels=_lv("support", 88.0),
         call_sr={"state": "BREAKING", "side": "resistance", "level": 124.5},
         put_sr={"state": "REJECTING", "side": "support", "level": 88.0})
     assert any("BREAKING" in t for t in _texts(figs["CALL"]))
