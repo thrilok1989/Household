@@ -2540,6 +2540,20 @@ def _index_label(st) -> str:
         return "NIFTY"
 
 
+def _chart_palette(st):
+    """The chart chrome for whatever theme this viewer has applied.
+
+    Read per render rather than cached: a viewer can switch theme from the
+    Settings menu at any time, and the charts should follow on the next rerun
+    without needing the session restarted.
+    """
+    try:
+        from .chart_theme import active_theme, palette
+        return palette(active_theme(st))
+    except Exception:
+        return None          # the renderer falls back to its dark default
+
+
 #: The index the chain, the final read and the market picture all describe.
 #: Their levels are only meaningful on this one.
 LEVELS_INDEX = "NIFTY"
@@ -2680,7 +2694,15 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
             call_profile=_call_prof,
             put_profile=_put_prof,
             price_action=bool(st.session_state.get("_apa_on", False)),
-            index_label=_idx_label_now)
+            index_label=_idx_label_now,
+            theme=_chart_palette(st),
+            # The leg S/R read the app already computes every cycle
+            # (`classify_leg_sr_behavior`) — BREAKING / REJECTING / ACCEPTING /
+            # BUILDING against the leg's own VOB structure. It reached the
+            # tables and never the chart, so the panel drew the zones and left
+            # the trader to re-derive the verdict the engine had already made.
+            call_sr=_leg_store(st, "_atm_leg_sr_behavior", ce) or {},
+            put_sr=_leg_store(st, "_atm_leg_sr_behavior", pe) or {})
         if not _levels_match_frame:
             st.caption(
                 f"ℹ️ Support/resistance, VWAP, POC and the dealer levels are "
