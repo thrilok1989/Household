@@ -1408,6 +1408,26 @@ class DhanAPI:
         _back = st.session_state.get('_dhan_429_until')
         if _back and datetime.now(ist) < _back:
             return None
+        # ── one identical request per render, whoever asks ──────────────
+        # Callers each hold their own cache (the legs, the wings, the CVD
+        # history), but the two index fetches held none, so the same request
+        # could be issued twice in a cycle. It happens for real: the chart
+        # frame asks for `interval` over `days_back`, and the 5-minute frame
+        # asks for "5" over `max(days_back, 3)` — pick "5 min" on the timeframe
+        # selector with Days at 3 or more and those are byte-identical.
+        #
+        # Keyed by the render sequence, so a later render still refetches and
+        # the still-forming candle keeps updating; within one render the answer
+        # cannot have changed anyway, since it is a single instant.
+        _memo_key = (str(security_id), str(exchange_segment), str(instrument),
+                     str(interval), int(days_back))
+        _rid = st.session_state.get('_render_seq')
+        _memo = st.session_state.get('_intraday_memo')
+        if _memo is None or _memo.get('render') != _rid:
+            _memo = {'render': _rid, 'by_key': {}}
+            st.session_state['_intraday_memo'] = _memo
+        if _memo_key in _memo['by_key']:
+            return _memo['by_key'][_memo_key]
         # Throttle: enforce a minimum gap between intraday calls so the legs
         # don't burst past Dhan's per-second limit.
         try:
@@ -1433,7 +1453,14 @@ class DhanAPI:
         }
         try:
             response = requests.post(url, headers=self.headers, json=payload)
-            return self._handle_response(response)
+            out = self._handle_response(response)
+            # Only a real answer is memoised. Caching a None would make one
+            # failed fetch look like "no data" to every other caller this
+            # render, which is the failure mode the expiry-list cache
+            # documents — and each caller has its own fallback to reach for.
+            if out:
+                _memo['by_key'][_memo_key] = out
+            return out
         except Exception as e:
             st.error(f"Error fetching data: {str(e)}")
             return None
@@ -2643,56 +2670,87 @@ def calculate_vanna_charm_exposure(df_summary, spot_price, contract_multiplier=2
         return None
 
 
+def _cross_expiry_row(exp, oc_resp, spot_price):
+    """One expiry's ATM±2 ΔOI row, or None when the chain is unusable."""
+    data = (oc_resp or {}).get('data') or {}
+    oc = data.get('oc') or {}
+    und = float(data.get('last_price') or spot_price or 0)
+    if not oc or not und:
+        return None
+    strikes = sorted(float(k) for k in oc.keys())
+    if len(strikes) < 3:
+        return None
+    atm = min(strikes, key=lambda x: abs(x - und))
+    gap = min((abs(b - a) for a, b in zip(strikes, strikes[1:])), default=50) or 50
+    ce_chg = pe_chg = ce_oi = pe_oi = 0.0
+    for k, sd in oc.items():
+        if abs(float(k) - atm) > 2 * gap:
+            continue
+        ce = sd.get('ce') or {}
+        pe = sd.get('pe') or {}
+        ce_chg += float(ce.get('oi') or 0) - float(ce.get('previous_oi') or 0)
+        pe_chg += float(pe.get('oi') or 0) - float(pe.get('previous_oi') or 0)
+        ce_oi += float(ce.get('oi') or 0)
+        pe_oi += float(pe.get('oi') or 0)
+    pcr = round(pe_oi / ce_oi, 2) if ce_oi > 0 else 0.0
+    if pe_chg > ce_chg * 1.2 and pe_chg > 0:
+        bias = 'BULL'
+    elif ce_chg > pe_chg * 1.2 and ce_chg > 0:
+        bias = 'BEAR'
+    else:
+        bias = 'NEUTRAL'
+    return {'expiry': exp, 'pcr': pcr, 'ce_chg': round(ce_chg / 1e5, 2),
+            'pe_chg': round(pe_chg / 1e5, 2), 'bias': bias}
+
+
 def compute_cross_expiry_bias(spot_price, n_expiries=3, ttl=120):
     """📅 Cross-expiry term structure — compare the ATM±2 ΔOI positioning bias
     across the nearest N expiries (weekly / next / monthly). All expiries
-    agreeing = conviction; near-term vs far-term split = caution. Heavily cached
-    (default 120s) and skipped during a Dhan 429 back-off, since each expiry is a
-    separate option-chain fetch. Context only. Returns dict or None."""
+    agreeing = conviction; near-term vs far-term split = caution. Context only.
+    Returns dict or None.
+
+    ⏱️ ONE chain fetch per render, at most. This used to loop all N expiries
+    back to back whenever its 120s cache expired — three requests into an
+    endpoint Dhan caps at one per three seconds, which is what tripped the
+    limiter. Spacing them fixed the 429s but spent ~6s of the render asleep.
+
+    So the expiries rotate instead: each render refreshes the single stalest
+    one whose row is older than `ttl`, and the verdict is computed from
+    whatever rows are held. Three expiries at ~20s per render come round well
+    inside the 120s each row is allowed to live, so nothing is staler than
+    before — it is the same work, spread rather than burst. The fetch never
+    waits (`allow_wait=False`): if the 3s window is not open, this render
+    simply skips and the next one picks it up.
+    """
     ist = pytz.timezone('Asia/Kolkata')
     _cache = st.session_state.get('_cross_expiry_cache')
-    if _cache and (time.time() - _cache[0] < ttl):
-        return _cache[1]
-    _back = st.session_state.get('_dhan_429_until')
-    if _back and datetime.now(ist) < _back:
-        return _cache[1] if _cache else None
     try:
         el = get_dhan_expiry_list_cached(NIFTY_UNDERLYING_SCRIP, NIFTY_UNDERLYING_SEG)
         exps = (el or {}).get('data', [])[:n_expiries]
         if not exps:
-            return None
-        rows = []
-        for exp in exps:
-            oc_resp = get_dhan_option_chain(NIFTY_UNDERLYING_SCRIP, NIFTY_UNDERLYING_SEG, exp)
-            data = (oc_resp or {}).get('data') or {}
-            oc = data.get('oc') or {}
-            und = float(data.get('last_price') or spot_price or 0)
-            if not oc or not und:
-                continue
-            strikes = sorted(float(k) for k in oc.keys())
-            if len(strikes) < 3:
-                continue
-            atm = min(strikes, key=lambda x: abs(x - und))
-            gap = min((abs(b - a) for a, b in zip(strikes, strikes[1:])), default=50) or 50
-            ce_chg = pe_chg = ce_oi = pe_oi = 0.0
-            for k, sd in oc.items():
-                if abs(float(k) - atm) > 2 * gap:
-                    continue
-                ce = sd.get('ce') or {}
-                pe = sd.get('pe') or {}
-                ce_chg += float(ce.get('oi') or 0) - float(ce.get('previous_oi') or 0)
-                pe_chg += float(pe.get('oi') or 0) - float(pe.get('previous_oi') or 0)
-                ce_oi += float(ce.get('oi') or 0)
-                pe_oi += float(pe.get('oi') or 0)
-            pcr = round(pe_oi / ce_oi, 2) if ce_oi > 0 else 0.0
-            if pe_chg > ce_chg * 1.2 and pe_chg > 0:
-                bias = 'BULL'
-            elif ce_chg > pe_chg * 1.2 and ce_chg > 0:
-                bias = 'BEAR'
-            else:
-                bias = 'NEUTRAL'
-            rows.append({'expiry': exp, 'pcr': pcr, 'ce_chg': round(ce_chg / 1e5, 2),
-                         'pe_chg': round(pe_chg / 1e5, 2), 'bias': bias})
+            return _cache[1] if _cache else None
+
+        from mios_v5.fetch_rotation import drop_missing, next_to_refresh
+        store = drop_missing(
+            st.session_state.setdefault('_cross_expiry_rows', {}), exps)
+
+        _back = st.session_state.get('_dhan_429_until')
+        _backing_off = bool(_back and datetime.now(ist) < _back)
+        now = time.time()
+        if not _backing_off:
+            _target = next_to_refresh(
+                exps, {e: v.get('ts', 0.0) for e, v in store.items()}, now, ttl)
+            if _target is not None:
+                _row = _cross_expiry_row(
+                    _target,
+                    get_dhan_option_chain(NIFTY_UNDERLYING_SCRIP, NIFTY_UNDERLYING_SEG,
+                                          _target, allow_wait=False),
+                    spot_price)
+                if _row:
+                    store[_target] = {'ts': now, 'row': _row}
+
+        # nearest expiry first, and only the ones actually held
+        rows = [store[e]['row'] for e in exps if (store.get(e) or {}).get('row')]
         if not rows:
             return _cache[1] if _cache else None
         bulls = sum(1 for r in rows if r['bias'] == 'BULL')
