@@ -2758,11 +2758,17 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
         # store `_publish_atm_legs` already filled this cycle.
         try:
             from .leg_sr_table import build_table as _sr_table
+            # No `or {}` on the reads: a MISSING read and a read that found
+            # nothing are different answers, and collapsing them is what made
+            # "NONE" unreadable. The zone store is passed so a leg with blocks
+            # but no level can say so — the chart draws those same zones.
             _srh = _sr_table(
-                call_sr=_leg_store(st, "_atm_leg_sr_behavior", ce) or {},
-                put_sr=_leg_store(st, "_atm_leg_sr_behavior", pe) or {},
+                call_sr=_leg_store(st, "_atm_leg_sr_behavior", ce),
+                put_sr=_leg_store(st, "_atm_leg_sr_behavior", pe),
                 call_ltp=_last_close(call_df), put_ltp=_last_close(put_df),
                 call_label=ce or "ATM Call", put_label=pe or "ATM Put",
+                call_zones=_leg_store(st, "_atm_leg_vob_volume", ce),
+                put_zones=_leg_store(st, "_atm_leg_vob_volume", pe),
                 theme=_active_theme_name(st))
             if _srh:
                 st.markdown(_srh, unsafe_allow_html=True)
