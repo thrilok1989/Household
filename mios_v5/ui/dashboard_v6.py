@@ -2540,6 +2540,31 @@ def _index_label(st) -> str:
         return "NIFTY"
 
 
+def _last_close(df) -> Optional[float]:
+    """A leg's latest traded premium, or None when the frame cannot supply one.
+
+    The leg's own frame is the source: the S/R read was measured against this
+    same series, so taking the LTP from anywhere else could show a distance
+    that does not match the state beside it.
+    """
+    try:
+        if df is None or getattr(df, "empty", True):
+            return None
+        return float(df["close"].iloc[-1])
+    except Exception:
+        return None
+
+
+def _active_theme_name(st) -> str:
+    """"light" or "dark" for the viewer — the same probe the charts use, so
+    the table under them cannot end up on a different theme."""
+    try:
+        from .chart_theme import active_theme
+        return active_theme(st)
+    except Exception:
+        return "dark"
+
+
 def _chart_palette(st):
     """The chart chrome for whatever theme this viewer has applied.
 
@@ -2726,6 +2751,24 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
             if figs.get("PUT") is not None:
                 st.plotly_chart(figs["PUT"], use_container_width=True,
                                 key="terminal_put", config=FS_CHART_CONFIG)
+        # 🧱 The legs' S/R read in numbers, under the panels that draw it.
+        # The chart marks the level and names the state; this says how far the
+        # leg actually is from it, which a line on a premium axis cannot show
+        # at a glance. Same values, no recomputation — the reads come from the
+        # store `_publish_atm_legs` already filled this cycle.
+        try:
+            from .leg_sr_table import build_table as _sr_table
+            _srh = _sr_table(
+                call_sr=_leg_store(st, "_atm_leg_sr_behavior", ce) or {},
+                put_sr=_leg_store(st, "_atm_leg_sr_behavior", pe) or {},
+                call_ltp=_last_close(call_df), put_ltp=_last_close(put_df),
+                call_label=ce or "ATM Call", put_label=pe or "ATM Put",
+                theme=_active_theme_name(st))
+            if _srh:
+                st.markdown(_srh, unsafe_allow_html=True)
+        except Exception:
+            pass
+
         # 📐 Geometric patterns as a TABLE below the charts (not drawn on them),
         # each with its bias — only when the Advanced Price Action toggle is on.
         if st.session_state.get("_apa_on", False):
