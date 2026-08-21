@@ -871,8 +871,22 @@ def price_range(low, high, x=None, window=None, pad: float = Y_PAD):
     `None` when there is nothing to fit, so the caller leaves autorange alone
     rather than pinning a bogus range.
     """
-    lows = [_f(v) for v in _seq(low)]
-    highs = [_f(v) for v in _seq(high)]
+    # A zero or negative price is not a trade — no index prints one. A single
+    # such bar in the series used to define the whole axis: one `low = 0`
+    # against SENSEX at ~81,000 stretched the range to [-4860, 85865], so the
+    # candles collapsed into a thread at the top and the axis read 0 upward.
+    # NaN was already tolerated here; zero was not, and that is the shape a
+    # gap in the feed actually arrives in. Treat both as missing.
+    def _price(v):
+        """`None` unless this is a real traded price."""
+        f = _f(v)
+        return f if (f is not None and f > 0) else None
+
+    # Positions are preserved, never filtered out: the window filter below
+    # zips these against `x` by index, so dropping elements would silently
+    # misalign every bar with its timestamp.
+    lows = [_price(v) for v in _seq(low)]
+    highs = [_price(v) for v in _seq(high)]
     if not lows or not highs:
         return None
 
