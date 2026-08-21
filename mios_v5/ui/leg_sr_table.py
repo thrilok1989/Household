@@ -44,6 +44,7 @@ _NO_LEVEL_REASONS = {
     "unmeasured": "Not measured — no read published for this leg",
     "no_blocks": f"No order blocks yet — needs {MIN_BARS_FOR_BLOCKS}+ 1m bars",
     "wrong_side": "Blocks exist, but none on the tested side of the LTP",
+    "side_none": "No level on this side",
     "none": "No level in range",
 }
 
@@ -130,14 +131,70 @@ def row_for(chart: str, sr: Optional[Mapping[str, Any]],
     }
 
 
+#: Both sides, in the order a price ladder reads: resistance above, support
+#: below. A leg sits BETWEEN them, so showing only the winning one hid half
+#: the picture — and which one won could come down to a tie broken by
+#: iteration order.
+SIDES = ("resistance", "support")
+
+
+def rows_for_leg(chart: str, sr: Optional[Mapping[str, Any]],
+                 ltp: Any = None, label: Any = None,
+                 zones: Optional[Sequence[Any]] = None) -> List[Dict[str, Any]]:
+    """One row per side for a single leg — resistance first, then support.
+
+    `sr["sides"]` carries each side's own best read. When it is absent (an
+    older cached read, or nothing published), the headline read is placed on
+    the side it belongs to and the other side reports having no level, so the
+    table keeps its shape rather than losing a row.
+    """
+    per_side = dict((sr or {}).get("sides") or {})
+    if not per_side and (sr or {}).get("side"):
+        per_side = {str(sr["side"]).lower(): sr}
+
+    measured = bool(sr)
+    # Did the engine find a level anywhere on this leg? Distinguishes "nothing
+    # on this side" from "nothing at all", which have different explanations.
+    has_any_level = bool(per_side) or _f((sr or {}).get("level")) is not None
+    leg_reason = no_level_reason(sr, zones)
+    out: List[Dict[str, Any]] = []
+    for side in SIDES:
+        read = per_side.get(side)
+        row = row_for(chart, read, ltp, label, zones)
+        # Name the side even when there is no read for it, or the row would
+        # read as "no level" with no indication of WHICH level is missing.
+        row["side"] = side
+        # A measured leg with nothing on THIS side is not an unmeasured leg.
+        # Without this the put's resistance row claimed "no read published"
+        # while its support row on the same leg showed a live state — the same
+        # ambiguity, one column over.
+        #
+        # Only when the leg HAS a level somewhere, though. A leg whose own
+        # state is NONE found nothing on either side, and the reason for that
+        # — no blocks yet, or blocks all on the wrong side — is the useful
+        # answer. Overwriting it with "no level on this side" would throw away
+        # the diagnosis and say the same empty thing twice.
+        if read is None:
+            if measured and has_any_level:
+                row["reason"] = "side_none"
+                row["meaning"] = f"No {side} level in range"
+            else:
+                # Nothing on either side: the LEG's reason is the useful one,
+                # and it has to be computed from the leg's own read — the
+                # per-side lookup is None here, which on its own would always
+                # answer "unmeasured".
+                row["reason"] = leg_reason
+                row["meaning"] = _NO_LEVEL_REASONS[leg_reason]
+        out.append(row)
+    return out
+
+
 def rows(call_sr=None, put_sr=None, call_ltp=None, put_ltp=None,
          call_label=None, put_label=None,
          call_zones=None, put_zones=None) -> List[Dict[str, Any]]:
-    """Both legs' rows, call first — the order the panels are stacked in."""
-    return [
-        row_for("CALL", call_sr, call_ltp, call_label, call_zones),
-        row_for("PUT", put_sr, put_ltp, put_label, put_zones),
-    ]
+    """Every leg's every side — call first, the order the panels are stacked."""
+    return (rows_for_leg("CALL", call_sr, call_ltp, call_label, call_zones)
+            + rows_for_leg("PUT", put_sr, put_ltp, put_label, put_zones))
 
 
 def _cell(text: str, colour: Optional[str] = None, align: str = "left",

@@ -35,18 +35,24 @@ REJECT = {"state": "REJECTING", "side": "support", "level": 88.0}
 
 # ── one row per leg, always ────────────────────────────────────────────
 
-def test_both_legs_get_a_row():
+def test_every_leg_gets_a_row_per_side():
+    """A leg sits BETWEEN its levels. Showing only the winning side hid half
+    the picture, and which side won could come down to a tie broken by the
+    classifier's iteration order."""
     out = rows(call_sr=BREAK, put_sr=REJECT)
-    assert [r["chart"] for r in out] == list(CHARTS)
+    assert [(r["chart"], r["side"]) for r in out] == [
+        ("CALL", "resistance"), ("CALL", "support"),
+        ("PUT", "resistance"), ("PUT", "support")]
 
 
-def test_a_leg_with_no_read_still_gets_a_row():
-    """An empty table would look broken. "No level in range" is a fact worth
-    showing — it is the engine saying it has no verdict, not a failure."""
+def test_a_leg_with_no_read_still_gets_its_rows():
+    """An empty table would look broken. "No level" is a fact worth showing —
+    it is the engine saying it has no verdict, not a failure."""
     out = rows()
-    assert len(out) == 2
+    assert len(out) == 4
     assert all(r["state"] == "NONE" for r in out)
     assert all(r["level"] is None for r in out)
+    assert all(r["side"] in ("resistance", "support") for r in out)
 
 
 def test_an_unknown_state_degrades_to_none():
@@ -111,11 +117,13 @@ def test_the_legs_are_labelled_by_their_strike():
 
 
 def test_call_and_put_reads_stay_on_their_own_rows():
-    text = _text(build_table(call_sr=BREAK, put_sr=REJECT,
-                             call_label="CE", put_label="PE"))
-    ce, pe = text.index("CE "), text.index("PE ")
-    assert text.index("BREAKING") < pe, "the call's state leaked into the put row"
-    assert text.index("REJECTING") > ce
+    out = rows(call_sr=BREAK, put_sr=REJECT)
+    states = {(r["chart"], r["side"]): r["state"] for r in out}
+    assert states[("CALL", "resistance")] == "BREAKING"
+    assert states[("PUT", "support")] == "REJECTING"
+    # neither leg inherits the other's verdict
+    assert states[("CALL", "support")] == "NONE"
+    assert states[("PUT", "resistance")] == "NONE"
 
 
 # ── the table and the chart agree ──────────────────────────────────────
@@ -244,3 +252,91 @@ def test_a_verdict_still_reads_as_before():
     call_row = text[text.index("CE "):text.index("PE ")]
     assert "Broke through" in call_row
     assert "Not measured" not in call_row and "28+" not in call_row
+
+
+# ── both sides, for both legs ──────────────────────────────────────────
+
+def test_sides_publishes_each_sides_own_read():
+    """The classifier evaluates resistance AND support and used to return only
+    the winner. `sides` carries both, so a leg between two levels shows both."""
+    from mios_v5.ui.leg_sr_table import rows_for_leg
+    sr = {"state": "BUILDING", "side": "resistance", "level": 109.88,
+          "sides": {"resistance": {"state": "BUILDING", "side": "resistance",
+                                   "level": 109.88},
+                    "support": {"state": "REJECTING", "side": "support",
+                                "level": 104.20}}}
+    out = rows_for_leg("CALL", sr, ltp=109.30)
+    assert [(r["side"], r["state"]) for r in out] == [
+        ("resistance", "BUILDING"), ("support", "REJECTING")]
+    assert out[0]["distance"] == pytest.approx(-0.58)
+    assert out[1]["distance"] == pytest.approx(5.10)
+
+
+def test_a_measured_leg_missing_one_side_says_so():
+    """Regression: the put's resistance row claimed "no read published" while
+    its support row on the SAME leg showed a live state — the unmeasured/
+    no-level ambiguity, one column over."""
+    from mios_v5.ui.leg_sr_table import rows_for_leg
+    sr = {"state": "BUILDING", "side": "support", "level": 58.83,
+          "sides": {"support": {"state": "BUILDING", "side": "support",
+                                "level": 58.83}}}
+    res, sup = rows_for_leg("PUT", sr, ltp=58.90)
+    assert res["reason"] == "side_none"
+    assert "resistance" in res["meaning"]
+    assert "Not measured" not in res["meaning"]
+    assert sup["state"] == "BUILDING"
+
+
+def test_a_truly_unmeasured_leg_still_says_unmeasured():
+    """`side_none` must not swallow the case it was carved out of."""
+    from mios_v5.ui.leg_sr_table import rows_for_leg
+    for row in rows_for_leg("CALL", None, ltp=109.30):
+        assert row["reason"] == "unmeasured"
+
+
+def test_an_older_read_without_sides_still_renders_both_rows():
+    """A cached read from before `sides` existed must not lose a row — the
+    headline goes on its own side and the other reports no level."""
+    from mios_v5.ui.leg_sr_table import rows_for_leg
+    res, sup = rows_for_leg("CALL", BREAK, ltp=126.6)
+    assert res["state"] == "BREAKING" and res["side"] == "resistance"
+    assert sup["state"] == "NONE" and sup["side"] == "support"
+
+
+def test_the_table_shows_four_rows_for_two_legs():
+    text = _text(build_table(
+        call_sr={"state": "BUILDING", "side": "resistance", "level": 109.88,
+                 "sides": {"resistance": {"state": "BUILDING",
+                                          "side": "resistance", "level": 109.88},
+                           "support": {"state": "REJECTING", "side": "support",
+                                       "level": 104.20}}},
+        call_ltp=109.30, call_label="ATM CE 24250", put_label="ATM PE 24250"))
+    assert text.count("ATM CE 24250") == 2
+    assert text.count("ATM PE 24250") == 2
+    assert "₹109.88" in text and "₹104.20" in text
+
+
+def test_a_leg_level_reason_is_not_swallowed_by_side_none():
+    """Regression: making every empty side say "no level on this side" threw
+    away WHY the leg had nothing — the 28-bar and wrong-side diagnoses. The
+    leg-level reason wins when the leg found nothing anywhere; `side_none`
+    applies only when the other side does have a level."""
+    from mios_v5.ui.leg_sr_table import rows_for_leg
+
+    for row in rows_for_leg("CALL", {"state": "NONE"}, ltp=117.25):
+        assert row["reason"] == "no_blocks", row
+        assert "28+" in row["meaning"]
+
+    for row in rows_for_leg("CALL", {"state": "NONE"}, ltp=117.25,
+                            zones=[{"mid": 130.0}]):
+        assert row["reason"] == "wrong_side", row
+
+
+def test_side_none_only_when_the_other_side_has_a_level():
+    from mios_v5.ui.leg_sr_table import rows_for_leg
+    sr = {"state": "BUILDING", "side": "support", "level": 58.83,
+          "sides": {"support": {"state": "BUILDING", "side": "support",
+                                "level": 58.83}}}
+    res, sup = rows_for_leg("PUT", sr, ltp=58.90)
+    assert res["reason"] == "side_none"
+    assert sup["reason"] == "none" and sup["state"] == "BUILDING"
