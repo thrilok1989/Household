@@ -2540,6 +2540,23 @@ def _index_label(st) -> str:
         return "NIFTY"
 
 
+#: The index the chain, the final read and the market picture all describe.
+#: Their levels are only meaningful on this one.
+LEVELS_INDEX = "NIFTY"
+
+
+def levels_apply_to(index_label) -> bool:
+    """Whether the app's computed levels belong on a frame of `index_label`.
+
+    The levels — support/resistance, VWAP, POC, dealer levels, HTF — all come
+    off the NIFTY chain, so they describe NIFTY prices only. Drawing them on
+    another index marks prices it can never trade, and because Plotly autoscales
+    to fit every trace, a ~24,000 line under ~81,000 candles stretches the axis
+    across both and flattens the series into a thread.
+    """
+    return str(index_label or LEVELS_INDEX).upper() == LEVELS_INDEX
+
+
 def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
     """NIFTY ‖ ATM Call ‖ ATM Put — three figures, each with its own Fullscreen
     button, kept on one shared timeline and one zoom window so they still line
@@ -2586,6 +2603,17 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
     # decision (principle 12).
     levels.update(fr.get("dealer_levels") or {})
     levels["reaction"] = fr.get("reaction_level")
+    # ⚖️ Every level above is derived from the NIFTY chain, the NIFTY final
+    # read and the NIFTY market picture — those engines are deliberately
+    # NIFTY-only. Drawn on another index they mark prices it can never trade,
+    # which is the rule `_panel_profile` already states for premium legs.
+    #
+    # On SENSEX the practical damage was worse than a wrong line: hlines at
+    # ~24,000 under candles at ~81,000 made Plotly autoscale the y-axis across
+    # both, so the SENSEX series collapsed into a flat thread at the top of the
+    # panel. Withhold them, and say so rather than leaving a bare chart.
+    _idx_label_now = _index_label(st)
+    _levels_match_frame = levels_apply_to(_idx_label_now)
     # the expiry-day magnet, from the one shared rule the Trade Card uses
     try:
         from ..charm_pin import from_market_picture as _cpin
@@ -2596,6 +2624,8 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
     except Exception:
         pass
     htf = (fr.get("htf") or {}).get("levels") or {}
+    if not _levels_match_frame:
+        levels, htf = {}, {}
 
     window = _zoom_controls(st)
 
@@ -2603,7 +2633,14 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
     # bars rendered underneath it. Building them here rather than again in the
     # panel is the same rule Stage 71.8 settled for the leg reads: one profile
     # per leg, one owner, two readers.
-    _nifty_prof = _panel_profile(st, "NIFTY", nifty, mf)
+    # Tagged with the instrument, not the literal "NIFTY": `_panel_profile`
+    # caches on that tag, so a shared tag would serve one index's POC/VAH/VAL
+    # for the other. `mf` is NIFTY's prebuilt profile, so it is only handed
+    # over when the frame really is NIFTY; otherwise the profile is computed
+    # natively from this frame, which is what `_panel_profile` does with no
+    # `ready` — the same native-per-series rule it applies to the legs.
+    _nifty_prof = _panel_profile(st, _idx_label_now, nifty,
+                                 mf if _levels_match_frame else None)
     _call_prof = _panel_profile(st, ce, call_df)
     _put_prof = _panel_profile(st, pe, put_df)
     # Published for the bars below. Same cycle, so no lag — the panel reads what
@@ -2643,7 +2680,13 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
             call_profile=_call_prof,
             put_profile=_put_prof,
             price_action=bool(st.session_state.get("_apa_on", False)),
-            index_label=_index_label(st))
+            index_label=_idx_label_now)
+        if not _levels_match_frame:
+            st.caption(
+                f"ℹ️ Support/resistance, VWAP, POC and the dealer levels are "
+                f"computed from the NIFTY chain, so they are not drawn on "
+                f"{_idx_label_now}. The candles and the volume profile are "
+                f"{_idx_label_now}'s own.")
         # NIFTY wide on the left, the two legs stacked on the right — the same
         # 60/40 proportions the combined terminal used, so the page still reads
         # as the terminal it replaces. Each `plotly_chart` gets the shared
