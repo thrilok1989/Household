@@ -316,3 +316,53 @@ def test_no_decision_path_imports_the_confluence_module():
     for path in decision_files:
         if path.exists():
             assert "level_confluence" not in path.read_text(), path.name
+
+
+# ── a blank row has to say WHICH kind of blank ─────────────────────────
+
+def test_the_reason_is_carried_onto_unreported_rows():
+    """Four rows of "no valid level" that cannot explain themselves are
+    indistinguishable from a broken table — the same defect this app has now
+    hit twice. The reason comes from the owner that already computes it."""
+    rows = evaluate_leg(None, 109.3, label="CE", reason="no_blocks")
+    assert all(not r["reported"] for r in rows)
+    assert all(r["reason"] == "no_blocks" for r in rows)
+
+
+def test_a_reported_row_keeps_its_own_reason():
+    """The passthrough must not stamp over a level that WAS evaluated."""
+    sr = {"sides": {"resistance": _read("BUILDING", "resistance", 109.88)}}
+    res, sup = evaluate_leg(sr, 109.3, reason="no_blocks")
+    assert res["reported"] and res.get("reason") != "no_blocks"
+    assert not sup["reported"] and sup["reason"] == "no_blocks"
+
+
+def test_no_reason_supplied_still_renders():
+    for row in evaluate_leg(None, 109.3):
+        assert not row["reported"]
+
+
+def test_the_renderer_explains_each_kind_of_blank():
+    import re
+    from mios_v5.ui.level_confluence_table import build_table
+
+    def text(sr, zones):
+        html = build_table([{"label": "CE", "ltp": 109.3, "sr": sr,
+                             "zones": zones}], theme="dark")
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
+
+    assert "no read published" in text(None, None)
+    assert "28+" in text({"state": "NONE", "sides": {}}, None)
+    assert "tested side" in text({"state": "NONE", "sides": {}},
+                                 [{"mid": 130.0}])
+
+
+def test_both_tables_word_a_blank_the_same_way():
+    """One set of wordings, one owner — or the two tables start describing
+    the same state differently."""
+    from mios_v5.ui.leg_sr_table import _NO_LEVEL_REASONS
+    from mios_v5.ui.level_confluence_table import _reason_text
+    for key, wording in _NO_LEVEL_REASONS.items():
+        rendered = _reason_text(key)
+        core = wording.split("—")[-1].strip().lower()
+        assert core[:12] in rendered.lower(), (key, rendered)
