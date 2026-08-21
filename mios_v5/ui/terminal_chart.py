@@ -550,8 +550,7 @@ def terminal_charts_split(nifty_df=None, call_df=None, put_df=None,
             _add_signal(go, fig, p, signal, edge=_c["marker_edge"])
         else:
             _lv, _zn, _sr = leg_over[key]
-            _leg_overlay(fig, _lv, _zn, 1, 1)
-            _leg_sr_overlay(fig, _sr, 1, 1)
+            _leg_overlay(fig, _lv, _zn, 1, 1, sr=_sr)
             _tint_single(fig, tint, dominance)
 
         fig.update_layout(
@@ -650,35 +649,22 @@ SR_STATE_TONE = {
 }
 
 
-def _leg_sr_overlay(fig, sr, row: int, col: int) -> None:
-    """Mark the level this leg is working, and what it is doing to it.
+def _sr_decoration(sr):
+    """(level key, (label, colour)) for a leg's S/R read, or (None, None).
 
-    The app already classifies every leg's own VOB structure as BREAKING /
-    REJECTING / ACCEPTING / BUILDING (`classify_leg_sr_behavior`), but the read
-    only ever reached the tables. The chart drew the zones and left the trader
-    to infer the verdict from them — which is the one judgement the engine had
-    already made.
-
-    Drawn on the leg's OWN axis from the leg's OWN structure: the level is a
-    premium, not a projected index price.
+    `_leg_levels` files the behaviour level under "support" or "resistance"
+    by its side, so the key is derived the same way here — otherwise the state
+    would be written onto whichever line happened to sort first.
     """
     state = _s((sr or {}).get("state"))
     tone = SR_STATE_TONE.get(state)
-    v = _f((sr or {}).get("level"))
-    if not tone or v is None:
-        return                      # NONE, or nothing measured yet
-    label, colour = tone
+    if not tone or _f((sr or {}).get("level")) is None:
+        return None, None
     side = str((sr or {}).get("side") or "").lower()
-    fig.add_hline(
-        y=v, row=row, col=col, line_width=1.6, line_dash="solid",
-        line_color=colour,
-        annotation_text=f"{label} {side} ₹{v:,.2f}".strip(),
-        annotation_position="right",
-        annotation=dict(xanchor="right"),
-        annotation_font=dict(size=8, color=colour))
+    return ("support" if side == "support" else "resistance"), tone
 
 
-def _leg_overlay(fig, levels, zones, row: int, col: int) -> None:
+def _leg_overlay(fig, levels, zones, row: int, col: int, sr=None) -> None:
     """One option panel's own levels and VOB zones, in premium terms.
 
     Labels sit on the **right**, which is where the trader reads them: the
@@ -695,14 +681,28 @@ def _leg_overlay(fig, levels, zones, row: int, col: int) -> None:
     turns the text back into the panel, over the empty space beside the last
     candle, and costs no chart width.
     """
+    # Which of these lines, if any, IS the S/R behaviour level. `_leg_levels`
+    # already publishes that level as "support" or "resistance" — so the state
+    # is written onto the line that is already there rather than drawn as a
+    # second line at the same price. One level, one line, one label.
+    _sr_key, _sr_tone = _sr_decoration(sr)
+
     for key, price in (levels or {}).items():
         v = _f(price)
         if v is None or key not in LEVELS:
             continue
         colour, dash, width = LEVELS[key]
+        label = f"{LEVEL_LABEL[key]} ₹{v:,.2f}"
+        if _sr_tone and key == _sr_key and _f((sr or {}).get("level")) == v:
+            # BREAKING / REJECTING / ACCEPTING / BUILDING — the verdict the
+            # engine already reached, on the level it reached it about.
+            state_label, state_colour = _sr_tone
+            label = f"{label} · {state_label}"
+            colour = state_colour
+            width = max(width, 1.6)
         fig.add_hline(y=v, row=row, col=col, line_width=width, line_dash=dash,
                       line_color=colour,
-                      annotation_text=f"{LEVEL_LABEL[key]} ₹{v:,.2f}",
+                      annotation_text=label,
                       annotation_position="right",
                       annotation=dict(xanchor="right"),
                       annotation_font=dict(size=8, color=colour))
