@@ -1408,6 +1408,26 @@ class DhanAPI:
         _back = st.session_state.get('_dhan_429_until')
         if _back and datetime.now(ist) < _back:
             return None
+        # ── one identical request per render, whoever asks ──────────────
+        # Callers each hold their own cache (the legs, the wings, the CVD
+        # history), but the two index fetches held none, so the same request
+        # could be issued twice in a cycle. It happens for real: the chart
+        # frame asks for `interval` over `days_back`, and the 5-minute frame
+        # asks for "5" over `max(days_back, 3)` — pick "5 min" on the timeframe
+        # selector with Days at 3 or more and those are byte-identical.
+        #
+        # Keyed by the render sequence, so a later render still refetches and
+        # the still-forming candle keeps updating; within one render the answer
+        # cannot have changed anyway, since it is a single instant.
+        _memo_key = (str(security_id), str(exchange_segment), str(instrument),
+                     str(interval), int(days_back))
+        _rid = st.session_state.get('_render_seq')
+        _memo = st.session_state.get('_intraday_memo')
+        if _memo is None or _memo.get('render') != _rid:
+            _memo = {'render': _rid, 'by_key': {}}
+            st.session_state['_intraday_memo'] = _memo
+        if _memo_key in _memo['by_key']:
+            return _memo['by_key'][_memo_key]
         # Throttle: enforce a minimum gap between intraday calls so the legs
         # don't burst past Dhan's per-second limit.
         try:
@@ -1433,7 +1453,14 @@ class DhanAPI:
         }
         try:
             response = requests.post(url, headers=self.headers, json=payload)
-            return self._handle_response(response)
+            out = self._handle_response(response)
+            # Only a real answer is memoised. Caching a None would make one
+            # failed fetch look like "no data" to every other caller this
+            # render, which is the failure mode the expiry-list cache
+            # documents — and each caller has its own fallback to reach for.
+            if out:
+                _memo['by_key'][_memo_key] = out
+            return out
         except Exception as e:
             st.error(f"Error fetching data: {str(e)}")
             return None

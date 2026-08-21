@@ -144,3 +144,31 @@ def test_leg_budget_is_bounded(source: str):
     per_render = _consts(source).get("LEG_FETCH_PER_RENDER")
     assert per_render is not None
     assert 1 <= per_render <= 8, per_render
+
+
+# ── identical intraday requests cost one call ──────────────────────────
+
+def test_intraday_is_memoised_per_render(tree: ast.Module):
+    """The chart frame asks for `interval` over `days_back`; the 5-minute
+    frame asks for "5" over `max(days_back, 3)`. Pick "5 min" on the timeframe
+    selector with Days at 3 or more and those are byte-identical — and neither
+    index fetch had a cache of its own, so it went out twice per render."""
+    src = ast.unparse(_func(tree, "get_intraday_data"))
+    assert "_intraday_memo" in src, "identical intraday requests are not deduped"
+    assert "_render_seq" in src, "the memo must be scoped to the render"
+
+
+def test_intraday_memo_does_not_cache_failures(tree: ast.Module):
+    """A memoised None would make one failed fetch look like 'no data' to
+    every other caller this render, each of which has its own fallback."""
+    src = ast.unparse(_func(tree, "get_intraday_data"))
+    assert "if out:" in src, "the memo is written unconditionally"
+
+
+def test_memo_hit_skips_the_throttle(source: str):
+    """A cache hit must return before the 0.3s inter-call sleep, or deduping
+    would cost the very time it exists to save."""
+    body = source.split("def get_intraday_data(")[1].split("\n    def ")[0]
+    hit = body.index("_memo['by_key'][_memo_key]")
+    sleep = body.index("time.sleep(0.3")
+    assert hit < sleep, "the throttle runs before the memo returns"
