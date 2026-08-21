@@ -336,7 +336,7 @@ def evaluate_level(read: Optional[Mapping[str, Any]], ltp=None, *,
 
 
 def evaluate_leg(sr: Optional[Mapping[str, Any]], ltp=None, *,
-                 label: Optional[str] = None,
+                 label: Optional[str] = None, reason: Optional[str] = None,
                  mfp=None, hvn=None, lvn=None, zones=None, delta=None
                  ) -> List[Dict[str, Any]]:
     """Both sides of one leg — resistance first, then support.
@@ -344,6 +344,12 @@ def evaluate_leg(sr: Optional[Mapping[str, Any]], ltp=None, *,
     `sr["sides"]` carries each side's own read. An absent side is returned
     with `reported: False` so the caller can say "no valid level" rather than
     dropping the row or showing it as a failure.
+
+    `reason` is carried through untouched onto every unreported row. A table
+    of four blanks that cannot say WHY is the same defect this app has now hit
+    twice: "no level" and "the engine never ran" look identical, and only one
+    of them means something is wrong. The caller supplies it from the owner
+    that already computes it rather than a second copy being grown here.
     """
     per_side = dict((sr or {}).get("sides") or {})
     if not per_side and (sr or {}).get("side"):
@@ -354,5 +360,7 @@ def evaluate_leg(sr: Optional[Mapping[str, Any]], ltp=None, *,
         row = evaluate_level(per_side.get(side), ltp, side=side, mfp=mfp,
                              hvn=hvn, lvn=lvn, zones=zones, delta=delta)
         row["label"] = str(label or "")
+        if not row["reported"] and reason:
+            row["reason"] = reason
         out.append(row)
     return out

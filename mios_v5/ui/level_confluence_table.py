@@ -67,6 +67,24 @@ def chrome(theme: Any = None) -> Dict[str, str]:
         else _CHROME["dark"]
 
 
+def _reason_text(reason: Any) -> str:
+    """Why this level is blank, in the words the S/R table already uses.
+
+    Taken from `leg_sr_table`, which owns these strings — a second set of
+    wordings for the same four situations is how two tables start describing
+    the same state differently.
+    """
+    try:
+        from .leg_sr_table import _NO_LEVEL_REASONS
+        text = _NO_LEVEL_REASONS.get(str(reason or ""))
+        if text:
+            return f"Not reported — {text[0].lower()}{text[1:]}" \
+                if not text.lower().startswith("not ") else text
+    except Exception:
+        pass
+    return "Not reported — no valid level"
+
+
 def side_label(row: Mapping[str, Any]) -> str:
     """`CE RES` / `PE SUP` — compact enough for a narrow column."""
     leg = str(row.get("label") or row.get("chart") or "")
@@ -117,11 +135,13 @@ def table_html(rows: Sequence[Mapping[str, Any]], theme: Any = None) -> str:
         name = side_label(r)
         if not r.get("reported"):
             # Never a zero score — no level is a different statement from a
-            # level nothing agreed with.
+            # level nothing agreed with. And SAY WHICH kind of nothing: four
+            # blank rows that cannot explain themselves are indistinguishable
+            # from a broken table, which is exactly how this looked.
+            why = _reason_text(r.get("reason"))
             body += (f"<tr style='background:{t['row_bg']};color:{t['row_fg']};'>"
                      + _cell(name, t)
-                     + _cell("<i>Not reported — no valid level</i>", t,
-                             t["muted"])
+                     + _cell(f"<i>{why}</i>", t, t["muted"])
                      + "".join(_cell("—", t, t["muted"], align="center")
                                for _ in COMPONENTS)
                      + _cell("—", t, t["muted"], align="center")
@@ -161,10 +181,19 @@ def build_table(legs: Sequence[Mapping[str, Any]], theme: Any = None) -> str:
     """
     from ..level_confluence import evaluate_leg
 
+    try:
+        from .leg_sr_table import no_level_reason
+    except Exception:                                   # pragma: no cover
+        no_level_reason = None
+
     rows: List[Dict[str, Any]] = []
     for leg in legs or []:
+        sr, zones = leg.get("sr"), leg.get("zones")
+        # The reason comes from the owner that already computes it for the S/R
+        # table, so both tables explain a blank with the same words.
+        reason = no_level_reason(sr, zones) if no_level_reason else None
         rows.extend(evaluate_leg(
-            leg.get("sr"), leg.get("ltp"), label=leg.get("label"),
+            sr, leg.get("ltp"), label=leg.get("label"), reason=reason,
             mfp=leg.get("mfp"), hvn=leg.get("hvn"), lvn=leg.get("lvn"),
-            zones=leg.get("zones"), delta=leg.get("delta")))
+            zones=zones, delta=leg.get("delta")))
     return table_html(rows, theme=theme)
