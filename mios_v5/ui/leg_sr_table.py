@@ -30,6 +30,23 @@ _MEANING = {
     "NONE": ("No level in range", "⚪"),
 }
 
+#: The block detector needs `sensitivity + 13 + 10` bars before it can return
+#: anything — 28 on the sensitivity=5 the leg read uses. Leg frames are today
+#: only, at one minute, so no block can exist before roughly 09:43 IST however
+#: healthy the data is.
+MIN_BARS_FOR_BLOCKS = 28
+
+#: Why a leg has no state. "NONE" alone was ambiguous in a way that mattered:
+#: it read as "the engine looked and found nothing" whether the engine had run
+#: or not, so a leg whose frame was too short to analyse looked identical to a
+#: leg trading in clear air.
+_NO_LEVEL_REASONS = {
+    "unmeasured": "Not measured — no read published for this leg",
+    "no_blocks": f"No order blocks yet — needs {MIN_BARS_FOR_BLOCKS}+ 1m bars",
+    "wrong_side": "Blocks exist, but none on the tested side of the LTP",
+    "none": "No level in range",
+}
+
 #: No parallel colour map. A state's colour is the chart's colour, taken from
 #: the chart — keeping a second copy here is how ACCEPTING ended up mint on the
 #: panel and plain green in the table, which made it indistinguishable from
@@ -58,19 +75,44 @@ def _f(v) -> Optional[float]:
     return None if x != x else x
 
 
+def no_level_reason(sr: Optional[Mapping[str, Any]],
+                    zones: Optional[Sequence[Any]] = None) -> str:
+    """Why this leg has no state — one of `_NO_LEVEL_REASONS`' keys.
+
+    `sr is None` means nothing was published: `_publish_atm_legs` only stores a
+    read that is truthy, and `classify_leg_sr_behavior` returns None outright
+    when the frame is too short or the LTP is not positive. A stored
+    `state: NONE` is the opposite case — the engine ran and found nothing.
+
+    `zones` is the leg's VOB store, which the chart already draws. Both come
+    from the same detector at the same sensitivity, so blocks in that store and
+    no S/R level means the blocks are all on the wrong side of the LTP: support
+    is only counted at or below it, resistance only at or above.
+    """
+    if not sr:
+        return "unmeasured"
+    if str(sr.get("state") or "").strip().upper() != "NONE":
+        return "none"
+    return "wrong_side" if zones else "no_blocks"
+
+
 def row_for(chart: str, sr: Optional[Mapping[str, Any]],
-            ltp: Any = None, label: Any = None) -> Dict[str, Any]:
+            ltp: Any = None, label: Any = None,
+            zones: Optional[Sequence[Any]] = None) -> Dict[str, Any]:
     """One leg's row: `{chart, label, state, meaning, emoji, side, level, ltp,
-    distance}`.
+    distance, reason}`.
 
     Always returns a row, even with nothing measured — a leg with no structure
     in range is a fact worth showing. Leaving it out would make an empty table
-    look like a broken one.
+    look like a broken one. `reason` says WHICH kind of nothing it is.
     """
     state = str((sr or {}).get("state") or "NONE").strip().upper()
     if state not in _MEANING:
         state = "NONE"
     meaning, emoji = _MEANING[state]
+    reason = no_level_reason(sr, zones)
+    if state == "NONE":
+        meaning = _NO_LEVEL_REASONS[reason]
     level = _f((sr or {}).get("level"))
     price = _f(ltp)
     distance = (price - level) if (level is not None and price is not None) else None
@@ -84,15 +126,17 @@ def row_for(chart: str, sr: Optional[Mapping[str, Any]],
         "level": level,
         "ltp": price,
         "distance": distance,
+        "reason": reason,
     }
 
 
 def rows(call_sr=None, put_sr=None, call_ltp=None, put_ltp=None,
-         call_label=None, put_label=None) -> List[Dict[str, Any]]:
+         call_label=None, put_label=None,
+         call_zones=None, put_zones=None) -> List[Dict[str, Any]]:
     """Both legs' rows, call first — the order the panels are stacked in."""
     return [
-        row_for("CALL", call_sr, call_ltp, call_label),
-        row_for("PUT", put_sr, put_ltp, put_label),
+        row_for("CALL", call_sr, call_ltp, call_label, call_zones),
+        row_for("PUT", put_sr, put_ltp, put_label, put_zones),
     ]
 
 
@@ -171,7 +215,9 @@ def table_html(leg_rows: Sequence[Mapping[str, Any]], theme: Any = None) -> str:
 
 
 def build_table(call_sr=None, put_sr=None, call_ltp=None, put_ltp=None,
-                call_label=None, put_label=None, theme: Any = None) -> str:
+                call_label=None, put_label=None, theme: Any = None,
+                call_zones=None, put_zones=None) -> str:
     """Convenience: rows → HTML in one call. Computes nothing beyond formatting."""
     return table_html(rows(call_sr, put_sr, call_ltp, put_ltp,
-                           call_label, put_label), theme=theme)
+                           call_label, put_label, call_zones, put_zones),
+                      theme=theme)
