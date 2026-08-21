@@ -2540,6 +2540,35 @@ def _index_label(st) -> str:
         return "NIFTY"
 
 
+def _leg_mfp(st, tag) -> Optional[Dict[str, Any]]:
+    """This leg's money-flow profile, from the `_atm_pm1_vpfr` legs list.
+
+    Read, never rebuilt — `_publish_atm_legs` already computed it this cycle.
+    """
+    try:
+        for leg in ((st.session_state.get("_atm_pm1_vpfr") or {})
+                    .get("legs") or []):
+            if leg.get("tag") == tag:
+                return leg.get("mfp") or None
+    except Exception:
+        pass
+    return None
+
+
+def _leg_nodes(st, tag):
+    """`(hvn, lvn)` for this leg from `_premium_structures`, keyed by
+    (side, strike) — matched the way `_leg_levels` already matches it."""
+    try:
+        for (_side, _strike), read in ((st.session_state.get(
+                "_premium_structures") or {}).items()):
+            suffix = f"{'CE' if _side == 'CALL' else 'PE'} {_strike:.0f}"
+            if str(tag).endswith(suffix):
+                return (read.get("hvn") or []), (read.get("lvn") or [])
+    except Exception:
+        pass
+    return [], []
+
+
 def _last_close(df) -> Optional[float]:
     """A leg's latest traded premium, or None when the frame cannot supply one.
 
@@ -2772,6 +2801,28 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
                 theme=_active_theme_name(st))
             if _srh:
                 st.markdown(_srh, unsafe_allow_html=True)
+        except Exception:
+            pass
+
+        # ⚔️ Level Confluence — how many published engines corroborate each
+        # level. Observational: it reaches no gate, no verdict and no order,
+        # and it recomputes nothing. Every input below is a store some engine
+        # already filled this cycle.
+        try:
+            from .level_confluence_table import build_table as _lc_table
+            _lch = _lc_table([
+                {"sr": _leg_store(st, "_atm_leg_sr_behavior", tag),
+                 "ltp": _last_close(frame),
+                 "label": lbl,
+                 "mfp": _leg_mfp(st, tag),
+                 "hvn": _leg_nodes(st, tag)[0],
+                 "lvn": _leg_nodes(st, tag)[1],
+                 "zones": _leg_store(st, "_atm_leg_vob_volume", tag),
+                 "delta": _leg_store(st, "_atm_leg_ltf_delta", tag)}
+                for tag, frame, lbl in ((ce, call_df, "CE"), (pe, put_df, "PE"))
+            ], theme=_active_theme_name(st))
+            if _lch:
+                st.markdown(_lch, unsafe_allow_html=True)
         except Exception:
             pass
 
