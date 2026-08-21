@@ -1572,6 +1572,7 @@ class DhanAPI:
         url = f"{self.base_url}/marketfeed/quote"
         payload = {exchange_segment: [int(security_id)]}
         try:
+            _quote_gate(url)
             response = requests.post(url, headers=self.headers, json=payload, timeout=10)
             if response.status_code == 401:
                 st.session_state['_dhan_token_expired'] = True
@@ -1596,6 +1597,7 @@ class DhanAPI:
         # Returns just last_price (no OI/volume) but at least lets us compute basis.
         try:
             ltp_url = f"{self.base_url}/marketfeed/ltp"
+            _quote_gate(ltp_url)
             ltp_resp = requests.post(ltp_url, headers=self.headers, json=payload, timeout=10)
             if ltp_resp.status_code == 200:
                 items = ltp_resp.json().get('data', {}).get(exchange_segment, {})
@@ -1645,10 +1647,34 @@ def get_dhan_expiry_list_cached(underlying_scrip: int, underlying_seg: str):
         return cached['data']
     return fresh
 
+#: Dhan caps Quote APIs — `marketfeed/ltp` and `marketfeed/quote` — at 1
+#: request per SECOND, the tightest per-second limit in the whole API. The
+#: intraday endpoint has had a 0.3s gate since the legs started bursting; the
+#: quote endpoints had none, despite a stricter limit and several callers.
+QUOTE_MIN_GAP_S = 1.05          # a hair over 1s, so rounding cannot trip it
+
+
+def _quote_gate(url):
+    """Space consecutive Quote-API calls to stay inside Dhan's 1/second cap."""
+    if 'marketfeed' not in str(url):
+        return
+    try:
+        last = st.session_state.get('_dhan_last_quote_ts')
+        now = time.time()
+        if last is not None:
+            gap = now - last
+            if gap < QUOTE_MIN_GAP_S:
+                time.sleep(QUOTE_MIN_GAP_S - gap)
+        st.session_state['_dhan_last_quote_ts'] = time.time()
+    except Exception:
+        pass
+
+
 def _dhan_post(url, payload, max_retries=4):
     if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
         st.error("Dhan API credentials not configured")
         return None
+    _quote_gate(url)
     headers = {'access-token': DHAN_ACCESS_TOKEN, 'client-id': DHAN_CLIENT_ID, 'Content-Type': 'application/json'}
     # ── retry budget, bounded by the refresh cycle ──
     # These were [2, 4, 8, 16]: a fully rate-limited chain fetch slept for 30
@@ -1736,10 +1762,58 @@ def _dhan_post(url, payload, max_retries=4):
             return None
     return None
 
-def get_dhan_option_chain(underlying_scrip: int, underlying_seg: str, expiry: str, max_retries: int = 4):
-    return _dhan_post("https://api.dhan.co/v2/optionchain",
+#: Dhan documents the option chain separately from every other Data API:
+#: "Rate limit for Option Chain API is set to one unique request every 3
+#: seconds", because OI updates far slower than LTP. It is the strictest limit
+#: the app touches and was the only fetch with no throttle at all — the intraday
+#: endpoint has had a 0.3s gap for ages while this one fired in a tight loop.
+OPTION_CHAIN_MIN_GAP_S = 3.0
+
+#: Long enough that one render never fetches the same chain twice, short enough
+#: that the next render (~20s later) still gets a fresh one. The nearest expiry
+#: was being fetched twice per cycle — once for the main read, once as the first
+#: entry of the cross-expiry loop — because this function had no cache at all.
+OPTION_CHAIN_TTL_S = 10.0
+
+
+def get_dhan_option_chain(underlying_scrip: int, underlying_seg: str, expiry: str,
+                          max_retries: int = 4, allow_wait: bool = True):
+    """One option chain, cached per (scrip, seg, expiry) and rate-gated.
+
+    Returns the cached payload when it is younger than `OPTION_CHAIN_TTL_S`, so
+    two callers asking for the same expiry in one render cost one request.
+
+    Otherwise it waits out the remainder of Dhan's 3s window before calling.
+    `allow_wait=False` makes it give up instead of sleeping — for callers that
+    would rather skip an expiry than spend the render's budget waiting.
+    """
+    key = f"{underlying_scrip}|{underlying_seg}|{expiry}"
+    store = st.session_state.setdefault('_option_chain_cache', {})
+    hit = store.get(key)
+    now = time.time()
+    if hit and (now - hit['ts']) < OPTION_CHAIN_TTL_S:
+        return hit['data']
+
+    # Space DISTINCT requests. The window is global to the endpoint, not
+    # per-expiry, so it is tracked on one timestamp rather than per key.
+    last = st.session_state.get('_option_chain_last_ts')
+    if last is not None:
+        wait = OPTION_CHAIN_MIN_GAP_S - (now - last)
+        if wait > 0:
+            if not allow_wait:
+                return hit['data'] if hit else None
+            time.sleep(min(wait, OPTION_CHAIN_MIN_GAP_S))
+
+    st.session_state['_option_chain_last_ts'] = time.time()
+    resp = _dhan_post("https://api.dhan.co/v2/optionchain",
                       {"UnderlyingScrip": underlying_scrip, "UnderlyingSeg": underlying_seg, "Expiry": expiry},
                       max_retries)
+    # Only a real answer replaces the cache — a failed fetch must not blank a
+    # good chain, which is the mistake the expiry-list cache documents above.
+    if resp:
+        store[key] = {'ts': time.time(), 'data': resp}
+        return resp
+    return hit['data'] if hit else None
 
 
 @st.cache_resource(show_spinner=False)
@@ -1796,8 +1870,17 @@ def get_index_spot_ltp(scrip: int = NIFTY_UNDERLYING_SCRIP, seg: str = NIFTY_UND
             return None
         _ck = f'_idx_spot_ltp_{scrip}_{seg}'
         _cached = st.session_state.get(_ck)
-        if _cached and (_now - _cached['ts']).total_seconds() < 4:
-            return _cached['ltp']
+        # Scoped to the render, not to a stopwatch. A 4s TTL was shorter than a
+        # render — the legs alone spend 0.3s apiece under their fetch gate — so
+        # the four call sites spread through a cycle kept missing it and
+        # re-fetching the same spot, on an endpoint Dhan caps at 1 request per
+        # second. Once per render per (scrip, seg) is what this is worth; the
+        # 4s floor still applies across renders so a fast rerun cannot burst.
+        _rid = st.session_state.get('_render_seq')
+        if _cached:
+            _same_render = _rid is not None and _cached.get('render') == _rid
+            if _same_render or (_now - _cached['ts']).total_seconds() < 4:
+                return _cached['ltp']
         resp = _dhan_post("https://api.dhan.co/v2/marketfeed/ltp",
                           {seg: [int(scrip)]}, max_retries=1)
         if not resp:
@@ -1806,7 +1889,7 @@ def get_index_spot_ltp(scrip: int = NIFTY_UNDERLYING_SCRIP, seg: str = NIFTY_UND
             or (resp.get('data', {}) or {}).get(seg, {}).get(int(scrip))
         ltp = float(node.get('last_price') or 0) if node else 0.0
         if ltp > 0:
-            st.session_state[_ck] = {'ltp': ltp, 'ts': _now}
+            st.session_state[_ck] = {'ltp': ltp, 'ts': _now, 'render': _rid}
             return ltp
     except Exception:
         pass
@@ -10843,7 +10926,16 @@ def _fmr_leg_df(strike, side):
     if not sid or api is None:
         return None
     cache = st.session_state.setdefault('_cockpit_wing_cache', {})
-    if time.time() - cache.get(sid, {}).get('ts', 0) > 90:
+    # Share the render's leg-fetch budget, exactly as the other wing fetch
+    # already does. The strike loop that reaches here runs ATM±2 on both sides,
+    # and only ATM±1 is in `_atm_leg_dfs` — so the four ±2 legs all fell through
+    # to this fetch with nothing capping them, on top of the five the budget
+    # allows. Out of budget, serve the cached frame and rotate in next render.
+    _wb = st.session_state.get('_leg_fetch_budget')
+    _may_fetch = not (_wb and _wb[1] <= 0)
+    if _may_fetch and time.time() - cache.get(sid, {}).get('ts', 0) > 90:
+        if _wb:
+            _wb[1] -= 1
         try:
             _raw = api.get_intraday_data(security_id=sid, exchange_segment=ctx.get('seg'),
                                          instrument="OPTIDX", interval="1", days_back=1)
