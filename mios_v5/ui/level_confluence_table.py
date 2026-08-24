@@ -31,6 +31,8 @@ HEADINGS = {
     "mfp": "MFP",
     "hvn": "HVN",
     "vob": "VOB",
+    "oi": "OI",
+    "depth": "Depth",
     "delta": DELTA_LABEL,
     "cvd": "CVD",
 }
@@ -174,7 +176,8 @@ def table_html(rows: Sequence[Mapping[str, Any]], theme: Any = None) -> str:
 
 
 def build_table(legs: Sequence[Mapping[str, Any]], theme: Any = None) -> str:
-    """`legs` is a sequence of `{sr, ltp, label, mfp, hvn, lvn, zones, delta}`.
+    """`legs` is a sequence of
+    `{sr, ltp, label, mfp, hvn, lvn, zones, delta, oi, depth}`.
 
     Evaluates both sides of each leg through the pure module and renders them.
     Computes nothing itself.
@@ -195,5 +198,6 @@ def build_table(legs: Sequence[Mapping[str, Any]], theme: Any = None) -> str:
         rows.extend(evaluate_leg(
             sr, leg.get("ltp"), label=leg.get("label"), reason=reason,
             mfp=leg.get("mfp"), hvn=leg.get("hvn"), lvn=leg.get("lvn"),
-            zones=zones, delta=leg.get("delta")))
+            zones=zones, delta=leg.get("delta"),
+            oi=leg.get("oi"), depth=leg.get("depth")))
     return table_html(rows, theme=theme)
