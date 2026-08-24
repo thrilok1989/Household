@@ -478,3 +478,33 @@ def test_both_new_columns_have_headings():
     from mios_v5.ui.level_confluence_table import HEADINGS
     from mios_v5.level_confluence import COMPONENTS
     assert set(HEADINGS) == set(COMPONENTS)
+
+
+# ── the table must read its producer's CURRENT cycle ───────────────────
+
+def test_confluence_is_filled_after_its_producer():
+    """`_premium_structures` — the HVN/LVN input — is published by
+    `_trading_screen`, which runs AFTER `_charts_screen`. Rendering the table
+    inline on the charts screen read nothing on the first render and the
+    PREVIOUS cycle's copy on every render after: the exact fault the
+    dependency ordering was introduced to fix for the cockpits.
+
+    So the charts screen claims a container and the fill happens later. This
+    pins that order, because inlining it again would look harmless.
+    """
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "ui" / "dashboard_v6.py").read_text()
+
+    trading = src.index("_trading_screen(st, fr, state)")
+    fill = src.index("render_level_confluence(st)", trading)
+    assert fill > trading, "confluence is filled before its producer runs"
+
+    # and the charts screen only CLAIMS the slot, never renders into it
+    charts = src.index("def _terminal_chart(")
+    charts_end = src.index("\ndef ", charts + 10)
+    body = src[charts:charts_end]
+    assert '_lc_slot' in body, "the charts screen no longer claims the slot"
+    assert "level_confluence_table" not in body, (
+        "the charts screen renders the table inline again — it would read "
+        "`_premium_structures` a cycle late")

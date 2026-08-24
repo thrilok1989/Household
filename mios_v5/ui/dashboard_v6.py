@@ -475,6 +475,12 @@ def render_dashboard_v6(state=None, db=None) -> None:
     #     _nifty_cockpit      reads   _sr_levels · _entry_decision
     #     _options_cockpit    reads   _premium_energy · _premium_structures
     #
+    # ⚔️ Level Confluence is the same dependency in miniature: it lives UNDER
+    # the charts but reads `_premium_structures`, so the charts screen claims
+    # a container for it and `render_level_confluence` fills that container
+    # after `_trading_screen` has published. Placement on screen and order of
+    # execution are separate concerns, which is the whole point of this block.
+    #
     # Filled in tab order the three cockpits ran BEFORE their producer, so:
     #   · on the first render of a session those keys did not exist and the
     #     blocks drew nothing — the "⚪ Not reporting yet: sr table / premium
@@ -489,6 +495,12 @@ def render_dashboard_v6(state=None, db=None) -> None:
         _charts_screen(st, fr)
     with tabs[4]:
         _trading_screen(st, fr, state)
+    # ⚔️ Fill the Level Confluence slot the charts screen claimed. Here, not
+    # there, because `_trading_screen` is what publishes `_premium_structures`
+    # — the HVN/LVN input. Rendering it inline on the charts screen read the
+    # previous cycle's copy, which is the fault this whole ordering exists to
+    # avoid.
+    render_level_confluence(st)
     with tabs[1]:
         _nifty_cockpit(st, fr)
     with tabs[2]:
@@ -2606,6 +2618,45 @@ def _leg_contract_reads(st, tag):
         return None, None
 
 
+def render_level_confluence(st) -> None:
+    """Fill the Level Confluence slot claimed by the charts screen.
+
+    Called AFTER `_trading_screen`, so `_premium_structures` — and therefore
+    the HVN/LVN column — is this cycle's, not last cycle's. Every other input
+    was already published before the charts drew.
+
+    Observational: reaches no gate, no verdict and no order, and recomputes
+    nothing.
+    """
+    slot = st.session_state.get("_lc_slot")
+    legs = st.session_state.get("_lc_legs")
+    if slot is None or not legs:
+        return
+    try:
+        from .level_confluence_table import build_table as _lc_table
+        payload = []
+        for leg in legs:
+            tag = leg.get("tag")
+            # Each helper runs ONCE per leg — both parse the tag and scan a
+            # frame, and calling them per-field does that work twice for the
+            # two halves of one answer.
+            oi, depth = _leg_contract_reads(st, tag)
+            hvn, lvn = _leg_nodes(st, tag)
+            payload.append({
+                "sr": _leg_store(st, "_atm_leg_sr_behavior", tag),
+                "ltp": leg.get("ltp"), "label": leg.get("label"),
+                "mfp": _leg_mfp(st, tag), "hvn": hvn, "lvn": lvn,
+                "zones": _leg_store(st, "_atm_leg_vob_volume", tag),
+                "delta": _leg_store(st, "_atm_leg_ltf_delta", tag),
+                "oi": oi, "depth": depth})
+        html = _lc_table(payload, theme=_active_theme_name(st))
+        if html:
+            with slot:
+                st.markdown(html, unsafe_allow_html=True)
+    except Exception as err:
+        _dbg_caption(st, "level_confluence", f"Level Confluence unavailable: {err}")
+
+
 def _last_close(df) -> Optional[float]:
     """A leg's latest traded premium, or None when the frame cannot supply one.
 
@@ -2841,31 +2892,23 @@ def _terminal_chart(st, fr: Dict[str, Any], call_tag, put_tag, dom) -> None:
         except Exception:
             pass
 
-        # ⚔️ Level Confluence — how many published engines corroborate each
-        # level. Observational: it reaches no gate, no verdict and no order,
-        # and it recomputes nothing. Every input below is a store some engine
-        # already filled this cycle.
+        # ⚔️ Level Confluence — the slot is CLAIMED here and FILLED after
+        # `_trading_screen`, which is what publishes `_premium_structures`.
+        #
+        # This screen runs first (see the dependency-order note in `render`),
+        # so a consumer of that store placed inline here reads nothing on the
+        # first render of a session and the PREVIOUS cycle's value on every
+        # render after — the exact fault that ordering was introduced to fix
+        # for the three cockpits. Claiming a container keeps the table under
+        # the charts where it belongs while letting it read fresh data.
         try:
-            from .level_confluence_table import build_table as _lc_table
-            _lc_legs = []
-            for tag, frame, lbl in ((ce, call_df, "CE"), (pe, put_df, "PE")):
-                # Each helper is called ONCE per leg — both of these parse the
-                # tag and scan a frame, and the dict-comprehension form was
-                # quietly doing that twice for the two halves of one answer.
-                _oi, _depth = _leg_contract_reads(st, tag)
-                _hvn, _lvn = _leg_nodes(st, tag)
-                _lc_legs.append({
-                    "sr": _leg_store(st, "_atm_leg_sr_behavior", tag),
-                    "ltp": _last_close(frame), "label": lbl,
-                    "mfp": _leg_mfp(st, tag), "hvn": _hvn, "lvn": _lvn,
-                    "zones": _leg_store(st, "_atm_leg_vob_volume", tag),
-                    "delta": _leg_store(st, "_atm_leg_ltf_delta", tag),
-                    "oi": _oi, "depth": _depth})
-            _lch = _lc_table(_lc_legs, theme=_active_theme_name(st))
-            if _lch:
-                st.markdown(_lch, unsafe_allow_html=True)
+            st.session_state["_lc_slot"] = st.container()
+            st.session_state["_lc_legs"] = [
+                {"tag": ce, "ltp": _last_close(call_df), "label": "CE"},
+                {"tag": pe, "ltp": _last_close(put_df), "label": "PE"},
+            ]
         except Exception:
-            pass
+            st.session_state.pop("_lc_slot", None)
 
         # 📐 Geometric patterns as a TABLE below the charts (not drawn on them),
         # each with its bias — only when the Advanced Price Action toggle is on.
