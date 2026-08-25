@@ -1048,6 +1048,26 @@ def send_telegram_alert_bot(message):
     return None
 
 
+def send_formation_alert(message):
+    """📐 Formation notes (new HVP / VOB) → the SECOND Telegram account.
+
+    The owner asked for these off the main bot. Only the Telegram destination
+    moved: Discord still gets its copy exactly as before, and the seed/diff
+    anti-spam rule in `_notify_chart_formations` is untouched.
+
+    When the alert bot is unconfigured the main bot carries it — a message the
+    owner asked for should not vanish because a secret is missing. In that case
+    `send_telegram_message_sync` posts to Discord itself, so this does not.
+    """
+    if not TELEGRAM_ALERT_BOT_TOKEN or not TELEGRAM_ALERT_CHAT_ID:
+        return send_telegram_message_sync(message, force=True)
+    try:
+        send_discord_message(message, force=True)
+    except Exception:
+        pass
+    return send_telegram_alert_bot(message)
+
+
 def _mios_market_read():
     """Spot, V5/V6 bias, per-side energy, premium LTP + its own S/R, and the
     Stage 71.85 behaviour — assembled from what the cycle already published.
@@ -11671,9 +11691,9 @@ def _notify_chart_formations():
             seen[key] = updated
             for s in to_alert:
                 try:
-                    send_telegram_message_sync(
-                        msg_of(chart, labels.get(chart), item_by_sig[s], dp),
-                        force=True)
+                    # → the alert bot, not the main stream (owner's request).
+                    send_formation_alert(
+                        msg_of(chart, labels.get(chart), item_by_sig[s], dp))
                 except Exception:
                     pass
 
@@ -15873,11 +15893,13 @@ def _render_main_analyzer():
     # already on screen at load is seeded silently). Consumed in
     # `_notify_chart_formations`.
     st.session_state["_formation_alerts_on"] = st.sidebar.checkbox(
-        "📐 HVP / VOB formation → Telegram", value=FORMATION_ALERTS_DEFAULT,
-        help="A Telegram note when a new high-volume pivot forms on NIFTY, Call "
-             "or Put, or a new Volume Order Block forms on a leg. Each formation "
-             "is sent once; what already exists when the app loads is not "
-             "re-announced.")
+        "📐 HVP / VOB formation → Alert Telegram", value=FORMATION_ALERTS_DEFAULT,
+        help="A note to the ALERT bot (the second Telegram account) when a new "
+             "high-volume pivot forms on NIFTY, Call or Put, or a new Volume "
+             "Order Block forms on a leg. Each formation is sent once; what "
+             "already exists when the app loads is not re-announced. Discord "
+             "gets its copy as before. Falls back to the main bot if the alert "
+             "bot is unconfigured.")
 
     # ── 📍 option LTP reaching its HVP line (±5) → Telegram ────────────
     st.session_state["_leg_hvp_touch_on"] = st.sidebar.checkbox(
