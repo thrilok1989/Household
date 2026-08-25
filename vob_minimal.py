@@ -779,7 +779,12 @@ LEVEL_ACCEPT_COOLDOWN_S = 900.0
 CONFLUENCE_ALERTS_DEFAULT = True
 CONFLUENCE_COOLDOWN_S = 900.0
 
-ENTRY_REVERSED_ALERT_DEFAULT = True
+# ── ⚠️ Entry reversal alert — PAUSED by the owner ──────────────────────
+# The whipsaw alert repeated the same level over and over (the same ₹ level five
+# times in a row, only the "Current" price moving), so the owner asked for it to
+# stop. OFF by default; the sidebar box brings it back. The alert body is
+# unchanged and still gated — nothing was deleted.
+ENTRY_REVERSED_ALERT_DEFAULT = False
 ENTRY_REVERSED_COOLDOWN_S = 300.0
 
 # ── the two sub-alerts the owner paused ────────────────────────────────
@@ -15915,13 +15920,15 @@ def _render_main_analyzer():
              "existing engines; changes no verdict.")
 
     # ── ⚠️ Entry reversal (bias-against at zone) → Telegram ────────────
+    # Paused — it repeated the same level instead of firing once per reversal.
     st.session_state["_entry_reversed_on"] = st.sidebar.checkbox(
         "⚠️ Entry reversal (bias-against at zone) → Alert Telegram",
         value=ENTRY_REVERSED_ALERT_DEFAULT,
-        help="A Telegram note to the alert bot when NIFTY reaches a mapped "
+        help="Paused — this one repeated the same level rather than firing "
+             "once per reversal, so it is off. Tick to bring it back: a "
+             "Telegram note to the alert bot when NIFTY reaches a mapped "
              "price zone but the bias has reversed (trend weakened, opposite "
-             "writers appeared, etc.). Whipsaw alert — catches traps. Fires "
-             "once per reversal (cooldown). Reuses existing engines.")
+             "writers appeared, etc.). Reuses existing engines.")
 
     # ── the two sub-alerts the owner paused (off by default) ──────────
     # Ranked S/R touch is a subset of the level-touch alert above; VOB formation
