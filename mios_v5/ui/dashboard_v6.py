@@ -243,6 +243,76 @@ def _strike_verdict(st, r) -> None:
                     f"{' · '.join(bits)}</div>", unsafe_allow_html=True)
 
 
+def _trade_watch(st, fr: Dict[str, Any]) -> None:
+    """🎯 WAIT or EXIT for a trade already taken — by button, or by a filled
+    Dhan position `_track_my_trade` (vob_minimal.py) detected in the background.
+
+    ⚠️ Not another entry signal. The entry gate above answers "should I get
+    in"; this answers "I'm already in — hold, or bail" for a trade taken by
+    ANY route, including one taken on impulse, away from any zone the engine
+    would itself have entered at. `mios_v5.trade_watch.assess` is the one
+    place that decides WAIT vs EXIT — both the manual button path here and
+    `_track_my_trade`'s Dhan auto-detect path store only a position; neither
+    computes the verdict, so a click-armed trade and a Dhan-detected one read
+    the same signal off the same formula.
+
+    EXIT fires only once BOTH the engine's own vote AND the level protecting
+    the trade at entry have turned against it — either alone still reads WAIT,
+    on purpose: a single wobble in either must not be mistaken for a reversal.
+    """
+    try:
+        from .. import trade_watch as TW
+        from . import trade_watch_panel as TWP
+    except Exception as err:
+        _dbg_caption(st, "trade_watch", f"unavailable: {err}")
+        return
+    try:
+        import time
+        ss = st.session_state
+        spot = _spot_price(ss)
+        mp = ss.get("_market_picture") or {}
+        net = (mp.get("entry_gate") or {}).get("net")
+        sup = fr.get("strong_support")
+        res = fr.get("strong_resistance")
+        ctx = ss.get("_current_instrument_context")
+        atm_range = getattr(ctx, "atm_range", 100) if ctx else 100
+        pos = ss.get("_my_trade")
+
+        with st.expander("🎯 My trade — WAIT or EXIT", expanded=bool(pos)):
+            c1, c2, c3 = st.columns(3)
+            if c1.button("🟢 I bought CALL", key="tw_buy_call",
+                        use_container_width=True):
+                pos = ss["_my_trade"] = {
+                    "side": "CALL", "entry_spot": spot, "entry_time": time.time(),
+                    "protect": TW.protect_level("CALL", sup, res),
+                    "source": "manual", "security_id": None}
+            if c2.button("🔴 I bought PUT", key="tw_buy_put",
+                        use_container_width=True):
+                pos = ss["_my_trade"] = {
+                    "side": "PUT", "entry_spot": spot, "entry_time": time.time(),
+                    "protect": TW.protect_level("PUT", sup, res),
+                    "source": "manual", "security_id": None}
+            if c3.button("⬜ Flat / exited", key="tw_flat",
+                        use_container_width=True):
+                ss.pop("_my_trade", None)
+                pos = None
+
+            if pos:
+                info = TW.assess(pos.get("side"), pos.get("entry_spot"), spot,
+                                 net, pos.get("protect"), atm_range)
+                html = TWP.banner_html(pos.get("side"), pos.get("entry_spot"),
+                                       spot, info,
+                                       source=pos.get("source", "manual"))
+                if html:
+                    st.markdown(html, unsafe_allow_html=True)
+            else:
+                st.caption("No trade being watched — click CALL or PUT the "
+                          "moment you take one, or it picks up a filled Dhan "
+                          "position automatically.")
+    except Exception as err:
+        _dbg_caption(st, "trade_watch", f"unavailable: {err}")
+
+
 def _vob_zone_table(st, call_tag, put_tag) -> None:
     """📦 Every VOB zone on the CALL/PUT panels, with the buy/sell split
     `analyze_vob_volume` already computed FOR that zone's own price window.
@@ -1342,6 +1412,12 @@ def _charts_screen(st, fr: Dict[str, Any]) -> None:
     them here instead of there moves no work.
     """
     from ..terminal import dominance
+
+    # 🎯 First thing on the tab: WAIT/EXIT for a trade already taken. It has to
+    # out-rank the chart itself — the one moment this exists for is a trader
+    # about to panic-exit on a wobble, and a banner below the fold does not
+    # stop that.
+    _trade_watch(st, fr)
 
     # ⛶ Make the Fullscreen button visible on every chart below. Once per rerun.
     st.markdown(FS_CHART_CSS, unsafe_allow_html=True)

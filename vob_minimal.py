@@ -1872,6 +1872,76 @@ def get_dhan_option_chain(underlying_scrip: int, underlying_seg: str, expiry: st
     return hit['data'] if hit else None
 
 
+def _dhan_get(url, max_retries=2):
+    """GET twin of `_dhan_post` for read-only endpoints (positions, orders) —
+    same headers, same 401/429/5xx handling and global back-off, no request body.
+    A lighter retry budget than the chain fetch: this is polled in the
+    background for the trade-watch banner, not blocking the main render."""
+    if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
+        return None
+    _back = st.session_state.get('_dhan_429_until')
+    if _back:
+        _ist = pytz.timezone('Asia/Kolkata')
+        if datetime.now(_ist) < _back:
+            return None
+    headers = {'access-token': DHAN_ACCESS_TOKEN, 'client-id': DHAN_CLIENT_ID,
+              'Accept': 'application/json'}
+    delays = [1, 2]
+    max_retries = min(max_retries, len(delays))
+    for attempt in range(max_retries + 1):
+        try:
+            response = requests.get(url, headers=headers, timeout=6.0)
+            if response.status_code == 401:
+                st.session_state['_dhan_token_expired'] = True
+                return None
+            if response.status_code == 429:
+                try:
+                    _trip_dhan_backoff()
+                except Exception:
+                    pass
+                if attempt < max_retries:
+                    time.sleep(delays[min(attempt, len(delays) - 1)])
+                    continue
+                return None
+            if 500 <= response.status_code < 600:
+                if attempt < max_retries:
+                    time.sleep(delays[min(attempt, len(delays) - 1)])
+                    continue
+                return None
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException:
+            if attempt < max_retries:
+                time.sleep(delays[min(attempt, len(delays) - 1)])
+                continue
+            return None
+    return None
+
+
+#: Positions change only on a fill, not every tick — no point asking Dhan every
+#: render. Long enough to skip most renders, short enough that a fresh entry or
+#: exit shows up within the trade-watch banner's own patience.
+DHAN_POSITIONS_TTL_S = 15.0
+
+
+def get_dhan_positions():
+    """The account's live positions, cached and rate-gated like the option
+    chain. Returns the raw `data` list from Dhan's `/v2/positions`, or `None`
+    on a failed/skipped fetch — callers must treat `None` as "unknown", not
+    "flat", so a blip never reads as an exit.
+    """
+    now = time.time()
+    cached = st.session_state.get('_dhan_positions_cache')
+    if cached and (now - cached['ts']) < DHAN_POSITIONS_TTL_S:
+        return cached['data']
+    resp = _dhan_get("https://api.dhan.co/v2/positions")
+    if resp is None:
+        return cached['data'] if cached else None
+    data = resp if isinstance(resp, list) else (resp.get('data') if isinstance(resp, dict) else None)
+    st.session_state['_dhan_positions_cache'] = {'ts': now, 'data': data}
+    return data
+
+
 @st.cache_resource(show_spinner=False)
 def strike_store():
     """📊 Per-strike OI / ΔOI history for ATM±2, one store for the process.
@@ -12185,6 +12255,62 @@ def _notify_confluence_entry():
         pass  # an alert must never take the cycle down
 
 
+def _track_my_trade():
+    """🎯 The Dhan side of the trade-watch banner: detect a filled CALL/PUT
+    position automatically, so the WAIT/EXIT signal (`dashboard_v6._trade_watch`)
+    covers a trade taken off-app too, not only one you remembered to click.
+
+    This owns ONLY the position's lifecycle — adopt one Dhan shows open,
+    clear one Dhan shows flat. It does not decide WAIT or EXIT; that formula
+    lives in `mios_v5.trade_watch.assess` and runs at render time in the
+    dashboard, against whatever `_my_trade` holds right now.
+
+    A manually-armed trade (`source: "manual"`) is left alone here as long as
+    Dhan still shows a matching side open — the button's own `entry_spot`,
+    captured at the exact moment you clicked, is a better anchor than
+    whatever spot happens to be live the next time this polls. It is only
+    replaced when Dhan shows a DIFFERENT side (you flattened and re-entered
+    the other way) or adopted fresh when nothing was armed at all.
+    """
+    try:
+        from mios_v5 import trade_watch as TW
+        positions = get_dhan_positions()
+        if positions is None:
+            return  # unknown, not flat — a failed/skipped fetch must not clear a live trade
+        found = TW.find_open_nifty_option(positions)
+        pos = st.session_state.get('_my_trade')
+
+        if found is None:
+            # Dhan shows flat. A Dhan-sourced trade is cleared outright; a
+            # manual one is trusted only once Dhan confirms it too — until
+            # then it might just be lag between the click and the fill.
+            if pos and pos.get('source') == 'dhan':
+                st.session_state.pop('_my_trade', None)
+            return
+
+        if pos and pos.get('side') == found['side'] and pos.get('security_id') in (
+                found.get('security_id'), None):
+            # Same side already tracked (manual or dhan) — leave its own
+            # entry_spot/protect level alone; just tag the security id so a
+            # later flip to the OTHER side is recognised as a fresh position.
+            pos['security_id'] = found.get('security_id')
+            return
+
+        spot = st.session_state.get('_nifty_spot_live')
+        if not spot:
+            return
+        from mios_v5.final_read import build_final_read
+        fr = build_final_read(st.session_state.get('_mios_state')) or {}
+        sup, res = fr.get('strong_support'), fr.get('strong_resistance')
+        st.session_state['_my_trade'] = {
+            'side': found['side'], 'entry_spot': float(spot), 'entry_time': time.time(),
+            'protect': TW.protect_level(found['side'], sup, res),
+            'source': 'dhan', 'security_id': found.get('security_id'),
+        }
+    except Exception:
+        pass  # a tracker must never take the cycle down
+
+
 def _notify_entry_reversed():
     """⚠️ Alert to Telegram when NIFTY is at a price zone but the bias has
     reversed against the trade setup. This catches whipsaw scenarios where
@@ -16842,6 +16968,10 @@ def _render_main_analyzer():
         pass
     try:
         _notify_entry_reversed()
+    except Exception:
+        pass
+    try:
+        _track_my_trade()
     except Exception:
         pass
 
