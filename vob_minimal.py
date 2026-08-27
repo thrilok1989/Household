@@ -11876,24 +11876,25 @@ def _notify_flow_at_level():
       • PUT buy+sell heavier than CALL, spot AT RESISTANCE
       • CALL buy+sell heavier than PUT, spot AT SUPPORT
 
-    Requested against the `CALL vs PUT — Cum Buy / Cum Sell` graph: "more trade in
-    PUT at resistance → signal; same for CALL at support." Goes to the SECOND
-    (alert) Telegram bot, `send_telegram_alert_bot`, not the main stream.
+    Requested against the `CALL vs PUT — Cum Buy / Cum Sell` graph: a volume BURST
+    in the put at resistance → signal; same for the call at support. Each leg is
+    judged against ITS OWN recent normal — no put-vs-call comparison. Goes to the
+    SECOND (alert) Telegram bot, `send_telegram_alert_bot`, not the main stream.
 
-    Reads only already-published numbers — the graph's latest cumulative buy/sell
-    (`_atm_flow_last`, stashed in `render_atm_cvd_graphs`) and the ranked
+    Reads only already-published numbers — the graph's activity history
+    (`_atm_flow_hist`, stashed in `render_atm_cvd_graphs`) and the ranked
     support/resistance (`final_read`). `mios_v5.flow_level_alerts` owns the "is it
-    active AND is this a fresh crossing" decision; this only reads, latches per
-    event across cycles, and sends. The rising-edge latch is deliberate — a
-    standing condition re-emitted every cycle is exactly the flood the pivot
-    alerts produced. Opt-out via `_flow_level_alerts_on`.
+    bursting AND on the level AND is this a fresh crossing" decision; this only
+    reads, latches per event across cycles, and sends. The rising-edge latch is
+    deliberate — a standing condition re-emitted every cycle is exactly the flood
+    the pivot alerts produced. Opt-out via `_flow_level_alerts_on`.
     """
     try:
         if not st.session_state.get('_flow_level_alerts_on',
                                     FLOW_LEVEL_ALERTS_DEFAULT):
             return
-        flow = st.session_state.get('_atm_flow_last') or {}
-        if not flow:
+        hist = st.session_state.get('_atm_flow_hist') or []
+        if len(hist) < 3:
             return
         from mios_v5 import flow_level_alerts as _fla
         spot = st.session_state.get('_nifty_spot_live')
@@ -11901,10 +11902,11 @@ def _notify_flow_at_level():
             return
         from mios_v5.final_read import build_final_read
         fr = build_final_read(st.session_state.get('_mios_state')) or {}
-        call_flow = _fla.activity(flow.get('call_buy'), flow.get('call_sell'))
-        put_flow = _fla.activity(flow.get('put_buy'), flow.get('put_sell'))
+        # split the (t, call_act, put_act) history into per-leg (t, value) series
+        call_series = [(t, c) for (t, c, _p) in hist if c is not None]
+        put_series = [(t, p) for (t, _c, p) in hist if p is not None]
         events = _fla.assess(
-            call_flow, put_flow, spot,
+            call_series, put_series, spot,
             support=fr.get('strong_support'),
             resistance=fr.get('strong_resistance'))
 
@@ -12869,23 +12871,30 @@ def render_atm_cvd_graphs(spot_price):
     except Exception:
         pass
 
-    # 📨 Latest CALL/PUT cumulative buy & sell, for the flow-at-level alert
-    # (`_notify_flow_at_level`). Stashed HERE because this is where the graph's
-    # own numbers are computed — the alert reads them rather than a second
-    # estimate. Runs every cycle: `_live` is built above the "Show graphs" toggle.
+    # 📨 CALL/PUT activity HISTORY (cumulative buy + sell per side), for the
+    # flow-at-level alert (`_notify_flow_at_level`). Stashed HERE because this is
+    # where the graph's own numbers are computed — the alert reads them rather than
+    # a second estimate. A history, not a single value, because the alert fires on a
+    # volume BURST — each leg's recent accumulation rate against its own prior
+    # normal — which needs the series. Runs every cycle: `_live` is built above the
+    # "Show graphs" toggle. Capped to a session's worth at ~20s cadence.
     try:
+        from mios_v5 import flow_level_alerts as _fla_mod
+
         def _flow_last(s):
             try:
                 return float(s.iloc[-1]) if s is not None and len(s) else None
             except Exception:
                 return None
-        st.session_state['_atm_flow_last'] = {
-            'call_buy': _flow_last(_live['buy'][0]),
-            'put_buy': _flow_last(_live['buy'][1]),
-            'call_sell': _flow_last(_live['sell'][0]),
-            'put_sell': _flow_last(_live['sell'][1]),
-            'ts': time.time(),
-        }
+        _call_act = _fla_mod.activity(_flow_last(_live['buy'][0]),
+                                      _flow_last(_live['sell'][0]))
+        _put_act = _fla_mod.activity(_flow_last(_live['buy'][1]),
+                                     _flow_last(_live['sell'][1]))
+        _fh = st.session_state.setdefault('_atm_flow_hist', [])
+        if _call_act is not None or _put_act is not None:
+            _fh.append((time.time(), _call_act, _put_act))
+            if len(_fh) > 300:
+                del _fh[:len(_fh) - 300]
     except Exception:
         pass
 
