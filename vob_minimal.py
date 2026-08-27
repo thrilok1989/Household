@@ -763,6 +763,10 @@ LEG_HVP_COOLDOWN_S = 900.0    # the "sleeping facility" — 15 min per line
 #    `mios_v5.level_touch.evaluate` and `_notify_level_touches`.
 LEVEL_TOUCH_DEFAULT = True
 
+#: Default for the flow-at-level alert to the ALTERNATE bot (PUT heavier at
+#: resistance · CALL heavier at support). On, because the owner asked for it.
+FLOW_LEVEL_ALERTS_DEFAULT = True
+
 # ── Level Acceptance / Rejection alerts ────────────────────────────────
 # Telegram note when a level RESOLVES (accepted above/below, or rejected) — the
 # owner asked for it ON. Edge-triggered (once, on the transition) and per-zone
@@ -11865,6 +11869,63 @@ def _send_market_snapshot():
     return len(parts)
 
 
+def _notify_flow_at_level():
+    """📨 Alert-BOT note when one option side is being traded harder than the
+    other while spot sits on the matching level:
+
+      • PUT buy+sell heavier than CALL, spot AT RESISTANCE
+      • CALL buy+sell heavier than PUT, spot AT SUPPORT
+
+    Requested against the `CALL vs PUT — Cum Buy / Cum Sell` graph: "more trade in
+    PUT at resistance → signal; same for CALL at support." Goes to the SECOND
+    (alert) Telegram bot, `send_telegram_alert_bot`, not the main stream.
+
+    Reads only already-published numbers — the graph's latest cumulative buy/sell
+    (`_atm_flow_last`, stashed in `render_atm_cvd_graphs`) and the ranked
+    support/resistance (`final_read`). `mios_v5.flow_level_alerts` owns the "is it
+    active AND is this a fresh crossing" decision; this only reads, latches per
+    event across cycles, and sends. The rising-edge latch is deliberate — a
+    standing condition re-emitted every cycle is exactly the flood the pivot
+    alerts produced. Opt-out via `_flow_level_alerts_on`.
+    """
+    try:
+        if not st.session_state.get('_flow_level_alerts_on',
+                                    FLOW_LEVEL_ALERTS_DEFAULT):
+            return
+        flow = st.session_state.get('_atm_flow_last') or {}
+        if not flow:
+            return
+        from mios_v5 import flow_level_alerts as _fla
+        spot = st.session_state.get('_nifty_spot_live')
+        if not spot:
+            return
+        from mios_v5.final_read import build_final_read
+        fr = build_final_read(st.session_state.get('_mios_state')) or {}
+        call_flow = _fla.activity(flow.get('call_buy'), flow.get('call_sell'))
+        put_flow = _fla.activity(flow.get('put_buy'), flow.get('put_sell'))
+        events = _fla.assess(
+            call_flow, put_flow, spot,
+            support=fr.get('strong_support'),
+            resistance=fr.get('strong_resistance'))
+
+        profs = st.session_state.get('_leg_profiles') or {}
+        call_label = profs.get('call_label') or 'ATM Call'
+        put_label = profs.get('put_label') or 'ATM Put'
+        states = st.session_state.setdefault('_flow_level_state', {})
+        now = time.time()
+        for name, info in events.items():
+            fire, new_state = _fla.latch(info['active'], states.get(name), now)
+            states[name] = new_state
+            if fire:
+                try:
+                    send_telegram_alert_bot(
+                        _fla.message(name, info, call_label, put_label))
+                except Exception:
+                    pass
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
 def _notify_level_touches():
     """🎯 Telegram note when spot reaches a key level within ±5 points.
 
@@ -12805,6 +12866,26 @@ def render_atm_cvd_graphs(spot_price):
                     _cvd_last(_live['delta'][1])))
         if len(_zh) > 120:
             del _zh[:len(_zh) - 120]
+    except Exception:
+        pass
+
+    # 📨 Latest CALL/PUT cumulative buy & sell, for the flow-at-level alert
+    # (`_notify_flow_at_level`). Stashed HERE because this is where the graph's
+    # own numbers are computed — the alert reads them rather than a second
+    # estimate. Runs every cycle: `_live` is built above the "Show graphs" toggle.
+    try:
+        def _flow_last(s):
+            try:
+                return float(s.iloc[-1]) if s is not None and len(s) else None
+            except Exception:
+                return None
+        st.session_state['_atm_flow_last'] = {
+            'call_buy': _flow_last(_live['buy'][0]),
+            'put_buy': _flow_last(_live['buy'][1]),
+            'call_sell': _flow_last(_live['sell'][0]),
+            'put_sell': _flow_last(_live['sell'][1]),
+            'ts': time.time(),
+        }
     except Exception:
         pass
 
@@ -15892,6 +15973,17 @@ def _render_main_analyzer():
              "an OI wall, or the ranked support / resistance. Sent once on "
              "arrival; re-arms only after price leaves the level.")
 
+    # ── 📨 flow-at-level → ALTERNATE Telegram bot ─────────────────────────
+    # PUT buy+sell heavier than CALL with spot at resistance, or CALL heavier
+    # than PUT with spot at support. Reads the CALL-vs-PUT Cum Buy/Sell graph's
+    # own numbers. Rising-edge + cooldown, so a standing condition sends once.
+    st.session_state["_flow_level_alerts_on"] = st.sidebar.checkbox(
+        "📨 Flow-at-level alerts → alert bot", value=FLOW_LEVEL_ALERTS_DEFAULT,
+        help="To the SECOND (alert) bot: when PUT buy+sell activity outweighs "
+             "CALL and spot is within 0.25% of resistance, or CALL outweighs "
+             "PUT and spot is within 0.25% of support. Sent once per crossing; "
+             "re-arms after the condition clears.")
+
     # ── ⚔️ level ACCEPTED / REJECTED → Telegram ───────────────────────
     # Fires when a level resolves (accepted above/below, or rejected), not on
     # mere touch. Edge-triggered + per-zone cooldown. Consumed in
@@ -16687,6 +16779,10 @@ def _render_main_analyzer():
         pass
     try:
         _notify_leg_hvp_touch()
+    except Exception:
+        pass
+    try:
+        _notify_flow_at_level()
     except Exception:
         pass
 
