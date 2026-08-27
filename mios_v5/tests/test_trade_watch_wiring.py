@@ -162,3 +162,32 @@ def test_the_trade_card_reads_my_trade_not_dhan_directly(tree: ast.Module):
     assert "_my_trade" in src
     assert "find_open_nifty_option" not in src
     assert "get_dhan_positions" not in src
+
+
+# ── render_market_picture's Position Guardian: idle must not be a lie ──
+#
+# The Guardian's "idle" fallback only meant the ENGINE had no armed trade —
+# it said "no active trade" even while a manually-declared or Dhan-detected
+# one (`_my_trade`) was open, which is wrong, not just uninformative.
+
+def test_the_guardian_idle_branch_checks_my_trade(tree: ast.Module):
+    fn = _func(tree, "render_market_picture")
+    src = ast.unparse(fn)
+    assert "_my_trade" in src
+
+
+def test_the_guardian_uses_the_same_trade_watch_formula(tree: ast.Module):
+    fn = _func(tree, "render_market_picture")
+    called = {c.func.attr for c in ast.walk(fn)
+              if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)}
+    assert "assess" in called
+
+
+def test_the_idle_pink_banner_only_shows_when_nothing_is_open(tree: ast.Module):
+    """The literal idle message must still exist for the true-idle case, but
+    `_my_trade` is checked BEFORE it in source order — the trade-watch banner
+    gets first refusal of the slot."""
+    fn = _func(tree, "render_market_picture")
+    src = ast.unparse(fn)
+    assert "no active trade" in src
+    assert src.index("_my_trade") < src.index("no active trade")

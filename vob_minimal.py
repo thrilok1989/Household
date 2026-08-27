@@ -9541,24 +9541,53 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
                 f"({_g.get('to_inval', 0):.0f} away) — let it work; your decision</div></div>",
                 unsafe_allow_html=True)
         else:
-            # idle — no trade being guarded: keep the Guardian visibly present
-            # so it's always in the Market Picture (arms on a CONFIRMED entry)
-            #
-            # ⚠️ `st.caption` was the wrong element for it: caption is always
-            # rendered in Streamlit's muted grey, so the one line that says the
-            # Guardian exists and is watching read as disabled chrome.
-            #
-            # Pink FILL with white letters, in the same padded/rounded shape the
-            # other Guardian states use — so idle is a state that looks like a
-            # state, not a footnote under them.
-            st.markdown(
-                "<div style='margin:2px 0 8px;padding:8px 13px;"
-                "background:#ff2d95;border-radius:8px;font-size:13px;"
-                "font-weight:800;color:#ffffff;'>"
-                "🛡 Position Guardian — idle · no active trade. Arms on a "
-                "CONFIRMED entry, then watches ON TRACK ⇄ STAY PATIENT ⇄ "
-                "REVERSAL WARNING → EXIT FAST.</div>",
-                unsafe_allow_html=True)
+            # idle — the ENGINE has no trade armed. But you may still be in
+            # one it never armed (a manual click, or a Dhan-detected FOMO
+            # trade) — `_my_trade`, tracked separately by `_track_my_trade`.
+            # Showing "idle · no active trade" while that is open would be
+            # wrong, not just uninformative, so it takes over this slot.
+            # Same `trade_watch.assess`/`banner_html` the Trade Card and the
+            # Charts tab call — one formula, three surfaces, never a second
+            # opinion about the same trade.
+            _tw_mp_html = ""
+            try:
+                from mios_v5 import trade_watch as _TWm
+                from mios_v5.ui.trade_watch_panel import banner_html as _tw_mp_banner
+                _my_pos_mp = st.session_state.get('_my_trade')
+                if _my_pos_mp:
+                    _ctx_mp = st.session_state.get('_current_instrument_context')
+                    _atm_range_mp = getattr(_ctx_mp, 'atm_range', 100) if _ctx_mp else 100
+                    _tw_mp_info = _TWm.assess(
+                        _my_pos_mp.get('side'), _my_pos_mp.get('entry_spot'),
+                        spot_price, (mp.get('entry_gate') or {}).get('net'),
+                        _my_pos_mp.get('protect'), _atm_range_mp)
+                    _tw_mp_html = _tw_mp_banner(
+                        _my_pos_mp.get('side'), _my_pos_mp.get('entry_spot'),
+                        spot_price, _tw_mp_info,
+                        source=_my_pos_mp.get('source', 'manual'))
+            except Exception:
+                _tw_mp_html = ""
+            if _tw_mp_html:
+                st.markdown(_hdr + _tw_mp_html, unsafe_allow_html=True)
+            else:
+                # idle — no trade being guarded: keep the Guardian visibly present
+                # so it's always in the Market Picture (arms on a CONFIRMED entry)
+                #
+                # ⚠️ `st.caption` was the wrong element for it: caption is always
+                # rendered in Streamlit's muted grey, so the one line that says the
+                # Guardian exists and is watching read as disabled chrome.
+                #
+                # Pink FILL with white letters, in the same padded/rounded shape the
+                # other Guardian states use — so idle is a state that looks like a
+                # state, not a footnote under them.
+                st.markdown(
+                    "<div style='margin:2px 0 8px;padding:8px 13px;"
+                    "background:#ff2d95;border-radius:8px;font-size:13px;"
+                    "font-weight:800;color:#ffffff;'>"
+                    "🛡 Position Guardian — idle · no active trade. Arms on a "
+                    "CONFIRMED entry, then watches ON TRACK ⇄ STAY PATIENT ⇄ "
+                    "REVERSAL WARNING → EXIT FAST.</div>",
+                    unsafe_allow_html=True)
         # 📋 Execution Plan — display-only R-based template for the OPEN trade
         # (entry / stop / T1 / T2 / trail / partial / size). No auto-execution.
         if _guard and (_guard.get('state') in ('ON_TRACK', 'PATIENT', 'WARNING')):
