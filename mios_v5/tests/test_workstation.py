@@ -672,9 +672,16 @@ def test_the_charts_tab_computes_nothing():
     # SAME store `_leg_overlay` draws the chart's zone rectangles from — via
     # `_leg_store`, and lays out the buy/sell split `analyze_vob_volume` already
     # computed. It does not call `analyze_vob_volume` itself.
+    # `_trade_watch` renders the manual CALL/PUT buttons and the WAIT/EXIT
+    # banner for a trade already open. `mios_v5.trade_watch.assess` is the one
+    # formula that decides WAIT vs EXIT, applied here to facts other producers
+    # already published (`_market_picture`'s entry_gate net vote, `fr`'s
+    # strong_support/strong_resistance, live spot) — the same kind of small
+    # derived read `_guardian_read` already does in this file. It builds no
+    # market fact of its own.
     _render = {"markdown", "caption", "get", "leg_table_html", "_feed_reason",
                "_dbg_caption", "_strike_oi_charts", "_poc_structure",
-               "_hv_settings", "_vob_zone_table"}
+               "_hv_settings", "_vob_zone_table", "_trade_watch"}
     assert called <= {"_leg_reads", "dominance", "_terminal_chart"} | _render, (
         f"unexpected calls in _charts_screen: {called}")
     # ⚠️ The property that actually matters: no BUILDER is invoked here.
