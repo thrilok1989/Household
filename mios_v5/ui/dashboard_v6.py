@@ -243,6 +243,46 @@ def _strike_verdict(st, r) -> None:
                     f"{' · '.join(bits)}</div>", unsafe_allow_html=True)
 
 
+def _vob_zone_table(st, call_tag, put_tag) -> None:
+    """📦 Every VOB zone on the CALL/PUT panels, with the buy/sell split
+    `analyze_vob_volume` already computed FOR that zone's own price window.
+
+    ⚠️ Requested against a reference indicator whose order blocks show a
+    buy%/sell% for the pivot window that FORMED the block. This app's
+    `VolumeOrderBlocks` finds the block; `analyze_vob_volume` wraps it and
+    attributes buy_vol/sell_vol to bars whose CLOSE fell inside the zone —
+    the same idea, already computed, every cycle, for the zones already drawn
+    as coloured rectangles on the chart above. Only the status colour reached
+    the screen; the percentage behind it did not.
+
+    Reads `_atm_leg_vob_volume` — the SAME store `_leg_overlay` draws from —
+    through `_leg_store`, so this table and the chart's rectangles can never
+    show a different zone than each other.
+    """
+    try:
+        from . import vob_table_panel as VT
+    except Exception as err:
+        _dbg_caption(st, "vob_table_panel", f"unavailable: {err}")
+        return
+    try:
+        call_zones = _leg_store(st, "_atm_leg_vob_volume", call_tag)
+        put_zones = _leg_store(st, "_atm_leg_vob_volume", put_tag)
+        rows = VT.rows_for(call_zones, put_zones,
+                           call_label=str(call_tag or "CALL"),
+                           put_label=str(put_tag or "PUT"))
+        html = VT.table_html(rows)
+        if html:
+            st.markdown(html, unsafe_allow_html=True)
+        else:
+            # ⚠️ Never vanish silently — an empty table and a broken one look
+            # identical to a trader unless the absence says why. No VOB zone has
+            # formed yet on either leg's chart, which is a normal early-session
+            # state, not a failure.
+            st.caption("📦 VOB zones — none formed yet on either leg's chart.")
+    except Exception as err:
+        _dbg_caption(st, "vob_table_panel", f"unavailable: {err}")
+
+
 def _hv_settings(st) -> None:
     """⚙️ The three knobs the reference indicator exposes, behind an Apply button.
 
@@ -1308,6 +1348,12 @@ def _charts_screen(st, fr: Dict[str, Any]) -> None:
 
     call, put, call_tag, put_tag = _leg_reads(st, fr)
     _terminal_chart(st, fr, call_tag, put_tag, dominance(call, put))
+
+    # 📦 VOB zone buy/sell split, directly under the chart the zones are drawn
+    # on. `analyze_vob_volume` computes buy_vol/sell_vol/bull_pct WITHIN each
+    # zone's own price window every cycle; only the status colour of the zone
+    # rectangle reached the chart, never the percentage that produced it.
+    _vob_zone_table(st, call_tag, put_tag)
 
     # ⚙️ The high-volume-pivot settings, under the chart they change.
     _hv_settings(st)

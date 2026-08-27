@@ -668,9 +668,13 @@ def test_the_charts_tab_computes_nothing():
     # `vob_minimal._publish_poc_series`, hourly-cached — deliberately NOT here.
     # `_hv_settings` is a CONTROL: it renders three number inputs and writes
     # `_hv_settings` to session state. `vob_minimal._hv_points` does the computing.
+    # `_vob_zone_table` is a RENDERER too: it reads `_atm_leg_vob_volume` — the
+    # SAME store `_leg_overlay` draws the chart's zone rectangles from — via
+    # `_leg_store`, and lays out the buy/sell split `analyze_vob_volume` already
+    # computed. It does not call `analyze_vob_volume` itself.
     _render = {"markdown", "caption", "get", "leg_table_html", "_feed_reason",
                "_dbg_caption", "_strike_oi_charts", "_poc_structure",
-               "_hv_settings"}
+               "_hv_settings", "_vob_zone_table"}
     assert called <= {"_leg_reads", "dominance", "_terminal_chart"} | _render, (
         f"unexpected calls in _charts_screen: {called}")
     # ⚠️ The property that actually matters: no BUILDER is invoked here.
