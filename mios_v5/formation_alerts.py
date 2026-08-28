@@ -101,17 +101,27 @@ def hvp_message(chart: str, label: Optional[str], pivot: Mapping[str, Any],
     price_s = "—" if price is None else f"₹{price:,.{decimals}f}"
     from . import bias_ball as _bb
 
-    # ⚠️ MEASURED beats ASSUMED. `bias_ball.hvp_bias` reads the pivot's SHAPE —
-    # a swing high is overhead, therefore resistance, therefore (leg-inverted) a
-    # direction. That is a structural assumption, and the desk challenged it
-    # correctly: a swing high can print on heavy BUYING and a swing low on heavy
-    # SELLING. The shape of the bar says nothing about who was behind the volume.
+    # ⚠️ ESTIMATED beats ASSUMED — but it is an ESTIMATE, and the text must say so.
     #
-    # So when `_annotate_hv_pivots` has attributed the pivot's own formation
-    # window (CLV-weighted, via `indicators.order_flow.split`), that measurement
-    # decides the ball and is stated in the text. The structural read stays only
-    # as the fallback for a pivot that could not be measured — better than
-    # silence, but never preferred over the real split.
+    # `bias_ball.hvp_bias` reads the pivot's SHAPE — a swing high is overhead,
+    # therefore resistance, therefore (leg-inverted) a direction. That is a
+    # structural assumption, and the desk challenged it correctly: a swing high
+    # can print on heavy BUYING and a swing low on heavy SELLING.
+    #
+    # The replacement is `indicators.order_flow.split`, which is CLV:
+    # `buy_fraction = (close − low) / (high − low)`. That is an INFERENCE FROM
+    # WHERE THE BAR CLOSED IN ITS RANGE, not a count of buy versus sell trades.
+    # Exact classification needs tick data with bid/ask so each trade can be
+    # tagged as hitting the ask or the bid; Dhan's intraday endpoint returns
+    # 1-minute OHLCV, so it is not available. CLV is a good proxy and a poor
+    # certainty: a bar distributed into all the way up — real selling into
+    # strength — still closes near its high and CLV calls it buying.
+    #
+    # So the wording hedges deliberately ("looks", "est.") and names the basis.
+    # Every other surface in this app already labels the same number "CLV-
+    # weighted estimate from 1m OHLCV (not tick data)"; an alert that dropped
+    # the qualifier and printed a bare "83% buy" would be claiming a precision
+    # the method does not have.
     buy_pct = _f(pivot.get("buy_pct"))
     dominant = str(pivot.get("dominant") or "").lower()
     if buy_pct is not None and dominant:
@@ -120,23 +130,22 @@ def hvp_message(chart: str, label: Optional[str], pivot: Mapping[str, Any],
                 _bb.BEAR if dominant == "sellers" else _bb.NEUTRAL)
         if chart and str(chart).strip().upper() == "PUT" and bias != _bb.NEUTRAL:
             # a PUT's own buyers are NIFTY-bearish — the one inversion rule,
-            # already owned by `bias_ball`; applied here to the MEASURED side
+            # already owned by `bias_ball`; applied to the ESTIMATED side
             bias = _bb.BEAR if bias == _bb.BULL else _bb.BULL
-        flow = (f"{buy_pct:.0f}% buy / {sell_pct:.0f}% sell"
-                if dominant == "balanced"
-                else f"{'BUY' if dominant == 'buyers' else 'SELL'}-dominated "
-                     f"({buy_pct:.0f}% buy / {sell_pct:.0f}% sell)")
+        lean = ("mixed" if dominant == "balanced"
+                else "BUY-led" if dominant == "buyers" else "SELL-led")
         return _bb.prefix(
             bias,
             f"{icon} <b>New high-volume {kind} — {label}</b>\n"
             f"A high-volume swing {kind} formed at {price_s}{vol}.\n"
-            f"Flow into it was {flow}.")
+            f"Flow looks {lean} — est. {buy_pct:.0f}% buy / {sell_pct:.0f}% sell "
+            f"(CLV from 1m bars, not tick data).")
 
     return _bb.prefix(
         _bb.hvp_bias(chart, side),
         f"{icon} <b>New high-volume {kind} — {label}</b>\n"
         f"A high-volume swing {kind} formed at {price_s}{vol} — "
-        f"a fresh level to watch (flow not measured).")
+        f"a fresh level to watch (flow not estimated).")
 
 
 # ── volume order blocks ────────────────────────────────────────────────

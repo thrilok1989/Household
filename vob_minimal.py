@@ -7035,7 +7035,7 @@ def _annotate_hv_pivots(pivots, frame, left, right):
     (₹131.80 on 2.1×, ₹145.00 on 3.9×, ₹62.00 on 4.8× …). The bar's timestamp
     does not move when the window slides, so it dedupes correctly.
 
-    **2 · `buy_pct` / `sell_pct` / `dominant` — measured, not assumed.** The
+    **2 · `buy_pct` / `sell_pct` / `dominant` — ESTIMATED, not assumed.** The
     alert used to colour itself from `bias_ball.hvp_bias(chart, side)`, which is
     a STRUCTURAL assumption: a swing high is overhead, so bearish for the leg.
     But a swing high can print on heavy buying and a swing low on heavy selling
@@ -7044,6 +7044,14 @@ def _annotate_hv_pivots(pivots, frame, left, right):
     formation window from `indicators.order_flow.split`, the SAME CLV-weighted
     attribution `analyze_vob_volume` and the CVD graphs use. One owner, applied
     to a different window; nothing here re-derives buy/sell.
+
+    ⚠️ **It is an estimate, and callers must not present it as exact.** CLV is
+    `(close − low) / (high − low)` — an inference from where the bar closed in
+    its range, not a count of buy versus sell trades. Exact classification needs
+    tick data with bid/ask; Dhan's intraday endpoint returns 1-minute OHLCV, so
+    it is not available. A bar distributed into all the way up still closes near
+    its high, and CLV reads that as buying. `formation_alerts.hvp_message` hedges
+    the wording and names the basis for exactly this reason.
 
     Annotates in place, defensively — a pivot that cannot be measured simply
     keeps the fields it already had, and the alert falls back to the structural
