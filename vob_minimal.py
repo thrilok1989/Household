@@ -12229,16 +12229,22 @@ def _notify_level_touches():
                 targets.append((
                     'war_zone', f"war zone — {_t}".strip(), _icon, _p,
                     [f"Expected winner: {_win}" if _win else None,
-                     _odds or None], _bb.winner_bias(_win)))
+                     _odds or None], _bb.winner_bias(_win), 'main'))
 
+        # 📨 The two OI-wall touches go to the ALTERNATE bot (owner's request),
+        # not the main stream. Marked here rather than at the send, so the
+        # destination travels with the target and a future target cannot be
+        # added without choosing one.
         _cp, _cq = _oi(mp.get('oi_ceiling'))
         if _cp is not None:
             targets.append(('oi_ceiling', "CE OI wall (resistance)", '🧱', _cp,
-                            [f"{_cq:.1f}L OI" if _cq else None], _bb.NEUTRAL))
+                            [f"{_cq:.1f}L OI" if _cq else None], _bb.NEUTRAL,
+                            'alert'))
         _fp, _fq = _oi(mp.get('oi_floor'))
         if _fp is not None:
             targets.append(('oi_floor', "PE OI wall (support)", '🛡', _fp,
-                            [f"{_fq:.1f}L OI" if _fq else None], _bb.NEUTRAL))
+                            [f"{_fq:.1f}L OI" if _fq else None], _bb.NEUTRAL,
+                            'alert'))
 
         # The ranked S/R touch was paused by the owner (too noisy); the war-zone
         # and OI-wall touches above are unaffected. Off by default — flip
@@ -12247,26 +12253,43 @@ def _notify_level_touches():
             _res = _num(fr.get('strong_resistance'))
             if _res is not None:
                 targets.append(('resistance', "resistance", '🧱', _res, [],
-                                _bb.NEUTRAL))
+                                _bb.NEUTRAL, 'main'))
             _sup = _num(fr.get('strong_support'))
             if _sup is not None:
                 targets.append(('support', "support", '🛡', _sup, [],
-                                _bb.NEUTRAL))
+                                _bb.NEUTRAL, 'main'))
 
         states = st.session_state.setdefault('_level_touch_state', {})
-        hits = []
-        for key, label, icon, price, extra, bias in targets:
+        # ⚠️ Deduped PER DESTINATION, not once across both.
+        #
+        # `dedupe` drops a later hit whose price rounds to an earlier one, so a
+        # single pooled pass would let a war-zone hit (main bot) swallow an
+        # OI-wall hit at the same price — and the owner asked for the OI walls
+        # ON the alert bot, so silently dropping one there is the one outcome
+        # this must not produce. Each stream is deduped within itself instead,
+        # which keeps both internally consistent; a level that genuinely is both
+        # a war zone and an OI wall is worth saying in both places.
+        hits = {'main': [], 'alert': []}
+        for key, label, icon, price, extra, bias, dest in targets:
             alert, new_state = _lt.evaluate(price, spot, states.get(key),
                                             now=time.time())
             states[key] = new_state
             if alert:
-                hits.append((label, price, _bb.prefix(
+                hits[dest].append((label, price, _bb.prefix(
                     bias, _lt.message(label, price, spot, icon, extra))))
-        for _label, _price, _msg in _lt.dedupe(hits):
-            try:
-                send_telegram_message_sync(_msg, force=True)
-            except Exception:
-                pass
+        # The two senders differ in signature — the main one takes `force`,
+        # the alert bot does not — so each is wrapped to one shape here rather
+        # than branching inside the send loop.
+        _senders = {
+            'main': lambda m: send_telegram_message_sync(m, force=True),
+            'alert': send_telegram_alert_bot,
+        }
+        for _dest, _send in _senders.items():
+            for _label, _price, _msg in _lt.dedupe(hits[_dest]):
+                try:
+                    _send(_msg)
+                except Exception:
+                    pass
     except Exception:
         pass  # an alert must never take the cycle down
 
