@@ -73,7 +73,18 @@ def hvp_signature(pivot: Mapping[str, Any],
     price = _f(pivot.get("price"))
     if not side or price is None:
         return None
-    return (side, round(price, decimals), pivot.get("confirmed_at"))
+    # ⚠️ `at` (the pivot bar's TIMESTAMP) in preference to `confirmed_at` (its
+    # POSITION in the frame). A position is not an identity in a rolling
+    # window: every new 1-minute bar shifts every index by one, so the same
+    # physical pivot produced a new signature each cycle and was announced
+    # again and again — the alert flood the desk reported, where the same price
+    # at the same volume ratio repeats. A timestamp does not move when the
+    # window slides. `confirmed_at` remains the fallback for a caller that
+    # cannot supply timestamps, which is still better than no identity at all.
+    stamp = pivot.get("at")
+    if stamp is None:
+        stamp = pivot.get("confirmed_at")
+    return (side, round(price, decimals), stamp)
 
 
 def hvp_message(chart: str, label: Optional[str], pivot: Mapping[str, Any],
@@ -89,11 +100,43 @@ def hvp_message(chart: str, label: Optional[str], pivot: Mapping[str, Any],
     vol = f" on {norm:.1f}× volume" if norm is not None else ""
     price_s = "—" if price is None else f"₹{price:,.{decimals}f}"
     from . import bias_ball as _bb
+
+    # ⚠️ MEASURED beats ASSUMED. `bias_ball.hvp_bias` reads the pivot's SHAPE —
+    # a swing high is overhead, therefore resistance, therefore (leg-inverted) a
+    # direction. That is a structural assumption, and the desk challenged it
+    # correctly: a swing high can print on heavy BUYING and a swing low on heavy
+    # SELLING. The shape of the bar says nothing about who was behind the volume.
+    #
+    # So when `_annotate_hv_pivots` has attributed the pivot's own formation
+    # window (CLV-weighted, via `indicators.order_flow.split`), that measurement
+    # decides the ball and is stated in the text. The structural read stays only
+    # as the fallback for a pivot that could not be measured — better than
+    # silence, but never preferred over the real split.
+    buy_pct = _f(pivot.get("buy_pct"))
+    dominant = str(pivot.get("dominant") or "").lower()
+    if buy_pct is not None and dominant:
+        sell_pct = 100.0 - buy_pct
+        bias = (_bb.BULL if dominant == "buyers" else
+                _bb.BEAR if dominant == "sellers" else _bb.NEUTRAL)
+        if chart and str(chart).strip().upper() == "PUT" and bias != _bb.NEUTRAL:
+            # a PUT's own buyers are NIFTY-bearish — the one inversion rule,
+            # already owned by `bias_ball`; applied here to the MEASURED side
+            bias = _bb.BEAR if bias == _bb.BULL else _bb.BULL
+        flow = (f"{buy_pct:.0f}% buy / {sell_pct:.0f}% sell"
+                if dominant == "balanced"
+                else f"{'BUY' if dominant == 'buyers' else 'SELL'}-dominated "
+                     f"({buy_pct:.0f}% buy / {sell_pct:.0f}% sell)")
+        return _bb.prefix(
+            bias,
+            f"{icon} <b>New high-volume {kind} — {label}</b>\n"
+            f"A high-volume swing {kind} formed at {price_s}{vol}.\n"
+            f"Flow into it was {flow}.")
+
     return _bb.prefix(
         _bb.hvp_bias(chart, side),
         f"{icon} <b>New high-volume {kind} — {label}</b>\n"
         f"A high-volume swing {kind} formed at {price_s}{vol} — "
-        f"a fresh level to watch.")
+        f"a fresh level to watch (flow not measured).")
 
 
 # ── volume order blocks ────────────────────────────────────────────────
