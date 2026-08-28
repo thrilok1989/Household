@@ -70,6 +70,33 @@ def test_the_war_zone_chip_is_drawn():
     assert "War Zone" in html
 
 
+# ── spot location reads big whether spot is at a level or between them ──
+
+def test_spot_location_is_shown_at_the_same_large_size_either_way():
+    """"Between levels" must be exactly as prominent as "At Support" — a
+    trader glancing at the card needs the answer either way, instantly."""
+    at_support = P.card_html(LC.assess(zone="SUPPORT", level=24000), spot=24000)
+    between = P.card_html(LC.assess(zone=None), spot=24000)
+    # same header font-size for the location line in both cases
+    assert "font-size:17px;font-weight:900" in at_support
+    assert "font-size:17px;font-weight:900" in between
+
+
+def test_at_support_is_toned_bull_at_resistance_is_toned_bear():
+    from mios_v5.ui.theme import BEAR, BULL
+    at_support = P.card_html(LC.assess(zone="SUPPORT", level=24000), spot=24000)
+    at_resistance = P.card_html(LC.assess(zone="RESISTANCE", level=24100), spot=24100)
+    assert f"color:{BULL}" in at_support.split("Spot</div>")[1][:400]
+    assert f"color:{BEAR}" in at_resistance.split("Spot</div>")[1][:400]
+
+
+def test_between_levels_still_gets_a_bold_distinct_tone():
+    from mios_v5.ui.theme import WARN
+    html = P.card_html(LC.assess(zone=None), spot=24000)
+    assert f"color:{WARN}" in html
+    assert "Between levels" in html
+
+
 # ── regression: theme.BULL/BEAR (hex colours) must never be compared
 # against a vote's `bias` field (the strings "bull"/"bear" bias_ball
 # writes) — a same-name shadow silently made every chip render neutral

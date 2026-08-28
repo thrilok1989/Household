@@ -128,14 +128,27 @@ def card_html(model: Optional[Dict[str, Any]], spot: Any = None,
     flow_v = votes.get("price_action", {})
     ctx_keys = ("war_zone", "global", "sector", "news", "regime")
 
+    # 📍 Spot's location reads BIG either way — "between levels" is exactly
+    # as much an answer as "at support"/"at resistance", and a trader glancing
+    # at the card must see which one it is without hunting for small text.
+    # Toned by the LOCATION's own bias, not the overall verdict — spot can sit
+    # at resistance inside a card that still reads BULLISH overall.
+    spot_bias = spot_v.get("bias")
+    if spot_bias == _VOTE_BULL:
+        spot_tone, spot_glyph = BULL, "🛡"
+    elif spot_bias == _VOTE_BEAR:
+        spot_tone, spot_glyph = BEAR, "🧱"
+    else:
+        spot_tone, spot_glyph = WARN, "↔️"
+
     header = (
-        f"<div style='display:flex;justify-content:space-between;"
-        f"align-items:baseline;flex-wrap:wrap;gap:8px'>"
-        f"<div><span style='font-size:9px;color:{MICRO};letter-spacing:.08em;"
-        f"text-transform:uppercase'>Spot</span><br>"
-        f"<span style='font-size:16px;font-weight:800'>{_px(spot)}</span>"
-        f" <span style='font-size:12px;color:{tone};font-weight:700'>"
-        f"{_esc(spot_v.get('label'))}</span></div></div>")
+        f"<div style='text-align:center;padding:4px 4px 2px'>"
+        f"<div style='font-size:9px;color:{MICRO};letter-spacing:.08em;"
+        f"text-transform:uppercase'>Spot</div>"
+        f"<div style='font-size:26px;font-weight:900'>{_px(spot)}</div>"
+        f"<div style='font-size:17px;font-weight:900;color:{spot_tone};"
+        f"margin-top:2px'>{spot_glyph} {_esc(spot_v.get('label'))}</div>"
+        f"</div>")
 
     flow = (
         f"<div style='margin-top:8px'>"
