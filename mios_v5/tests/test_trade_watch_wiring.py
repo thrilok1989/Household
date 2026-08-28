@@ -106,3 +106,88 @@ def test_it_is_wired_into_the_notify_sequence(source: str):
     """⚠️ A tracker nothing calls never runs. Same class of bug as a renderer
     nothing calls: one occurrence is the `def`, so a second means a call site."""
     assert source.count("_track_my_trade()") >= 1, "nothing calls _track_my_trade"
+
+
+# ── render_clean_card: the DECISIONS section was computed, never drawn ──
+#
+# `_action_html` (Entry Gate native), `_signal_html` (v0) and `_dec_v2_html`
+# (v2) were each assembled every cycle and none of them reached a
+# `st.markdown` call — the Trade Card showed Market Facts and the V6 read,
+# then stopped, on every render since the V6-reduction restore. Fixed by
+# adding the missing DECISIONS section; these pin it so it cannot regress
+# back into dead code a second time.
+
+def test_the_decisions_section_is_actually_drawn(tree: ast.Module):
+    fn = _func(tree, "render_clean_card")
+    src = ast.unparse(fn)
+    assert '"🎯 Decisions"' in src or "'🎯 Decisions'" in src
+
+
+def _decisions_call(src: str) -> str:
+    """The one `st.markdown(_sec("🎯 Decisions", ...), unsafe_allow_html=True)`
+    call, isolated by its two textual anchors — `_sec(` opens it, immediately
+    before the title; `unsafe_allow_html=True)` closes it."""
+    start = src.rindex("_sec(", 0, src.index("🎯 Decisions"))
+    end = src.index("unsafe_allow_html=True)", start) + len("unsafe_allow_html=True)")
+    return src[start:end]
+
+
+def test_the_decisions_section_includes_all_three_native_verdicts(tree: ast.Module):
+    src = ast.unparse(_func(tree, "render_clean_card"))
+    dec_call = _decisions_call(src)
+    assert "_action_html" in dec_call
+    assert "_signal_html" in dec_call
+    assert "_dec_v2_html" in dec_call
+
+
+def test_the_trade_watch_banner_is_in_the_same_card(tree: ast.Module):
+    """Your own manually/Dhan-tracked trade sits beside the engine's native
+    verdict in the same DECISIONS section, not a separate untested one."""
+    src = ast.unparse(_func(tree, "render_clean_card"))
+    assert "_tw_html" in _decisions_call(src)
+
+
+def test_the_trade_card_reads_trade_watch_not_a_reimplementation(tree: ast.Module):
+    fn = _func(tree, "render_clean_card")
+    called = {c.func.attr for c in ast.walk(fn)
+              if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)}
+    assert "assess" in called   # mios_v5.trade_watch.assess, imported locally
+
+
+def test_the_trade_card_reads_my_trade_not_dhan_directly(tree: ast.Module):
+    """The card only READS `_my_trade` (whatever `_track_my_trade` last set);
+    it must not poll Dhan itself — one fetch owner, `_track_my_trade`."""
+    fn = _func(tree, "render_clean_card")
+    src = ast.unparse(fn)
+    assert "_my_trade" in src
+    assert "find_open_nifty_option" not in src
+    assert "get_dhan_positions" not in src
+
+
+# ── render_market_picture's Position Guardian: idle must not be a lie ──
+#
+# The Guardian's "idle" fallback only meant the ENGINE had no armed trade —
+# it said "no active trade" even while a manually-declared or Dhan-detected
+# one (`_my_trade`) was open, which is wrong, not just uninformative.
+
+def test_the_guardian_idle_branch_checks_my_trade(tree: ast.Module):
+    fn = _func(tree, "render_market_picture")
+    src = ast.unparse(fn)
+    assert "_my_trade" in src
+
+
+def test_the_guardian_uses_the_same_trade_watch_formula(tree: ast.Module):
+    fn = _func(tree, "render_market_picture")
+    called = {c.func.attr for c in ast.walk(fn)
+              if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)}
+    assert "assess" in called
+
+
+def test_the_idle_pink_banner_only_shows_when_nothing_is_open(tree: ast.Module):
+    """The literal idle message must still exist for the true-idle case, but
+    `_my_trade` is checked BEFORE it in source order — the trade-watch banner
+    gets first refusal of the slot."""
+    fn = _func(tree, "render_market_picture")
+    src = ast.unparse(fn)
+    assert "no active trade" in src
+    assert src.index("_my_trade") < src.index("no active trade")

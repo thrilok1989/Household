@@ -9541,24 +9541,53 @@ def render_market_picture(spot_price, df, option_data, cat_scores=None):
                 f"({_g.get('to_inval', 0):.0f} away) — let it work; your decision</div></div>",
                 unsafe_allow_html=True)
         else:
-            # idle — no trade being guarded: keep the Guardian visibly present
-            # so it's always in the Market Picture (arms on a CONFIRMED entry)
-            #
-            # ⚠️ `st.caption` was the wrong element for it: caption is always
-            # rendered in Streamlit's muted grey, so the one line that says the
-            # Guardian exists and is watching read as disabled chrome.
-            #
-            # Pink FILL with white letters, in the same padded/rounded shape the
-            # other Guardian states use — so idle is a state that looks like a
-            # state, not a footnote under them.
-            st.markdown(
-                "<div style='margin:2px 0 8px;padding:8px 13px;"
-                "background:#ff2d95;border-radius:8px;font-size:13px;"
-                "font-weight:800;color:#ffffff;'>"
-                "🛡 Position Guardian — idle · no active trade. Arms on a "
-                "CONFIRMED entry, then watches ON TRACK ⇄ STAY PATIENT ⇄ "
-                "REVERSAL WARNING → EXIT FAST.</div>",
-                unsafe_allow_html=True)
+            # idle — the ENGINE has no trade armed. But you may still be in
+            # one it never armed (a manual click, or a Dhan-detected FOMO
+            # trade) — `_my_trade`, tracked separately by `_track_my_trade`.
+            # Showing "idle · no active trade" while that is open would be
+            # wrong, not just uninformative, so it takes over this slot.
+            # Same `trade_watch.assess`/`banner_html` the Trade Card and the
+            # Charts tab call — one formula, three surfaces, never a second
+            # opinion about the same trade.
+            _tw_mp_html = ""
+            try:
+                from mios_v5 import trade_watch as _TWm
+                from mios_v5.ui.trade_watch_panel import banner_html as _tw_mp_banner
+                _my_pos_mp = st.session_state.get('_my_trade')
+                if _my_pos_mp:
+                    _ctx_mp = st.session_state.get('_current_instrument_context')
+                    _atm_range_mp = getattr(_ctx_mp, 'atm_range', 100) if _ctx_mp else 100
+                    _tw_mp_info = _TWm.assess(
+                        _my_pos_mp.get('side'), _my_pos_mp.get('entry_spot'),
+                        spot_price, (mp.get('entry_gate') or {}).get('net'),
+                        _my_pos_mp.get('protect'), _atm_range_mp)
+                    _tw_mp_html = _tw_mp_banner(
+                        _my_pos_mp.get('side'), _my_pos_mp.get('entry_spot'),
+                        spot_price, _tw_mp_info,
+                        source=_my_pos_mp.get('source', 'manual'))
+            except Exception:
+                _tw_mp_html = ""
+            if _tw_mp_html:
+                st.markdown(_hdr + _tw_mp_html, unsafe_allow_html=True)
+            else:
+                # idle — no trade being guarded: keep the Guardian visibly present
+                # so it's always in the Market Picture (arms on a CONFIRMED entry)
+                #
+                # ⚠️ `st.caption` was the wrong element for it: caption is always
+                # rendered in Streamlit's muted grey, so the one line that says the
+                # Guardian exists and is watching read as disabled chrome.
+                #
+                # Pink FILL with white letters, in the same padded/rounded shape the
+                # other Guardian states use — so idle is a state that looks like a
+                # state, not a footnote under them.
+                st.markdown(
+                    "<div style='margin:2px 0 8px;padding:8px 13px;"
+                    "background:#ff2d95;border-radius:8px;font-size:13px;"
+                    "font-weight:800;color:#ffffff;'>"
+                    "🛡 Position Guardian — idle · no active trade. Arms on a "
+                    "CONFIRMED entry, then watches ON TRACK ⇄ STAY PATIENT ⇄ "
+                    "REVERSAL WARNING → EXIT FAST.</div>",
+                    unsafe_allow_html=True)
         # 📋 Execution Plan — display-only R-based template for the OPEN trade
         # (entry / stop / T1 / T2 / trail / partial / size). No auto-execution.
         if _guard and (_guard.get('state') in ('ON_TRACK', 'PATIENT', 'WARNING')):
@@ -15414,6 +15443,30 @@ def render_clean_card(spot_price, option_data=None):
 
         _ctx_facts_html, _ctx_v5_html = _ctx_strip(_ctx_facts), _ctx_strip(_ctx_v5)
 
+        # 🎯 Trade watch — WAIT/EXIT for a trade YOU declared or Dhan detected
+        # (`_my_trade`, armed by the Charts-tab buttons / `_track_my_trade`).
+        # Separate from `_entry_gate_active` below: that block only covers a
+        # trade the ENGINE itself armed at a qualifying zone; this covers one
+        # taken by ANY route, including on impulse. Same `trade_watch.assess`
+        # formula the Charts tab uses, so the two surfaces cannot disagree
+        # about the same trade — this only calls it a second time.
+        _tw_html = ""
+        try:
+            from mios_v5 import trade_watch as _TW
+            from mios_v5.ui.trade_watch_panel import banner_html as _tw_banner
+            _my_pos = st.session_state.get('_my_trade')
+            if _my_pos:
+                _ctx_tw = st.session_state.get('_current_instrument_context')
+                _atm_range_tw = getattr(_ctx_tw, 'atm_range', 100) if _ctx_tw else 100
+                _tw_info = _TW.assess(
+                    _my_pos.get('side'), _my_pos.get('entry_spot'), spot_price,
+                    eg.get('net'), _my_pos.get('protect'), _atm_range_tw)
+                _tw_html = _tw_banner(
+                    _my_pos.get('side'), _my_pos.get('entry_spot'), spot_price,
+                    _tw_info, source=_my_pos.get('source', 'manual'))
+        except Exception:
+            _tw_html = ""
+
         # ── line 3/4: the action verdict — in a trade, or waiting? ──
         _act = st.session_state.get('_entry_gate_active')
         if _act:
@@ -15596,8 +15649,8 @@ def render_clean_card(spot_price, option_data=None):
         # rows, dealer-magnet detail and acceptance evidence moved to the Market
         # Picture (stashed above) — they are no longer drawn on the card.
         #
-        # ⚠️ Display only. The Entry Gate, v0 and v2 verdicts still compute and
-        # the native gate still drives its live Telegram alert exactly as before.
+        # ⚠️ Display only. The native gate still drives its live Telegram alert
+        # exactly as before — this section only draws the verdicts, below.
         st.markdown(_sec(
             "🧬 MIOS V6 · observational", "#4da6ff",
             _v6_html + _dayt_html + _sess_html
@@ -15607,6 +15660,17 @@ def render_clean_card(spot_price, option_data=None):
                f"font-weight:800;'>{_sr_line}</div>")
             + _wz_html + _la_oneliner + _pe_html + _ag_html
             + _fs_html + _zh_html),
+            unsafe_allow_html=True)
+
+        # ── 4 · DECISIONS — Entry Gate (native) · your own trade · v0 · v2 ──
+        # ⚠️ `_action_html`, `_tw_html`, `_signal_html` and `_dec_v2_html` were
+        # each computed above every cycle and none of them were ever drawn —
+        # this whole section was missing. The card showed Market Facts and the
+        # V6 read, then stopped: no ENTER/WAIT line, no HOLD/EXIT banner, no
+        # v0 or v2 verdict, on every render since the V6-reduction restore.
+        st.markdown(_sec(
+            "🎯 Decisions", "#ffcc33",
+            _action_html + _tw_html + _signal_html + _dec_v2_html),
             unsafe_allow_html=True)
     except Exception:
         pass
