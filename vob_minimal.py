@@ -14875,7 +14875,12 @@ def _render_live_confluence(spot_price):
 
         sector_bull = sector_bear = None
         try:
-            rows = st.session_state.get('_sector_rotation') or []
+            # ⚠️ `_sector_rotation` is a DICT — {leading, lagging, all,
+            # rotation_bias} — not a bare list. `all` holds every sector's row;
+            # indexing it as a list raised on every cycle and was swallowed by
+            # this same except, so the sector chip always fell back to
+            # "unavailable" → neutral → a white ball, never a real read.
+            rows = (st.session_state.get('_sector_rotation') or {}).get('all') or []
             sector_bull = sum(1 for r in rows if r.get('s10') == 'Bullish')
             sector_bear = sum(1 for r in rows if r.get('s10') == 'Bearish')
         except Exception:

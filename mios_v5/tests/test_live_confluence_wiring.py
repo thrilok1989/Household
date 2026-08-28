@@ -100,6 +100,16 @@ def test_it_does_not_fetch_global_or_sector_data_itself(tree: ast.Module):
     assert "compute_sector_rotation" not in called
 
 
+def test_sector_rotation_is_read_as_a_dict_with_an_all_key(tree: ast.Module):
+    """⚠️ Regression: `_sector_rotation` is `{leading, lagging, all,
+    rotation_bias}`, not a bare list. Iterating it directly (`or []`) raised
+    on every cycle, swallowed by the except below, so the sector chip always
+    fell back to "unavailable" — a white ball, never a real read."""
+    fn = _func(tree, "_render_live_confluence")
+    src = ast.unparse(fn)
+    assert "_sector_rotation') or {}).get('all')" in src
+
+
 def test_no_market_picture_returns_quietly(tree: ast.Module):
     fn = _func(tree, "_render_live_confluence")
     src = ast.unparse(fn)
