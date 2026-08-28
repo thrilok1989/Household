@@ -6097,8 +6097,23 @@ def compute_news_bias(cadence_s=300):
     now_t = time.time()
     _last = st.session_state.get('_news_last_fetch', 0)
     cached = st.session_state.get('_news_bias')
-    if cached and (now_t - _last) < cadence_s:
+    if (now_t - _last) < cadence_s:
         return cached
+    # ⚠️ Stamp the ATTEMPT, not the success. `_news_last_fetch` used to be set
+    # only on the fully-successful path at the bottom, so both failure exits
+    # below returned without arming the cadence gate — and this function has
+    # FOUR callers (the panel, the market picture, the bias dashboard and the
+    # Live Confluence card). With the feed down or returning nothing, every one
+    # of them refetched, every render: 4 requests per ~20s cycle to an endpoint
+    # that was already failing. A measured probe of one render showed exactly
+    # that — 4 identical Google-News GETs, the only duplicated request in the
+    # whole render.
+    #
+    # `_panel_self_fetch` already had this right (it stamps before calling);
+    # this is the same rule, and it also lets the cache-hit test drop its
+    # `cached and …` guard, so a cold start no longer lets all four callers
+    # through at once while `cached` is still None.
+    st.session_state['_news_last_fetch'] = now_t
     _pfe = st.session_state.setdefault('_panel_fetch_errors', {})
     try:
         heads = fetch_news_headlines()
