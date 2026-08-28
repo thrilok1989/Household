@@ -102,9 +102,29 @@ def _context_chip(vote: Mapping[str, Any]) -> str:
     return f"<span style='font-size:11px;color:{MUTED};margin-right:10px'>{dot} {_esc(name)}</span>"
 
 
+def _hv_window_row(line: Any) -> str:
+    """📊 The rolling 10-minute high-volume-pivot standing, from
+    `hv_window.summary`. `""` when nothing spiked in the window — silence is
+    the honest report there, not a 0-vs-0 row.
+
+    ⚠️ Shown, never voted. `live_confluence`'s own rule: high volume on a side
+    says nothing directional by itself, so this is context for the reads that
+    DO measure direction, not a twelfth vote.
+    """
+    s = str(line or "").strip()
+    if not s:
+        return ""
+    return (f"<div style='margin-top:8px'>"
+            f"<span style='font-size:9px;color:{MICRO};letter-spacing:.08em;"
+            f"text-transform:uppercase'>Spike volume — last 10 min</span>"
+            f"<div style='font-size:11.5px;color:{MUTED}'>{_esc(s)}</div>"
+            f"</div>")
+
+
 def card_html(model: Optional[Dict[str, Any]], spot: Any = None,
              call_ltp: Any = None, put_ltp: Any = None,
-             call_label: str = "CALL", put_label: str = "PUT") -> str:
+             call_label: str = "CALL", put_label: str = "PUT",
+             hv_window_line: Any = None) -> str:
     """The full card. `""` when there is no model to show."""
     if not model:
         return ""
@@ -165,6 +185,8 @@ def card_html(model: Optional[Dict[str, Any]], spot: Any = None,
                   votes.get("put_location", {}), votes.get("put_energy", {}), BEAR)
         + "</div>")
 
+    hv_row = _hv_window_row(hv_window_line)
+
     context = ("<div style='margin-top:10px'>"
               + "".join(_context_chip(votes.get(k, {})) for k in ctx_keys
                         if votes.get(k))
@@ -202,4 +224,4 @@ def card_html(model: Optional[Dict[str, Any]], spot: Any = None,
         f"signal.</div></div>")
 
     return _card("🔭 Live Market Confluence",
-                 header + flow + legs + context + footer)
+                 header + flow + legs + hv_row + context + footer)

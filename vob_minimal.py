@@ -767,6 +767,11 @@ LEVEL_TOUCH_DEFAULT = True
 #: resistance · CALL heavier at support). On, because the owner asked for it.
 FLOW_LEVEL_ALERTS_DEFAULT = True
 
+#: Default for the 10-minute high-volume-pivot lead alert to the ALTERNATE bot.
+#: On, because the owner asked for it. Fires only when the side carrying the
+#: spike volume CHANGES, never on a standing lead.
+HV_WINDOW_ALERTS_DEFAULT = True
+
 # ── Level Acceptance / Rejection alerts ────────────────────────────────
 # Telegram note when a level RESOLVES (accepted above/below, or rejected) — the
 # owner asked for it ON. Edge-triggered (once, on the transition) and per-zone
@@ -7087,8 +7092,28 @@ def _annotate_hv_pivots(pivots, frame, left, right):
                 p['at'] = ts[i].isoformat()
             except Exception:
                 pass
+        # 📊 The pivot BAR's own volume, for the rolling 10-minute CALL-vs-PUT
+        # total. Deliberately NOT `volume_points`' own `volume` field, which is
+        # the ROLLING SUM over the formation window that qualified the pivot:
+        # with left=right=5 that window is 11 bars, so two pivots a few bars
+        # apart share most of theirs and summing them double-counts. One bar,
+        # counted once, is the only total that means what it says.
+        try:
+            p['bar_vol'] = float(frame['volume'].iloc[i])
+        except Exception:
+            pass
         if buy is None or sell is None:
             continue
+        # 📊 The pivot BAR's own buy/sell, for the rolling CALL-vs-PUT split.
+        # Taken directly from the per-bar series rather than by applying the
+        # WINDOW's `buy_pct` below to `bar_vol` — that percentage describes
+        # eleven bars, and multiplying one bar's volume by it would report a
+        # split that was never measured on that bar.
+        try:
+            p['bar_buy'] = float(buy.iloc[i])
+            p['bar_sell'] = float(sell.iloc[i])
+        except Exception:
+            pass
         lo, hi = max(0, i - int(left)), min(n, i + int(right) + 1)
         try:
             b = float(buy.iloc[lo:hi].sum())
@@ -11934,6 +11959,67 @@ def _notify_chart_formations():
         pass  # an alert must never take the cycle down
 
 
+def _hv_window_totals():
+    """📊 The rolling 10-minute high-volume-pivot totals, CALL vs PUT.
+
+    Reads the pivots the terminal already published (`_leg_profiles[side]
+    .hv_points`, owner `volume_points.high_volume_pivots`, timestamped and
+    volume-tagged by `_annotate_hv_pivots`) and hands them to
+    `mios_v5.hv_window`, which owns the windowing and the comparison.
+    Recomputes no pivot and re-reads no frame.
+
+    Published to `_hv_window` so the Live Confluence card and the flip alert
+    read ONE answer rather than each totalling their own.
+    """
+    try:
+        from mios_v5 import hv_window as _hw
+        profiles = st.session_state.get('_leg_profiles') or {}
+        if not profiles:
+            return None
+        call_pts = (profiles.get('CALL') or {}).get('hv_points') or []
+        put_pts = (profiles.get('PUT') or {}).get('hv_points') or []
+        t = _hw.totals(call_pts, put_pts, now=time.time())
+        st.session_state['_hv_window'] = t
+        return t
+    except Exception:
+        return None
+
+
+def _notify_hv_window_flip():
+    """📨 Alert-bot note when the side carrying the high volume CHANGES.
+
+    Fires on a CHANGE OF LEAD only — `hv_window.latch` is the same rising-edge
+    rule `flow_level_alerts` uses, for the same reason: a standing condition
+    re-announced every cycle is the flood this repo keeps having to undo. Going
+    quiet, or the two sides drawing level, updates the remembered side without
+    sending anything — neither is a side taking the lead.
+
+    Reads `_hv_window` (published by `_hv_window_totals`); decides nothing about
+    volume itself. Opt-out via `_hv_window_alerts_on`.
+    """
+    try:
+        if not st.session_state.get('_hv_window_alerts_on',
+                                    HV_WINDOW_ALERTS_DEFAULT):
+            return
+        t = st.session_state.get('_hv_window')
+        if not t:
+            return
+        from mios_v5 import hv_window as _hw
+        fire, new_state = _hw.latch(t.get('heavier'),
+                                    st.session_state.get('_hv_window_state'),
+                                    now=time.time())
+        st.session_state['_hv_window_state'] = new_state
+        if fire:
+            msg = _hw.message(t)
+            if msg:
+                try:
+                    send_telegram_alert_bot(msg)
+                except Exception:
+                    pass
+    except Exception:
+        pass  # an alert must never take the cycle down
+
+
 def _notify_leg_hvp_touch():
     """📍 Telegram when an option LTP comes within ±5 of one of ITS OWN
     high-volume-point (HVP) lines — call or put.
@@ -15099,9 +15185,18 @@ def _render_live_confluence(spot_price):
             global_score=global_score, sector_bull=sector_bull,
             sector_bear=sector_bear, news_score=news_score,
             regime=mp.get('regime'), war_zone_winner=fr.get('expected_winner'))
+        # 📊 The rolling 10-minute spike-volume standing, read from the ONE
+        # answer `_hv_window_totals` published earlier this cycle — the flip
+        # alert reads the same dict, so card and alert cannot disagree.
+        _hv_line = ""
+        try:
+            from mios_v5 import hv_window as _hw
+            _hv_line = _hw.summary(st.session_state.get('_hv_window') or {})
+        except Exception:
+            _hv_line = ""
         html = _lc_html(model, spot=spot_price, call_ltp=call_ltp,
                         put_ltp=put_ltp, call_label=call_label,
-                        put_label=put_label)
+                        put_label=put_label, hv_window_line=_hv_line)
         if html:
             st.markdown(html, unsafe_allow_html=True)
     except Exception as err:
@@ -17346,6 +17441,16 @@ def _render_main_analyzer():
         pass
     try:
         _notify_leg_hvp_touch()
+    except Exception:
+        pass
+    # 📊 Publish the 10-minute HVP totals BEFORE the flip alert reads them, and
+    # before the Live Confluence card renders — one answer, two surfaces.
+    try:
+        _hv_window_totals()
+    except Exception:
+        pass
+    try:
+        _notify_hv_window_flip()
     except Exception:
         pass
     try:
