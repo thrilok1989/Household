@@ -7007,13 +7007,94 @@ def _hv_points(frame):
         cfg.update({k: v for k, v in
                     (st.session_state.get('_hv_settings') or {}).items()
                     if k in cfg})
-        return high_volume_pivots(
+        pts = high_volume_pivots(
             list(frame['high']), list(frame['low']), list(frame['close']),
             list(frame['volume']) if 'volume' in frame.columns else None,
             left=int(cfg['left']), right=int(cfg['right']),
             filter_vol=float(cfg['filter_vol']))
+        _annotate_hv_pivots(pts, frame,
+                            left=int(cfg['left']), right=int(cfg['right']))
+        return pts
     except Exception:
         return []
+
+
+def _annotate_hv_pivots(pivots, frame, left, right):
+    """📍 Give each pivot a STABLE identity and a MEASURED buy/sell split.
+
+    `volume_points.high_volume_pivots` is pure — sequences in, dicts out — so a
+    pivot comes back knowing only its POSITION in the frame (`index`,
+    `confirmed_at`). Two things need the frame itself, and both are added here
+    rather than by widening that pure module:
+
+    **1 · `at` — a stable identity.** A positional index is not an identity in a
+    rolling window. Every new 1-minute bar shifts every index by one, so the
+    SAME physical pivot came back with a new `confirmed_at` each cycle and the
+    formation alert announced it again, and again. That is the alert flood: the
+    desk's own log shows the same price at the same volume ratio repeating
+    (₹131.80 on 2.1×, ₹145.00 on 3.9×, ₹62.00 on 4.8× …). The bar's timestamp
+    does not move when the window slides, so it dedupes correctly.
+
+    **2 · `buy_pct` / `sell_pct` / `dominant` — measured, not assumed.** The
+    alert used to colour itself from `bias_ball.hvp_bias(chart, side)`, which is
+    a STRUCTURAL assumption: a swing high is overhead, so bearish for the leg.
+    But a swing high can print on heavy buying and a swing low on heavy selling
+    — the shape of the bar says nothing about who was behind the volume. The
+    desk raised exactly this. So the split is now taken over the pivot's own
+    formation window from `indicators.order_flow.split`, the SAME CLV-weighted
+    attribution `analyze_vob_volume` and the CVD graphs use. One owner, applied
+    to a different window; nothing here re-derives buy/sell.
+
+    Annotates in place, defensively — a pivot that cannot be measured simply
+    keeps the fields it already had, and the alert falls back to the structural
+    read rather than going silent.
+    """
+    if not pivots or frame is None or getattr(frame, 'empty', True):
+        return
+    n = len(frame)
+    # timestamps: the one thing that survives the window sliding
+    ts = None
+    if 'datetime' in frame.columns:
+        try:
+            ts = list(frame['datetime'])
+        except Exception:
+            ts = None
+    # per-bar buy/sell, from the app's single owner of that attribution
+    buy = sell = None
+    try:
+        got = _of.split(frame)
+        if not _of.is_missing(got):
+            buy, sell = got
+    except Exception:
+        buy = sell = None
+    for p in pivots:
+        try:
+            i = int(p.get('index'))
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= i < n):
+            continue
+        if ts is not None:
+            try:
+                p['at'] = ts[i].isoformat()
+            except Exception:
+                pass
+        if buy is None or sell is None:
+            continue
+        lo, hi = max(0, i - int(left)), min(n, i + int(right) + 1)
+        try:
+            b = float(buy.iloc[lo:hi].sum())
+            s = float(sell.iloc[lo:hi].sum())
+        except Exception:
+            continue
+        tot = b + s
+        if tot <= 0:
+            continue
+        pct = b / tot * 100.0
+        p['buy_pct'] = round(pct, 1)
+        p['sell_pct'] = round(100.0 - pct, 1)
+        p['dominant'] = ('buyers' if pct > 60 else
+                         'sellers' if pct < 40 else 'balanced')
 
 
 def _publish_poc_series():
@@ -11792,8 +11873,20 @@ def _notify_chart_formations():
         seen = st.session_state.setdefault('_formation_seen', {})
 
         def _emit(kind, chart, items, sig_of, msg_of, dp):
-            # (chart, kind) → the set of signatures already alerted (or seeded).
-            key = f"{kind}:{chart}"
+            # (chart, kind, LEG LABEL) → the set of signatures already alerted.
+            #
+            # ⚠️ The label — "ATM CE 24150" — not just 'CALL'. When the ATM
+            # strike rolls, the leg becomes a different contract at different
+            # prices, but the key stayed 'hvp:CALL' and carried the OLD
+            # contract's seen-set forward. Every pivot on the new strike was
+            # therefore unseen, and they all fired at once: the burst of
+            # `ATM CE 24100` alerts immediately followed by a burst of
+            # `ATM CE 24150` ones in the desk's log.
+            #
+            # Keying on the label gives the new contract a fresh, empty set, so
+            # `diff`'s own seed-on-first-observation rule applies to it and its
+            # existing structure is recorded silently instead of announced.
+            key = f"{kind}:{chart}:{labels.get(chart) or chart}"
             item_by_sig = {}
             order = []
             for it in items or ():
