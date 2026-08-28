@@ -73,7 +73,7 @@ def test_a_swing_low_on_buying_reads_bullish_on_a_call():
                        _pivot(side="LOW", buy_pct=78.0, sell_pct=22.0,
                               dominant="buyers"), decimals=2)
     assert m.startswith(BB.BALLS[BB.BULL])
-    assert "BUY-dominated" in m and "78% buy" in m
+    assert "BUY-led" in m and "78% buy" in m
 
 
 def test_a_swing_low_on_SELLING_reads_bearish_even_though_it_is_a_low():
@@ -83,7 +83,7 @@ def test_a_swing_low_on_SELLING_reads_bearish_even_though_it_is_a_low():
                        _pivot(side="LOW", buy_pct=19.0, sell_pct=81.0,
                               dominant="sellers"), decimals=2)
     assert m.startswith(BB.BALLS[BB.BEAR])
-    assert "SELL-dominated" in m
+    assert "SELL-led" in m
 
 
 def test_a_swing_high_on_buying_reads_bullish_even_though_it_is_a_high():
@@ -110,12 +110,46 @@ def test_balanced_flow_is_reported_as_balanced_not_forced():
                        decimals=2)
     assert m.startswith(BB.BALLS[BB.NEUTRAL])
     assert "51% buy / 49% sell" in m
+    assert "mixed" in m
+
+
+# ── 2b · the split is an ESTIMATE and the text must not hide that ──────
+#
+# CLV is `(close - low) / (high - low)`: an inference from where the bar
+# closed in its range, NOT a count of buy vs sell trades. Exact
+# classification needs tick data with bid/ask, which Dhan's 1-minute OHLCV
+# endpoint does not provide. Printing a bare "83% buy" claims a precision the
+# method does not have.
+
+def test_the_flow_line_is_marked_as_an_estimate():
+    m = FA.hvp_message("CALL", "ATM CE 24100",
+                       _pivot(buy_pct=83.0, dominant="buyers"), decimals=2)
+    assert "est." in m, "the split is printed as if it were exact"
+    assert "looks" in m, "the verb does not hedge"
+
+
+def test_the_flow_line_names_its_basis():
+    """A reader must be able to tell WHERE the number came from without
+    reading the source."""
+    m = FA.hvp_message("CALL", "ATM CE 24100",
+                       _pivot(buy_pct=83.0, dominant="buyers"), decimals=2)
+    assert "CLV" in m
+    assert "not tick data" in m
+
+
+def test_it_never_claims_the_flow_was_measured_exactly():
+    for dom, bp in (("buyers", 83.0), ("sellers", 17.0), ("balanced", 50.0)):
+        m = FA.hvp_message("CALL", "ATM CE 24100",
+                           _pivot(buy_pct=bp, dominant=dom), decimals=2)
+        low = m.lower()
+        for overclaim in ("dominated", "exactly", "precisely"):
+            assert overclaim not in low, f"{overclaim!r} overclaims in: {m}"
 
 
 def test_an_unmeasured_pivot_falls_back_and_says_so():
     """Never silent — but it must not pretend the flow was measured."""
     m = FA.hvp_message("CALL", "ATM CE 24100", _pivot(), decimals=2)
-    assert "flow not measured" in m
+    assert "flow not estimated" in m
     assert m.startswith(BB.BALLS[BB.hvp_bias("CALL", "LOW")])
 
 
