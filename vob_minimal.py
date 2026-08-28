@@ -13013,6 +13013,63 @@ def render_strike_mode_dashboard(spot_price, df, option_data):
         pass
 
 
+def render_nifty_cvd_graph(df):
+    """📊 The same time-series treatment `render_atm_cvd_graphs` gives the
+    ATM±1 legs — CVD / Cumulative Buy / Cumulative Sell — for NIFTY's OWN
+    1m candles this time, not the option legs.
+
+    One series per chart, not a CALL/PUT pair: there is only one NIFTY.
+    `_of.cumulative` is the SAME CLV-weighted estimator the leg graphs call
+    (`indicators.order_flow`, aliased `_of` at import time) — nothing here
+    recomputes buy/sell attribution, it is applied to a different frame.
+
+    No date-picker: `df` already reflects whatever day range the sidebar's
+    timeframe control selected, so a second picker here would duplicate a
+    control that already exists rather than adding one that's missing —
+    unlike the leg graphs, where Dhan's ~5-day option-intraday retention is
+    the reason that picker exists at all.
+    """
+    if df is None or getattr(df, 'empty', True) or 'datetime' not in df.columns:
+        return
+    try:
+        series = {}
+        for kind in ('delta', 'buy', 'sell'):
+            try:
+                s = _of.cumulative(df, kind, index=df['datetime'])
+                series[kind] = None if _of.is_missing(s) else s
+            except Exception:
+                series[kind] = None
+        if not any(s is not None for s in series.values()):
+            return
+
+        st.markdown("#### 📊 NIFTY — CVD / Cum Buy / Cum Sell (time series)")
+        st.caption("CLV-weighted estimate from NIFTY's own 1m OHLCV (not tick data) — "
+                  "the same estimator the ATM±1 CALL/PUT graph above uses, applied to "
+                  "the index itself rather than the option legs.")
+
+        for _title, _kind, _color, _key in [
+            ("🔵 CVD (cumulative Buy − Sell)", 'delta', '#4da6ff', 'cvd'),
+            ("🟢 Cumulative Buy volume", 'buy', '#00ff88', 'buy'),
+            ("🔴 Cumulative Sell volume", 'sell', '#ff4444', 'sell'),
+        ]:
+            s = series.get(_kind)
+            if s is None:
+                continue
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=s.index, y=s.values, mode='lines',
+                          name='NIFTY', line=dict(color=_color, width=2)))
+            fig.update_layout(title=_title, height=260,
+                              margin=dict(l=10, r=10, t=34, b=10),
+                              paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                              font=dict(color='#ccc'),
+                              legend=dict(orientation='h', y=1.15))
+            fig.update_xaxes(showgrid=False)
+            fig.update_yaxes(showgrid=True, gridcolor='#1e2a3a')
+            st.plotly_chart(fig, use_container_width=True, key=f"niftycvd_{_key}")
+    except Exception as err:
+        st.caption(f"NIFTY CVD graph unavailable: {err}")
+
+
 def render_atm_cvd_graphs(spot_price):
     """📊 Time-series graphs (x = time, y = value) for the ATM±1 legs —
     CALL side vs PUT side, aggregated across the 3 strikes:
@@ -17024,6 +17081,10 @@ def _render_main_analyzer():
         pass
     try:
         render_atm_cvd_graphs(underlying)           # _zone_cvd_hist
+    except Exception:
+        pass
+    try:
+        render_nifty_cvd_graph(df)
     except Exception:
         pass
 
