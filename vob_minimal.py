@@ -14777,6 +14777,136 @@ def compute_prev_day_value(db):
 
 
 
+def _render_live_confluence(spot_price):
+    """🔭 Live Market Confluence — drawn ABOVE the Trade Card, in the same
+    slot. An assembler over eleven reads this app already publishes every
+    cycle; see `mios_v5.live_confluence` for why each one votes the way it
+    does. Nothing here is computed — every value is read straight off a
+    store some other function already filled, and the vote/verdict itself
+    is `live_confluence.assess`'s, not this function's.
+    """
+    try:
+        from mios_v5 import live_confluence as _LC
+        from mios_v5 import flow_level_alerts as _fla
+        from mios_v5.final_read import build_final_read as _bfr
+        from mios_v5.ui.live_confluence_panel import card_html as _lc_html
+    except Exception as err:
+        st.caption(f"🔭 Live Confluence unavailable: {err}")
+        return
+    try:
+        mp = st.session_state.get('_market_picture') or {}
+        if not mp or not spot_price:
+            return
+        eg = mp.get('entry_gate') or {}
+        pinned = eg.get('state') == 'PINNED'
+
+        profs = st.session_state.get('_leg_profiles') or {}
+        call_label = profs.get('call_label') or 'ATM Call'
+        put_label = profs.get('put_label') or 'ATM Put'
+        legs = st.session_state.get('_atm_leg_dfs') or {}
+        call_df, put_df = legs.get(call_label), legs.get(put_label)
+        call_ltp = (float(call_df['close'].iloc[-1])
+                   if call_df is not None and not getattr(call_df, 'empty', True) else None)
+        put_ltp = (float(put_df['close'].iloc[-1])
+                  if put_df is not None and not getattr(put_df, 'empty', True) else None)
+
+        # 📦 VOB containment — the SAME store the zone table and chart
+        # rectangles read (`_atm_leg_vob_volume`); "at" means the LTP is
+        # actually inside the zone's own price window, not merely nearest.
+        vv = st.session_state.get('_atm_leg_vob_volume') or {}
+
+        def _vob_role(label, ltp):
+            if ltp is None:
+                return None
+            for z in (vv.get(label) or ()):
+                try:
+                    if float(z.get('lower')) <= ltp <= float(z.get('upper')):
+                        return z.get('role') or z.get('zone_type')
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        # 📍 HVP touch — the SAME ±5pt band `_notify_leg_hvp_touch` alerts on.
+        def _hvp_side(side_key, ltp):
+            if ltp is None:
+                return None
+            for p in ((profs.get(side_key) or {}).get('hv_points') or ()):
+                if not isinstance(p, dict):
+                    continue
+                try:
+                    hv = float(p.get('price'))
+                except (TypeError, ValueError):
+                    continue
+                if abs(ltp - hv) <= LEG_HVP_BAND:
+                    return p.get('side')
+            return None
+
+        call_vob_role = _vob_role(call_label, call_ltp)
+        put_vob_role = _vob_role(put_label, put_ltp)
+        call_hvp_side = None if call_vob_role else _hvp_side('CALL', call_ltp)
+        put_hvp_side = None if put_vob_role else _hvp_side('PUT', put_ltp)
+
+        # 📊 participation magnitude — a leg's own volume vs its own recent
+        # normal, exactly as flow_level_alerts already computes it. Never
+        # voted (high volume alone means nothing); shown as HIGH/normal.
+        hist = st.session_state.get('_atm_flow_hist') or []
+        call_series = [(t, c) for (t, c, _p) in hist if c is not None]
+        put_series = [(t, p) for (t, _c, p) in hist if p is not None]
+        call_spiking = _fla.activity_spike(call_series).get('spiking', False)
+        put_spiking = _fla.activity_spike(put_series).get('spiking', False)
+
+        fr = _bfr(st.session_state.get('_mios_state')) or {}
+        ltp_beh = fr.get('ltp_behaviour') or {}
+        call_energy = ((ltp_beh.get('calls') or {}).get('state'))
+        put_energy = ((ltp_beh.get('puts') or {}).get('state'))
+
+        # 📊 Which side has MORE going on — CALL's own cumulative buy+sell
+        # against PUT's, the SAME `_atm_flow_hist` aggregate above, not
+        # NIFTY's own tape. The latest sample on each series IS the running
+        # total (activity() is already cumulative buy+sell per side).
+        call_total = call_series[-1][1] if call_series else None
+        put_total = put_series[-1][1] if put_series else None
+
+        global_score = None
+        try:
+            global_score = (compute_global_nifty_bias() or {}).get('nifty_score')
+        except Exception:
+            pass
+
+        sector_bull = sector_bear = None
+        try:
+            rows = st.session_state.get('_sector_rotation') or []
+            sector_bull = sum(1 for r in rows if r.get('s10') == 'Bullish')
+            sector_bear = sum(1 for r in rows if r.get('s10') == 'Bearish')
+        except Exception:
+            pass
+
+        news_score = None
+        try:
+            news_score = (compute_news_bias() or {}).get('net')
+        except Exception:
+            pass
+
+        model = _LC.assess(
+            pinned=pinned, pin_level=eg.get('level') if pinned else None,
+            zone=eg.get('zone'), level=eg.get('level'),
+            call_total=call_total, put_total=put_total,
+            call_spiking=call_spiking, call_vob_role=call_vob_role,
+            call_hvp_side=call_hvp_side, call_energy_state=call_energy,
+            put_spiking=put_spiking, put_vob_role=put_vob_role,
+            put_hvp_side=put_hvp_side, put_energy_state=put_energy,
+            global_score=global_score, sector_bull=sector_bull,
+            sector_bear=sector_bear, news_score=news_score,
+            regime=mp.get('regime'), war_zone_winner=fr.get('expected_winner'))
+        html = _lc_html(model, spot=spot_price, call_ltp=call_ltp,
+                        put_ltp=put_ltp, call_label=call_label,
+                        put_label=put_label)
+        if html:
+            st.markdown(html, unsafe_allow_html=True)
+    except Exception as err:
+        st.caption(f"🔭 Live Confluence unavailable: {err}")
+
+
 # ── the full Trade Card, restored verbatim ─────────────────────────────
 # Removed by the V6 reduction because no V6 stage reads it — it CONSUMES
 # V6 (it calls `build_final_read`), so the dependency runs the other way.
@@ -16910,6 +17040,10 @@ def _render_main_analyzer():
     with _card_container:
         _mp_ready = bool(st.session_state.get('_market_picture'))
         if _mp_ready and underlying:
+            try:
+                _render_live_confluence(underlying)
+            except Exception as err:
+                st.caption(f"🔭 Live Confluence unavailable: {err}")
             try:
                 render_clean_card(underlying, option_data)
             except Exception as err:
