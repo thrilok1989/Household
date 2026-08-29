@@ -450,6 +450,60 @@ class SupabaseDB:
             return df.iloc[0].to_dict()
         return None
 
+    def get_tick_flow(self, security_ids=None, max_rows=24):
+        """Live tick-rule buy/sell per instrument, written by `ws_worker.py`.
+
+        Returns `{security_id: {buy_vol, sell_vol, cum_delta, ltp, age_s}}`,
+        or `{}` when the worker is not running / the table is empty. `age_s`
+        lets the caller reject a stale row rather than trust a feed that
+        stopped — the worker flushes every ~1.5s.
+
+        ⚠️ Narrow projection, not `select('*')` — the egress rounds
+        (docs/AUDIT_EGRESS_2..4) made that the house rule, and this table is
+        upserted many times a minute.
+
+        ⚠️ `buy_vol`/`sell_vol` are read, never derived from
+        `(cum_delta, volume)`: `volume` includes unchanged-price ticks the tick
+        rule classifies as NEITHER side, so buy+sell cannot be recovered from
+        that pair. See sql/038.
+        """
+        cols = 'security_id,ltp,cum_delta,buy_vol,sell_vol,updated_at'
+
+        def query():
+            q = self.client.table('dhan_ticks').select(cols)
+            if security_ids:
+                q = q.in_('security_id', [int(s) for s in security_ids])
+            return q.limit(max_rows).execute()
+
+        df = self._safe_query('dhan_ticks', query, {'n': len(security_ids or [])})
+        out = {}
+        if df is None or getattr(df, 'empty', True):
+            return out
+        now = datetime.now(IST)
+        for _i, r in df.iterrows():
+            try:
+                sid = int(r.get('security_id'))
+            except (TypeError, ValueError):
+                continue
+            age = None
+            try:
+                ts = pd.to_datetime(r.get('updated_at'))
+                if ts is not None and not pd.isna(ts):
+                    if ts.tzinfo is None:
+                        ts = ts.tz_localize(IST)
+                    age = (now - ts.tz_convert(IST)).total_seconds()
+            except Exception:
+                age = None
+            out[sid] = {
+                'security_id': sid,
+                'ltp': r.get('ltp'),
+                'cum_delta': r.get('cum_delta'),
+                'buy_vol': r.get('buy_vol'),
+                'sell_vol': r.get('sell_vol'),
+                'age_s': age,
+            }
+        return out
+
     def insert_mios_decision(self, row):
         """Append one Decision-Engine state-transition row (validation log)."""
         row = dict(row)
