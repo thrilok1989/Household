@@ -78,6 +78,12 @@ if os.environ.get("WATCH_INSTRUMENTS"):
         for p in os.environ["WATCH_INSTRUMENTS"].split(",") if ":" in p
     ]
 
+#: The statically configured instruments, kept separate so an ATM roll only
+#: ever replaces the ROLLING legs and never drops what the operator pinned.
+_STATIC_WATCH = list(WATCH)
+_atm_current = []          # the ATM legs currently subscribed
+_atm_last_check = 0.0      # last time the chain was consulted
+
 IST = pytz.timezone("Asia/Kolkata")
 FLUSH_INTERVAL_S = 1.5  # write to Supabase at most every 1.5s
 SWEEP_COOLDOWN_S = 8.0  # don't re-fire same direction within this window
@@ -97,6 +103,30 @@ RESP_OI = 5
 RESP_PREV_CLOSE = 6
 RESP_FULL = 8
 RESP_DISCONNECT = 50
+
+# 📍 Follow the ATM legs MIOS actually watches, instead of a fixed list.
+#
+# Set WATCH_ATM=NIFTY to have the worker resolve the ATM CE/PE strikes itself
+# every ATM_REFRESH_S and re-subscribe when the strike rolls. ATM_WINGS=1 gives
+# ATM and ATM±1 (6 legs); 2 gives ±2 (10 legs). Bounded on purpose — the point
+# is the legs under analysis, never the whole chain, so both the WebSocket load
+# and the Supabase write volume stay flat.
+#
+# ⚠️ The worker resolves these ITSELF rather than reading them from the app.
+# It has to: it is a separate always-on process, and a tick feed that goes
+# blind whenever the dashboard restarts is worse than one that costs a REST
+# call every few minutes. (The app-side bridge that would have carried them,
+# `_PERSIST_KEYS` → `vob_app_state`, is in any case never written — nothing
+# fills that table today.)
+WATCH_ATM = os.environ.get("WATCH_ATM", "").strip().upper()
+ATM_WINGS = int(os.environ.get("ATM_WINGS", "1") or 1)
+ATM_REFRESH_S = float(os.environ.get("ATM_REFRESH_S", "300") or 300)
+
+#: Underlyings the worker can resolve an ATM chain for (Dhan UnderlyingScrip/Seg).
+ATM_UNDERLYING = {
+    "NIFTY": (13, "IDX_I"),
+    "BANKNIFTY": (25, "IDX_I"),
+}
 
 # Instruments to subscribe at Full (20-level depth + OI) for sweep detection.
 # Format: "NSE_FNO:55321,NSE_FNO:55322" — typically ATM CE/PE strikes.
@@ -138,6 +168,13 @@ def _ensure_state(seg, scrip):
             "seg": seg, "scrip": int(scrip),
             "ltp": None, "prev_ltp": None,
             "cum_delta": 0.0, "volume": 0.0, "last_trade_qty": 0.0,
+            # ⚠️ buy_vol / sell_vol are accumulated SEPARATELY, not derived.
+            # `cum_delta` is buy − sell and `volume` is the exchange's total
+            # traded volume, which INCLUDES ticks whose price did not move and
+            # are therefore classified as neither side. Two unknowns, one
+            # equation — buy and sell cannot be recovered from that pair. The
+            # consumer needs real Buy%/Sell%, so the split is kept at source.
+            "buy_vol": 0.0, "sell_vol": 0.0,
             "last_update_ts": None,
             # Sweep-detection state from Full packets
             "top5_bid_qty": None,
@@ -312,8 +349,11 @@ def _apply_tick(seg, scrip, payload):
     if ltq and prev is not None:
         if s["ltp"] > prev:
             s["cum_delta"] += ltq
+            s["buy_vol"] += ltq
         elif s["ltp"] < prev:
             s["cum_delta"] -= ltq
+            s["sell_vol"] += ltq
+        # an unchanged price is deliberately neither — see `_ensure_state`
         s["last_trade_qty"] = ltq
     if "volume" in payload:
         s["volume"] = payload["volume"]
@@ -342,6 +382,8 @@ async def _flush_state_to_db():
             "cum_delta": float(s["cum_delta"]),
             "volume": float(s["volume"]),
             "last_trade_qty": float(s["last_trade_qty"]),
+            "buy_vol": float(s["buy_vol"]),
+            "sell_vol": float(s["sell_vol"]),
             "updated_at": iso,
         })
     if not rows:
@@ -371,6 +413,94 @@ async def _handle_message(msg):
             _detect_sweep_and_log(seg, sec_id, payload["depth"], payload.get("ltp"))
         _apply_tick(seg, sec_id, payload)
     await _flush_state_to_db()
+
+
+def _resolve_atm_legs():
+    """The ATM +- ATM_WINGS CE/PE legs for WATCH_ATM, as [(seg, security_id)].
+
+    One option-chain REST call. Returns [] on any failure — the caller then
+    keeps whatever it is already subscribed to rather than dropping the feed,
+    because a transient chain error is not a reason to stop streaming ticks.
+    """
+    if not WATCH_ATM or WATCH_ATM not in ATM_UNDERLYING:
+        return []
+    scrip, seg = ATM_UNDERLYING[WATCH_ATM]
+    hdr = {"access-token": ACCESS_TOKEN, "client-id": CLIENT_ID,
+           "Content-Type": "application/json"}
+    try:
+        import urllib.request
+
+        def _post(url, body):
+            req = urllib.request.Request(
+                url, data=json.dumps(body).encode(), headers=hdr, method="POST")
+            with urllib.request.urlopen(req, timeout=8) as r:
+                return json.loads(r.read().decode())
+
+        exp = _post("https://api.dhan.co/v2/optionchain/expirylist",
+                    {"UnderlyingScrip": scrip, "UnderlyingSeg": seg})
+        expiries = (exp or {}).get("data") or []
+        if not expiries:
+            return []
+        # Dhan caps the chain endpoint at one request per 3 seconds.
+        time.sleep(3.1)
+        ch = _post("https://api.dhan.co/v2/optionchain",
+                   {"UnderlyingScrip": scrip, "UnderlyingSeg": seg,
+                    "Expiry": expiries[0]})
+        data = (ch or {}).get("data") or {}
+        spot = float(data.get("last_price") or 0)
+        oc = data.get("oc") or {}
+        if not spot or not oc:
+            return []
+        strikes = sorted(float(k) for k in oc)
+        atm = min(strikes, key=lambda k: abs(k - spot))
+        i = strikes.index(atm)
+        want = strikes[max(0, i - ATM_WINGS): i + ATM_WINGS + 1]
+        out = []
+        for k in want:
+            node = oc.get(f"{k:.6f}") or {}
+            for side in ("ce", "pe"):
+                sid = (node.get(side) or {}).get("security_id")
+                if sid:
+                    out.append(("NSE_FNO", int(sid)))
+        return out
+    except Exception as e:
+        print(f"[atm] resolve failed: {e}")
+        return []
+
+
+async def _refresh_atm(ws):
+    """Re-subscribe when the ATM strike has rolled. No-op unless WATCH_ATM."""
+    global WATCH, _atm_current, _atm_last_check
+    if not WATCH_ATM:
+        return
+    now = time.time()
+    if now - _atm_last_check < ATM_REFRESH_S:
+        return
+    _atm_last_check = now
+    # ⚠️ Off the event loop. `_resolve_atm_legs` does blocking HTTP and must
+    # wait out Dhan's 3-second option-chain window; running it inline would
+    # stall the WebSocket read for that whole time and drop ticks — on a tick
+    # worker, the one thing that must never happen.
+    legs = await asyncio.to_thread(_resolve_atm_legs)
+    if not legs or set(legs) == set(_atm_current):
+        return
+    gone = [x for x in _atm_current if x not in set(legs)]
+    if gone:
+        try:
+            await ws.send(json.dumps({
+                "RequestCode": REQ_UNSUBSCRIBE,
+                "InstrumentCount": len(gone),
+                "InstrumentList": [{"ExchangeSegment": sg,
+                                    "SecurityId": str(sc)} for sg, sc in gone],
+            }))
+        except Exception as e:
+            print(f"[atm] unsubscribe failed: {e}")
+    _atm_current = legs
+    # keep any statically configured instruments alongside the rolling legs
+    WATCH = list(dict.fromkeys(list(_STATIC_WATCH) + legs))
+    print(f"[{datetime.now(IST):%H:%M:%S}] ATM legs -> {len(legs)} "
+          f"(wings={ATM_WINGS})")
+    await _subscribe(ws)
 
 
 async def _subscribe(ws):
@@ -409,10 +539,17 @@ async def run():
                 WS_URL, ping_interval=20, ping_timeout=10, max_size=2**20
             ) as ws:
                 backoff = 5
+                # Resolve the ATM legs BEFORE the first subscribe so the very
+                # first connection already carries them, then re-check on the
+                # ATM_REFRESH_S cadence as messages arrive. On a RECONNECT the
+                # cadence may not be due, but `WATCH` still holds the last
+                # resolved legs, so `_subscribe` below re-sends them anyway.
+                await _refresh_atm(ws)
                 await _subscribe(ws)
                 async for raw in ws:
                     try:
                         await _handle_message(raw)
+                        await _refresh_atm(ws)
                     except Exception as e:
                         print(f"handle err: {e}")
         except Exception as e:

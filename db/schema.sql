@@ -450,6 +450,11 @@ CREATE TABLE IF NOT EXISTS dhan_ticks (
     cum_delta DOUBLE PRECISION,
     volume DOUBLE PRECISION,
     last_trade_qty DOUBLE PRECISION,
+    -- Accumulated separately, not derived: `volume` includes unchanged-price
+    -- ticks that the tick rule classifies as neither side, so buy and sell
+    -- cannot be recovered from (cum_delta, volume). See sql/038.
+    buy_vol DOUBLE PRECISION DEFAULT 0,
+    sell_vol DOUBLE PRECISION DEFAULT 0,
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_dhan_ticks_updated ON dhan_ticks(updated_at);
