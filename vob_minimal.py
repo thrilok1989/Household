@@ -772,6 +772,13 @@ FLOW_LEVEL_ALERTS_DEFAULT = True
 #: spike volume CHANGES, never on a standing lead.
 HV_WINDOW_ALERTS_DEFAULT = True
 
+#: Read live tick-rule flow from Supabase `dhan_ticks` (written by
+#: `ws_worker.py`). ON: the worker may not be running, in which case the read
+#: returns nothing and every leg falls back to the CLV estimate — clearly
+#: labelled as such — so this costs one narrow query per cycle and never
+#: silently degrades a reading.
+TICK_FLOW_DEFAULT = True
+
 # ── Level Acceptance / Rejection alerts ────────────────────────────────
 # Telegram note when a level RESOLVES (accepted above/below, or rejected) — the
 # owner asked for it ON. Edge-triggered (once, on the transition) and per-zone
@@ -12003,6 +12010,79 @@ def _notify_chart_formations():
         pass  # an alert must never take the cycle down
 
 
+def _publish_leg_flow_source():
+    """🟢/🟡 The best available buy/sell reading per ATM leg, and WHERE it came
+    from — resolved once per cycle for every surface to read.
+
+    The hierarchy is `mios_v5.flow_source`'s: real tick aggression from
+    `ws_worker` (Supabase `dhan_ticks`) → LuxAlgo-style 1-minute sub-bar
+    decomposition → single-bar CLV. Nothing here computes buy/sell: the tick
+    rule belongs to `ws_worker`, CLV to `indicators.order_flow`, and the
+    decomposition is a sum over bars already in hand.
+
+    ⚠️ The `source` travels with the numbers on purpose. A tick reading counts
+    what traded on which side; a CLV reading infers it from where a candle
+    closed. They differ in KIND, and a panel that showed them identically
+    would be presenting a guess as a measurement.
+
+    Published to `_leg_flow_source` keyed by leg name. No-op — and no Supabase
+    read at all — unless `_tick_flow_on` is set, so a desk without the worker
+    running pays nothing.
+    """
+    try:
+        from mios_v5 import flow_source as _fs
+        legs = st.session_state.get('_atm_leg_dfs') or {}
+        if not legs:
+            return
+        sids = st.session_state.get('_atm_leg_sids') or {}
+
+        # 📡 Tick rows for exactly the legs on screen — never the whole table.
+        ticks = {}
+        if st.session_state.get('_tick_flow_on', TICK_FLOW_DEFAULT):
+            try:
+                _db = st.session_state.get('_db_obj')
+                want = []
+                for _name, _pair in sids.items():
+                    try:
+                        want.append(int(_pair[0]))
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                if _db is not None and want:
+                    ticks = _db.get_tick_flow(want) or {}
+            except Exception:
+                ticks = {}
+
+        out = {}
+        for name, df_l in legs.items():
+            if df_l is None or getattr(df_l, 'empty', True):
+                continue
+            row = None
+            try:
+                sid = int((sids.get(name) or (None,))[0])
+                row = ticks.get(sid)
+            except (TypeError, ValueError):
+                row = None
+            # CLV of the latest bar — the fallback, already-computed split.
+            clv_b = clv_s = None
+            try:
+                got = _of.split(df_l)
+                if not _of.is_missing(got):
+                    _b, _s = got
+                    clv_b, clv_s = float(_b.iloc[-1]), float(_s.iloc[-1])
+            except Exception:
+                clv_b = clv_s = None
+            # ⚠️ No intrabar tier for a 1-minute leg frame: there is no finer
+            # bar in the feed to decompose it into. It is passed as None so the
+            # hierarchy falls straight from tick to CLV, and stays available for
+            # a higher-timeframe caller that DOES have sub-bars.
+            out[name] = _fs.resolve(tick_row=row, sub_bars=None,
+                                    clv_buy=clv_b, clv_sell=clv_s,
+                                    now=time.time())
+        st.session_state['_leg_flow_source'] = out
+    except Exception:
+        pass
+
+
 def _hv_window_totals():
     """📊 The rolling 10-minute high-volume-pivot totals, CALL vs PUT.
 
@@ -15238,9 +15318,14 @@ def _render_live_confluence(spot_price):
             _hv_line = _hw.summary(st.session_state.get('_hv_window') or {})
         except Exception:
             _hv_line = ""
+        # 🟢/🟡 Each leg's best-available flow reading AND its source, from the
+        # one resolution `_publish_leg_flow_source` did earlier this cycle.
+        _lfs = st.session_state.get('_leg_flow_source') or {}
         html = _lc_html(model, spot=spot_price, call_ltp=call_ltp,
                         put_ltp=put_ltp, call_label=call_label,
-                        put_label=put_label, hv_window_line=_hv_line)
+                        put_label=put_label, hv_window_line=_hv_line,
+                        call_flow=_lfs.get(call_label),
+                        put_flow=_lfs.get(put_label))
         if html:
             st.markdown(html, unsafe_allow_html=True)
     except Exception as err:
@@ -17489,6 +17574,10 @@ def _render_main_analyzer():
         pass
     # 📊 Publish the 10-minute HVP totals BEFORE the flip alert reads them, and
     # before the Live Confluence card renders — one answer, two surfaces.
+    try:
+        _publish_leg_flow_source()
+    except Exception:
+        pass
     try:
         _hv_window_totals()
     except Exception:

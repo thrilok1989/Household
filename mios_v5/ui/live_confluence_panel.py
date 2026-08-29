@@ -63,9 +63,30 @@ def _participation_bar(diff: Any) -> str:
             f"</div>")
 
 
+def _flow_line(flow: Optional[Mapping[str, Any]]) -> str:
+    """🟢/🟡 One leg's buy/sell reading WITH its source badge. `""` when there
+    is none.
+
+    The badge is not decoration: a tick reading counts what traded on which
+    side, a CLV reading infers it from where a candle closed. Showing them
+    identically would present a guess as a measurement, which is the one thing
+    `mios_v5.flow_source` exists to prevent.
+    """
+    f = flow or {}
+    bp, sp = f.get("buy_pct"), f.get("sell_pct")
+    if bp is None or sp is None:
+        return ""
+    badge = str(f.get("badge") or "")
+    # green when it is a real measurement, amber when it is an estimate
+    tone = BULL if f.get("confident") else WARN
+    return (f"<div style='font-size:10.5px;color:{MUTED};margin-top:2px'>"
+            f"<span style='color:{tone};font-weight:700'>{_esc(badge)}</span> "
+            f"{bp:.0f}% / {sp:.0f}%</div>")
+
+
 def _leg_box(leg_label: str, ltp: Any, spiking: bool,
             location_vote: Mapping[str, Any], energy_vote: Mapping[str, Any],
-            border: str) -> str:
+            border: str, flow: Optional[Mapping[str, Any]] = None) -> str:
     vol_word = "HIGH" if spiking else "normal"
     vol_col = WARN if spiking else MUTED
     loc = str((location_vote or {}).get("label") or "—")
@@ -91,6 +112,7 @@ def _leg_box(leg_label: str, ltp: Any, spiking: bool,
         f"<b style='color:{MUTED}'>{_px(ltp)}</b> · {_esc(loc)}</div>"
         f"<div style='font-size:11px;color:{MUTED}'>Energy "
         f"<b>{_esc(energy)}</b></div>"
+        f"{_flow_line(flow)}"
         f"</div>")
 
 
@@ -124,7 +146,9 @@ def _hv_window_row(line: Any) -> str:
 def card_html(model: Optional[Dict[str, Any]], spot: Any = None,
              call_ltp: Any = None, put_ltp: Any = None,
              call_label: str = "CALL", put_label: str = "PUT",
-             hv_window_line: Any = None) -> str:
+             hv_window_line: Any = None,
+             call_flow: Optional[Mapping[str, Any]] = None,
+             put_flow: Optional[Mapping[str, Any]] = None) -> str:
     """The full card. `""` when there is no model to show."""
     if not model:
         return ""
@@ -180,9 +204,11 @@ def card_html(model: Optional[Dict[str, Any]], spot: Any = None,
     legs = (
         f"<div style='display:flex;gap:10px;margin-top:10px;flex-wrap:wrap'>"
         + _leg_box(call_label, call_ltp, model.get("call_spiking"),
-                  votes.get("call_location", {}), votes.get("call_energy", {}), BULL)
+                  votes.get("call_location", {}), votes.get("call_energy", {}),
+                  BULL, call_flow)
         + _leg_box(put_label, put_ltp, model.get("put_spiking"),
-                  votes.get("put_location", {}), votes.get("put_energy", {}), BEAR)
+                  votes.get("put_location", {}), votes.get("put_energy", {}),
+                  BEAR, put_flow)
         + "</div>")
 
     hv_row = _hv_window_row(hv_window_line)
