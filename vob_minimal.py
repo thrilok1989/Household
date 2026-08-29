@@ -10934,6 +10934,47 @@ _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 
 
+def _leg_cached(store, tag, fn, *args):
+    """📦 What `_publish_atm_legs` already computed for this leg, or compute it
+    here on a miss.
+
+    ⚠️ Measured duplication. `_publish_atm_legs` runs earlier in the same render
+    (dispatch order: it publishes at step 9, the bias dashboard renders at step
+    10) and stores, per ATM±1 leg, exactly these three results —
+    `_atm_leg_vob_volume`, `_atm_leg_sr_behavior`, `_atm_leg_vidya`. This
+    function recomputed all three from the same frames every render and never
+    looked at the store:
+
+        analyze_vob_volume        18.4 ms x 6 legs = 111 ms
+        classify_leg_sr_behavior  ~15   ms x 6     = ~90 ms
+        calculate_vidya            8.7  ms x 6     =  52 ms
+
+    ~250 ms per render, ~45 s/hour at a 20s cycle. `VolumeOrderBlocks
+    .detect_blocks` alone ran four times per leg per render. Documented in
+    docs/AUDIT_FETCH_DUPLICATION.md §4.
+
+    Reading the store is EQUIVALENT, not merely cheaper: the stored value was
+    computed from `_atm_leg_dfs[name]` — the very frame this table reads — and
+    all three functions are deterministic, so a stored result and a fresh one
+    cannot differ. Both facts are pinned by tests.
+
+    The fallback is not decoration: on the first render of a session, or for a
+    leg `_publish_atm_legs` could not compute, the store is empty and the table
+    must still fill. Same read-then-recompute shape the VOB alert path already
+    uses.
+    """
+    try:
+        hit = (st.session_state.get(store) or {}).get(tag)
+        if hit:
+            return hit
+    except Exception:
+        pass
+    try:
+        return fn(*args)
+    except Exception:
+        return None
+
+
 def build_leg_bias_table(spot_price):
     """One consolidated table of per-leg signal biases for all 6 ATM±1 CE/PE
     legs, each leg's net verdict, and an overall NIFTY verdict.
@@ -10979,7 +11020,8 @@ def build_leg_bias_table(spot_price):
         v = {}
         # Compute VOB zones once (reused by VOB + S/R columns)
         try:
-            zones = analyze_vob_volume(df_l, ltp) or []
+            zones = _leg_cached('_atm_leg_vob_volume', tag,
+                                analyze_vob_volume, df_l, ltp) or []
         except Exception:
             zones = []
         # Support (bullish VOB) & Resistance (bearish VOB) behaviour — the
@@ -11020,7 +11062,8 @@ def build_leg_bias_table(spot_price):
             v['VOB'] = 'neu'
         # 2) S/R behavior — event first, else position vs nearest support/resistance
         try:
-            sr = classify_leg_sr_behavior(df_l, ltp)
+            sr = _leg_cached('_atm_leg_sr_behavior', tag,
+                             classify_leg_sr_behavior, df_l, ltp)
             if sr and sr.get('direction') in ('bull', 'bear') and sr.get('state') not in (None, 'NONE'):
                 v['S/R'] = sr['direction']
             else:
@@ -11062,7 +11105,8 @@ def build_leg_bias_table(spot_price):
             v['VWAP'] = 'neu'
         # 6) VIDYA
         try:
-            t = calculate_vidya(df_l).get('trend')
+            t = (_leg_cached('_atm_leg_vidya', tag,
+                             calculate_vidya, df_l) or {}).get('trend')
             v['VIDYA'] = 'bull' if t == 'Bullish' else ('bear' if t == 'Bearish' else 'neu')
         except Exception:
             v['VIDYA'] = 'neu'
