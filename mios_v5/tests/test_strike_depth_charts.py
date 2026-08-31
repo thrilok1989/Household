@@ -109,6 +109,52 @@ def test_it_never_decreases_for_a_book_that_is_always_positive():
     assert out == sorted(out)
 
 
+# ── netting two fields into one series ──────────────────────────────────
+
+def test_one_field_is_just_that_field():
+    s = _store()
+    assert SC.net_series(s, 24600, ("ce_bid",)) == SH.series(s, 24600, "ce_bid")
+
+
+def test_two_fields_are_the_difference():
+    s = _store(n=2, ce_bid=900.0, ce_ask=350.0)
+    assert SC.net_series(s, 24600, ("ce_bid", "ce_ask"))["v"] == [550.0, 550.0]
+
+
+def test_the_difference_goes_negative_when_the_ask_is_heavier():
+    s = _store(n=1, pe_bid=100.0, pe_ask=700.0)
+    assert SC.net_series(s, 24600, ("pe_bid", "pe_ask"))["v"] == [-600.0]
+
+
+def test_the_legs_are_aligned_on_the_snapshot_not_by_position():
+    """⚠️ THE TRAP. `SH.series` drops readings the chain did not carry, so a
+    snapshot with a bid but no ask shortens one list and not the other. `zip`ing
+    them would subtract an ask from a DIFFERENT minute's bid — silently, and
+    more wrongly the more gaps there are."""
+    s = {"snaps": []}
+    df_full, spot = _chain(ce_bid=900.0, ce_ask=100.0)
+    df_gap, _ = _chain(ce_bid=500.0, ce_ask=None)
+    SH.record(s, df_full, spot, now=NOW)
+    SH.record(s, df_gap, spot, now=NOW + SH.MIN_GAP_S)          # ask missing
+    SH.record(s, df_full, spot, now=NOW + 2 * SH.MIN_GAP_S)
+    got = SC.net_series(s, 24600, ("ce_bid", "ce_ask"))
+    assert got["v"] == [800.0, 800.0], "a gap shifted the pairing"
+    assert got["t"] == [NOW, NOW + 2 * SH.MIN_GAP_S]
+
+
+def test_a_snapshot_missing_a_leg_yields_no_point_rather_than_a_zero():
+    """Same rule `SH.series` already applies to a missing reading — a gap is not
+    a moment when the book was balanced."""
+    s = {"snaps": []}
+    df, spot = _chain(ce_ask=None)
+    SH.record(s, df, spot, now=NOW)
+    assert SC.net_series(s, 24600, ("ce_bid", "ce_ask"))["v"] == []
+
+
+def test_no_fields_no_series():
+    assert SC.net_series(_store(), 24600, ()) == {"t": [], "v": []}
+
+
 # ── the figures ─────────────────────────────────────────────────────────
 
 def test_one_figure_per_strike_for_each_depth_measure():
@@ -173,9 +219,86 @@ def test_the_plotted_value_is_the_running_total_not_the_reading():
 
 def test_the_axis_names_the_unit_it_is_drawn_in():
     for measure, unit in (("cum_bid", "Cum Bid Qty (K)"),
-                          ("cum_ask", "Cum Ask Qty (K)")):
+                          ("cum_ask", "Cum Ask Qty (K)"),
+                          ("cum_imb", "Cum Bid − Ask (K)")):
         fig = SC.figures(_store(), measure)[0][2]
         assert fig.layout.yaxis.title.text == unit
+
+
+# ── the imbalance ───────────────────────────────────────────────────────
+
+def test_one_figure_per_strike_for_the_imbalance():
+    assert len(SC.figures(_store(), "cum_imb")) == 5
+
+
+def test_each_side_is_netted_against_its_OWN_ask_not_the_other_sides():
+    """⚠️ A call's imbalance and a put's are two separate questions. Netting the
+    call bid against the put ask would draw a number nobody asked for."""
+    # CE: bid 400, ask 1500 → −1100 a snapshot. PE: bid 900, ask 300 → +600.
+    figs = SC.figures(_store(n=2), "cum_imb")
+    fig = figs[0][2]
+    call = next(t for t in fig.data if t.name == "Call")
+    put = next(t for t in fig.data if t.name == "Put")
+    assert [round(v, 3) for v in call.y] == [-1.1, -2.2]    # thousands
+    assert [round(v, 3) for v in put.y] == [0.6, 1.2]
+
+
+def test_a_bid_heavy_side_runs_above_zero_and_an_ask_heavy_side_below():
+    fig = SC.figures(_store(n=3), "cum_imb")[0][2]
+    call = next(t for t in fig.data if t.name == "Call")
+    put = next(t for t in fig.data if t.name == "Put")
+    assert all(v < 0 for v in call.y), "CE ask 1500 > bid 400 should sit below"
+    assert all(v > 0 for v in put.y), "PE bid 900 > ask 300 should sit above"
+
+
+def test_the_imbalance_chart_draws_the_zero_line():
+    """⚠️ On these charts the CROSSING is the reading — without the line there
+    is nothing to read it against."""
+    fig = SC.figures(_store(), "cum_imb")[0][2]
+    lines = [s for s in (fig.layout.shapes or []) if s.type == "line"]
+    assert lines, "no zero line on a chart whose zero crossing is the point"
+    assert any(s.y0 == 0 and s.y1 == 0 for s in lines)
+
+
+def test_the_quantity_charts_have_no_zero_line():
+    """A cumulative quantity cannot cross zero — a dashed line at the axis floor
+    is clutter that implies a crossing is possible."""
+    for measure in ("cum_bid", "cum_ask", "oi"):
+        fig = SC.figures(_store(), measure)[0][2]
+        assert not (fig.layout.shapes or ()), measure
+
+
+def test_the_imbalance_title_carries_a_sign():
+    """+ or −, because the number's sign IS half of what it says."""
+    fig = SC.figures(_store(n=2), "cum_imb")[0][2]
+    text = fig.layout.title.text
+    assert "PE +" in text, text
+    assert "CE -" in text, text
+
+
+def test_the_imbalance_uses_the_call_green_put_red_pairing():
+    fig = SC.figures(_store(), "cum_imb")[0][2]
+    by = {t.name: t.line.color for t in fig.data}
+    assert by["Call"] == SC.CALL_COLOUR and by["Put"] == SC.PUT_COLOUR
+
+
+def test_a_chain_with_no_book_draws_no_imbalance():
+    assert SC.figures(_store(depth=False), "cum_imb") == []
+
+
+def test_the_note_says_which_way_is_which():
+    """⚠️ An axis label cannot say what above and below zero mean, and a reader
+    should not have to infer it from the title."""
+    note = SC.IMBALANCE_NOTE
+    assert "above zero" in note and "below zero" in note
+    assert "bid" in note and "ask" in note
+
+
+def test_the_note_stops_at_what_was_shown():
+    """The book gets no vote — the note must not turn depth into a forecast."""
+    low = SC.IMBALANCE_NOTE.lower()
+    for banned in ("bullish", "bearish", "support", "resistance", "will "):
+        assert banned not in low, low
 
 
 def test_the_title_carries_the_latest_totals_in_side_colour():
@@ -219,15 +342,32 @@ def test_an_unknown_measure_is_refused_not_guessed():
 def test_every_measure_names_fields_the_store_actually_keeps():
     """⚠️ A spelling here with no `strike_history.FIELDS` entry draws a blank
     panel with no error anywhere."""
-    for measure, (ce_f, pe_f, *_rest) in SC.MEASURES.items():
-        assert ce_f in SH.FIELDS, f"{measure}: {ce_f}"
-        assert pe_f in SH.FIELDS, f"{measure}: {pe_f}"
+    for measure, spec in SC.MEASURES.items():
+        for side in ("ce", "pe"):
+            assert spec[side], f"{measure}: {side} names no field"
+            for f in spec[side]:
+                assert f in SH.FIELDS, f"{measure}: {f}"
 
 
 def test_every_measure_names_its_unit_and_a_divisor_that_matches():
-    for measure, (_c, _p, div, unit, _cum) in SC.MEASURES.items():
-        assert div > 0
-        assert ("(L)" in unit) == (div >= 100_000.0), measure
+    for measure, spec in SC.MEASURES.items():
+        assert spec["div"] > 0
+        assert ("(L)" in spec["unit"]) == (spec["div"] >= 100_000.0), measure
+
+
+def test_every_measure_declares_the_whole_spec():
+    """The table is the contract — a measure missing a key would raise inside
+    `figures()` at render time, on the dashboard, not here."""
+    for measure, spec in SC.MEASURES.items():
+        assert set(spec) == {"ce", "pe", "div", "unit", "cumulative",
+                             "signed"}, measure
+
+
+def test_the_two_sides_of_a_measure_are_symmetric():
+    """⚠️ CE netting bid−ask while PE netted only bid would draw two different
+    quantities on one axis and label them Call and Put."""
+    for measure, spec in SC.MEASURES.items():
+        assert len(spec["ce"]) == len(spec["pe"]), measure
 
 
 def test_every_measure_names_its_colours():
@@ -238,11 +378,17 @@ def test_every_measure_names_its_colours():
         assert len(pair) == 2 and pair[0] != pair[1], measure
 
 
-def test_only_the_bid_and_ask_measures_cumulate():
+def test_only_the_depth_measures_cumulate():
     """⚠️ OI is already a cumulative quantity as the exchange reports it —
     running-totalling it again would draw a parabola and call it open
     interest."""
-    assert set(SC.CUMULATIVE) == {"cum_bid", "cum_ask"}
+    assert set(SC.CUMULATIVE) == {"cum_bid", "cum_ask", "cum_imb"}
+
+
+def test_only_the_measures_that_can_go_negative_are_signed():
+    """ΔOI and the imbalance cross zero; a quantity cannot."""
+    signed = {m for m, s in SC.MEASURES.items() if s["signed"]}
+    assert signed == {"chg", "cum_imb"}
 
 
 def test_the_oi_charts_are_unchanged_by_the_new_measures():
@@ -346,9 +492,16 @@ def test_the_panel_draws_no_verdict():
     assert "strike_read" not in called
 
 
-def test_both_measures_are_drawn():
+def test_all_three_measures_are_drawn():
     src = ast.unparse(_dash_fn("_strike_depth_charts"))
-    assert "cum_bid" in src and "cum_ask" in src
+    assert "cum_bid" in src and "cum_ask" in src and "cum_imb" in src
+
+
+def test_the_imbalance_row_carries_its_own_note():
+    """It goes with the row it explains, not in a footnote — the other two rows
+    need no such line, and a shared caption would over-explain them."""
+    src = ast.unparse(_dash_fn("_strike_depth_charts"))
+    assert "IMBALANCE_NOTE" in src
 
 
 def test_the_chart_keys_cannot_collide_with_the_oi_charts():

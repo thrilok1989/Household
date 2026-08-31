@@ -74,6 +74,7 @@ MEASURE_COLOURS: Dict[str, Tuple[str, str]] = {
     "chg":     (CE_COLOUR, PE_COLOUR),
     "cum_bid": (CALL_COLOUR, PUT_COLOUR),
     "cum_ask": (CALL_COLOUR, PUT_COLOUR),
+    "cum_imb": (CALL_COLOUR, PUT_COLOUR),
 }
 
 #: OI direction × price direction → what the position is doing. One map, so the
@@ -96,23 +97,90 @@ def _sign(x: Any, eps: float = 0.0) -> int:
     return 1 if v > eps else (-1 if v < -eps else 0)
 
 
-#: measure → (CE field, PE field, divisor, y-axis unit, cumulative?)
+#: What each chart draws. One table so a measure cannot be half-added: a field
+#: spelling with no `strike_history.FIELDS` entry, a chart drawn in a unit its
+#: axis does not name, or a measure with no colour pairing is a test failure
+#: rather than a blank panel.
 #:
-#: One table so a measure cannot be half-added: a spelling here that has no
-#: `strike_history.FIELDS` entry, or a chart drawn in a unit its axis does not
-#: name, is a test failure rather than a blank panel.
+#: `ce` / `pe` are TUPLES of fields, netted first-minus-the-rest. One field is
+#: that field; two are a difference. That is what lets the imbalance measure
+#: exist without a second figure builder — the only thing it needs that the
+#: others do not is a subtraction, and a subtraction is not a new kind of chart.
 #:
-#: OI reads naturally in lakhs and ΔOI in thousands — the units the reference
-#: charts used, applied HERE rather than in the store, which keeps absolutes.
-MEASURES: Dict[str, Tuple[str, str, float, str, bool]] = {
-    "oi":      ("ce_oi",  "pe_oi",  100_000.0, "OI (L)",          False),
-    "chg":     ("ce_chg", "pe_chg",   1_000.0, "ΔOI (K)",         False),
-    "cum_bid": ("ce_bid", "pe_bid",   1_000.0, "Cum Bid Qty (K)", True),
-    "cum_ask": ("ce_ask", "pe_ask",   1_000.0, "Cum Ask Qty (K)", True),
+#: ⚠️ The netting is aligned per snapshot, not by position — see `net_series`.
+#:
+#: `signed` means the value can be negative, so the axis gets a zero line and
+#: the title figures get a `+`. `cumulative` means the y value is a running
+#: total rather than the reading itself.
+#:
+#: OI reads naturally in lakhs and everything else in thousands — the units the
+#: reference charts used, applied HERE rather than in the store, which keeps
+#: absolutes.
+MEASURES: Dict[str, Dict[str, Any]] = {
+    "oi": {"ce": ("ce_oi",), "pe": ("pe_oi",),
+           "div": 100_000.0, "unit": "OI (L)",
+           "cumulative": False, "signed": False},
+    "chg": {"ce": ("ce_chg",), "pe": ("pe_chg",),
+            "div": 1_000.0, "unit": "ΔOI (K)",
+            "cumulative": False, "signed": True},
+    "cum_bid": {"ce": ("ce_bid",), "pe": ("pe_bid",),
+                "div": 1_000.0, "unit": "Cum Bid Qty (K)",
+                "cumulative": True, "signed": False},
+    "cum_ask": {"ce": ("ce_ask",), "pe": ("pe_ask",),
+                "div": 1_000.0, "unit": "Cum Ask Qty (K)",
+                "cumulative": True, "signed": False},
+    # Each side's own bid MINUS its own ask, accumulated. Above zero that side
+    # has shown more resting demand than supply over the session; below zero,
+    # more supply. CALL and PUT are read against each other, not against a
+    # combined book — a call's imbalance and a put's are two separate questions.
+    "cum_imb": {"ce": ("ce_bid", "ce_ask"), "pe": ("pe_bid", "pe_ask"),
+                "div": 1_000.0, "unit": "Cum Bid − Ask (K)",
+                "cumulative": True, "signed": True},
 }
 
 #: Measures whose y value is a running total rather than the reading itself.
-CUMULATIVE = tuple(m for m, spec in MEASURES.items() if spec[4])
+CUMULATIVE = tuple(m for m, s in MEASURES.items() if s["cumulative"])
+
+#: What above and below the zero line mean, for the panel to print. The chart
+#: cannot carry this in an axis label and a reader should not have to infer it.
+#:
+#: ⚠️ It stops at what was SHOWN. A book leaning to the bid is not a forecast —
+#: the quantity can be pulled, and `vob_minimal` §5d gives the book no vote for
+#: exactly that reason.
+IMBALANCE_NOTE = ("above zero = that side's book has shown more bid than ask "
+                  "depth over the session; below zero = more ask than bid")
+
+
+def net_series(store: Any, strike: Any,
+               fields: Sequence[str]) -> Dict[str, List[Any]]:
+    """One field's series, or `fields[0] − fields[1] − …` netted per snapshot.
+
+    ⚠️ **Aligned on the snapshot timestamp, never by position.** `SH.series`
+    drops readings the chain did not carry rather than zero-filling them, so a
+    snapshot with a bid but no ask shortens one list and not the other, and
+    `zip`ping the two would subtract an ask from a *different minute's* bid —
+    silently, and increasingly wrongly the more gaps there are. A timestamp that
+    is missing any leg produces no point at all, which is the same rule
+    `SH.series` already applies to a missing reading.
+    """
+    fs = tuple(fields or ())
+    if not fs:
+        return {"t": [], "v": []}
+    base = SH.series(store, strike, fs[0])
+    if len(fs) == 1:
+        return base
+    others = []
+    for f in fs[1:]:
+        s = SH.series(store, strike, f)
+        others.append(dict(zip(s["t"], s["v"])))
+    ts: List[Any] = []
+    vs: List[Any] = []
+    for t, v in zip(base["t"], base["v"]):
+        if any(t not in o for o in others):
+            continue
+        ts.append(t)
+        vs.append(v - sum(o[t] for o in others))
+    return {"t": ts, "v": vs}
 
 
 def running_total(vals: Sequence[Any]) -> List[float]:
@@ -244,12 +312,12 @@ def figures(store: Any, measure: str = "oi"):
     """`[(strike, label, figure)]` — one CE-vs-PE chart per strike.
 
     `measure` is any key of `MEASURES`: `"oi"`, `"chg"`, `"cum_bid"`,
-    `"cum_ask"`. Returns `[]` when there is nothing to plot, so a caller draws
-    no empty axes.
+    `"cum_ask"`, `"cum_imb"`. Returns `[]` when there is nothing to plot, so a
+    caller draws no empty axes.
 
-    The two `cum_*` measures plot the RUNNING TOTAL of each side's top-of-book
+    The three `cum_*` measures plot the RUNNING TOTAL of each side's top-of-book
     resting quantity — see `running_total` for what that total does and does
-    not mean.
+    not mean — and `cum_imb` accumulates each side's bid MINUS its own ask.
     """
     try:
         import plotly.graph_objects as go
@@ -258,7 +326,8 @@ def figures(store: Any, measure: str = "oi"):
     spec = MEASURES.get(measure)
     if spec is None:
         return []
-    ce_f, pe_f, div, unit, cumulate = spec
+    div, unit = spec["div"], spec["unit"]
+    cumulate, signed = spec["cumulative"], spec["signed"]
     # ⚠️ Per measure, not module-wide. The OI charts pair red with the CALL side
     # because red means RESISTANCE there and a verdict underneath says so; the
     # depth charts have no such verdict and pair green with the CALL side.
@@ -273,7 +342,8 @@ def figures(store: Any, measure: str = "oi"):
 
     out = []
     for k in window:
-        ce, pe = SH.series(store, k, ce_f), SH.series(store, k, pe_f)
+        ce = net_series(store, k, spec["ce"])
+        pe = net_series(store, k, spec["pe"])
         if cumulate:
             # ⚠️ Cumulated over the series that EXISTS, so a snapshot the feed
             # skipped does not add a zero. `series()` already drops missing
@@ -296,14 +366,16 @@ def figures(store: Any, measure: str = "oi"):
                     mode="markers" if lone else "lines+markers", name=name,
                     line=dict(color=colour, width=2),
                     marker=dict(size=11 if lone else 3, color=colour)))
-        if measure == "chg":
+        # A measure that can go negative needs the axis to say where zero is —
+        # on the imbalance charts the crossing IS the reading.
+        if signed:
             fig.add_hline(y=0, line_dash="dash", line_color="white",
                           line_width=0.5)
         last_ce = (ce["v"][-1] / div) if ce["v"] else 0.0
         last_pe = (pe["v"][-1] / div) if pe["v"] else 0.0
         suffix = "L" if div >= 100_000.0 else "K"
-        sign = "+" if (measure == "chg" and last_ce >= 0) else ""
-        sign_pe = "+" if (measure == "chg" and last_pe >= 0) else ""
+        sign = "+" if (signed and last_ce >= 0) else ""
+        sign_pe = "+" if (signed and last_pe >= 0) else ""
         # ⚠️ The latest values are COLOURED IN THE TITLE and the legend is off.
         # With a legend at y=1.02 and a three-line title, the two drew on top of
         # each other and the render showed "ATM ₹24600 CE: 4…" clipped behind the
