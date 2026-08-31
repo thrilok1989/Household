@@ -61,6 +61,15 @@ FIELDS = {
     "pe_chg": ("changeinOpenInterest_PE", "PE_OI_Change", "PE_ChgOI"),
     "ce_ltp": ("lastPrice_CE", "CE_LTP"),
     "pe_ltp": ("lastPrice_PE", "PE_LTP"),
+    # ⚠️ TOP-OF-BOOK resting quantity, not the 5-level book. `analyze_option_chain`
+    # renames Dhan's `top_bid_quantity` / `top_ask_quantity` (vob_minimal.py:4249)
+    # and carries them onto `df_summary`, which is all the chain endpoint gives.
+    # The 20-level depth exists only on `ws_worker`'s Full packets, for the two
+    # legs it subscribes — not for five strikes on both sides.
+    "ce_bid": ("bidQty_CE",),
+    "pe_bid": ("bidQty_PE",),
+    "ce_ask": ("askQty_CE",),
+    "pe_ask": ("askQty_PE",),
 }
 
 
