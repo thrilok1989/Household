@@ -1,9 +1,18 @@
-"""📊 Per-strike Call vs Put OI and ΔOI — one figure per ATM±2 strike.
+"""📊 Per-strike Call vs Put series — one figure per ATM±2 strike.
 
-Five strikes × two measures, each figure showing CE against PE over the session,
-plus the verdict the reference layout puts under each chart: which side is heavier
-(support vs resistance) and, from OI direction against LTP direction, whether that
-is building or covering.
+Five strikes × four measures — OI, ΔOI, and the cumulative top-of-book bid and
+ask quantity — each figure showing CE against PE over the session, plus the
+verdict the reference layout puts under each OI chart: which side is heavier
+(support vs resistance) and, from OI direction against LTP direction, whether
+that is building or covering.
+
+⚠️ **The two `cum_*` measures carry no verdict, deliberately.** OI is a
+committed position; a resting quote is an offer that can be withdrawn the
+instant price reaches it. `vob_minimal` §5d already files the order book as
+Tier-3 display-only and refuses it a vote in the regime, and a chart that
+printed "STRONG SUPPORT" off cumulative bid quantity would contradict the
+engine on the same screen. They show where the depth is; they do not say what
+it means. See `running_total`.
 
 ⚠️ **Every conclusion here is arithmetic on the stored series** — no engine is
 consulted and none is second-guessed. The OI/LTP quadrant rule is the standard
@@ -58,6 +67,57 @@ def _sign(x: Any, eps: float = 0.0) -> int:
     except (TypeError, ValueError):
         return 0
     return 1 if v > eps else (-1 if v < -eps else 0)
+
+
+#: measure → (CE field, PE field, divisor, y-axis unit, cumulative?)
+#:
+#: One table so a measure cannot be half-added: a spelling here that has no
+#: `strike_history.FIELDS` entry, or a chart drawn in a unit its axis does not
+#: name, is a test failure rather than a blank panel.
+#:
+#: OI reads naturally in lakhs and ΔOI in thousands — the units the reference
+#: charts used, applied HERE rather than in the store, which keeps absolutes.
+MEASURES: Dict[str, Tuple[str, str, float, str, bool]] = {
+    "oi":      ("ce_oi",  "pe_oi",  100_000.0, "OI (L)",          False),
+    "chg":     ("ce_chg", "pe_chg",   1_000.0, "ΔOI (K)",         False),
+    "cum_bid": ("ce_bid", "pe_bid",   1_000.0, "Cum Bid Qty (K)", True),
+    "cum_ask": ("ce_ask", "pe_ask",   1_000.0, "Cum Ask Qty (K)", True),
+}
+
+#: Measures whose y value is a running total rather than the reading itself.
+CUMULATIVE = tuple(m for m, spec in MEASURES.items() if spec[4])
+
+
+def running_total(vals: Sequence[Any]) -> List[float]:
+    """Running sum of a series, one output per numeric input.
+
+    ⚠️ **What a cumulative resting-quote total is, and is not.** `bidQty` is a
+    LEVEL — how many contracts are sitting on the bid at the moment of the
+    snapshot — not a flow like traded volume. Adding those snapshots up counts
+    the same untouched order once every cycle it stays there, so the curve is
+    not "contracts bought". It is a **time-weighted total of shown depth**: its
+    slope is the average resting size, and CE against PE says which side has
+    displayed more willingness to transact over the session. That is a real
+    comparison, and it is the one the chart is labelled with.
+
+    ⚠️ It is also the softest evidence on the screen. Resting quotes can be
+    pulled the instant they are approached, which is why the app already files
+    the order book as Tier-3, display-only, and refuses it a vote in the regime
+    (`vob_minimal.py` §5d). Nothing here votes either.
+
+    Non-numeric entries are skipped rather than treated as zero — a gap in the
+    feed is not a moment when the book was empty.
+    """
+    out: List[float] = []
+    total = 0.0
+    for v in vals or ():
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        if v != v:  # NaN
+            continue
+        total += float(v)
+        out.append(total)
+    return out
 
 
 #: how many snapshots back "recent" spans for the building-vs-covering read. At
@@ -156,28 +216,36 @@ def strike_read(store: Any, strike: Any) -> Dict[str, Any]:
 def figures(store: Any, measure: str = "oi"):
     """`[(strike, label, figure)]` — one CE-vs-PE chart per strike.
 
-    `measure` is `"oi"` or `"chg"`. Returns `[]` when there is nothing to plot,
-    so a caller draws no empty axes.
+    `measure` is any key of `MEASURES`: `"oi"`, `"chg"`, `"cum_bid"`,
+    `"cum_ask"`. Returns `[]` when there is nothing to plot, so a caller draws
+    no empty axes.
+
+    The two `cum_*` measures plot the RUNNING TOTAL of each side's top-of-book
+    resting quantity — see `running_total` for what that total does and does
+    not mean.
     """
     try:
         import plotly.graph_objects as go
     except Exception:
         return []
-    if measure not in ("oi", "chg"):
+    spec = MEASURES.get(measure)
+    if spec is None:
         return []
+    ce_f, pe_f, div, unit, cumulate = spec
     window = SH.strikes(store)
     if not window:
         return []
     lab = SH.labels(window)
-    ce_f, pe_f = (("ce_oi", "pe_oi") if measure == "oi"
-                  else ("ce_chg", "pe_chg"))
-    # OI reads naturally in lakhs, ΔOI in thousands — the units the reference
-    # charts used, and applied HERE rather than in the store.
-    div, unit = (100_000.0, "OI (L)") if measure == "oi" else (1_000.0, "ΔOI (K)")
 
     out = []
     for k in window:
         ce, pe = SH.series(store, k, ce_f), SH.series(store, k, pe_f)
+        if cumulate:
+            # ⚠️ Cumulated over the series that EXISTS, so a snapshot the feed
+            # skipped does not add a zero. `series()` already drops missing
+            # readings rather than zero-filling them, for the same reason.
+            ce = {"t": ce["t"], "v": running_total(ce["v"])}
+            pe = {"t": pe["t"], "v": running_total(pe["v"])}
         if not ce["v"] and not pe["v"]:
             continue
         # ⚠️ A single stored point needs a marker you can SEE and no time axis. At
@@ -199,7 +267,7 @@ def figures(store: Any, measure: str = "oi"):
                           line_width=0.5)
         last_ce = (ce["v"][-1] / div) if ce["v"] else 0.0
         last_pe = (pe["v"][-1] / div) if pe["v"] else 0.0
-        suffix = "L" if measure == "oi" else "K"
+        suffix = "L" if div >= 100_000.0 else "K"
         sign = "+" if (measure == "chg" and last_ce >= 0) else ""
         sign_pe = "+" if (measure == "chg" and last_pe >= 0) else ""
         # ⚠️ The latest values are COLOURED IN THE TITLE and the legend is off.
@@ -256,3 +324,26 @@ def caption(store: Any) -> str:
                 "a second · OI in lakhs, ΔOI in thousands")
     span = (f" over {r['span_s'] / 60:.0f} min" if r.get("span_s") else "")
     return f"{n} snapshots{span} · OI in lakhs, ΔOI in thousands"
+
+
+def depth_caption(store: Any) -> str:
+    """Provenance for the cumulative bid/ask panel — including the caveat.
+
+    ⚠️ The caveat is IN THE CAPTION, not in a docstring nobody reading the
+    dashboard will open. A rising cumulative bid curve looks exactly like
+    accumulated buying and is not: it is the same resting quantity counted once
+    per snapshot it stays on the book, and it can be pulled the moment price
+    arrives. The app already files the order book as Tier-3 display-only and
+    gives it no vote; a chart of it has to say the same thing.
+    """
+    r = SH.read(store)
+    n = r["n"]
+    if not n:
+        return ("no snapshots yet — the depth series builds as the chain "
+                "refreshes")
+    base = ("top-of-book bid/ask quantity, summed across the session · "
+            "⚠️ shown depth, not traded volume — resting quotes can be pulled")
+    if n < 2:
+        return f"first snapshot — one point per strike so far · {base}"
+    span = (f" over {r['span_s'] / 60:.0f} min" if r.get("span_s") else "")
+    return f"{n} snapshots{span} · {base}"

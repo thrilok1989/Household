@@ -679,9 +679,14 @@ def test_the_charts_tab_computes_nothing():
     # strong_support/strong_resistance, live spot) — the same kind of small
     # derived read `_guardian_read` already does in this file. It builds no
     # market fact of its own.
+    # `_strike_depth_charts` is a RENDERER on the same terms as
+    # `_strike_oi_charts`: it reads the SAME `_strike_hist` store — which now
+    # carries the top-of-book columns alongside the OI ones — and lays out the
+    # running totals. It fetches nothing and draws no verdict.
     _render = {"markdown", "caption", "get", "leg_table_html", "_feed_reason",
-               "_dbg_caption", "_strike_oi_charts", "_poc_structure",
-               "_hv_settings", "_vob_zone_table", "_trade_watch"}
+               "_dbg_caption", "_strike_oi_charts", "_strike_depth_charts",
+               "_poc_structure", "_hv_settings", "_vob_zone_table",
+               "_trade_watch"}
     assert called <= {"_leg_reads", "dominance", "_terminal_chart"} | _render, (
         f"unexpected calls in _charts_screen: {called}")
     # ⚠️ The property that actually matters: no BUILDER is invoked here.

@@ -204,6 +204,61 @@ def _strike_oi_charts(st) -> None:
         _dbg_caption(st, "strike_oi_series", f"charts unavailable: {err}")
 
 
+def _strike_depth_charts(st) -> None:
+    """📖 Five ATM±2 strikes × (cumulative bid · cumulative ask), CE against PE.
+
+    Same layout and the same store as `_strike_oi_charts` — `strike_history`
+    keeps `bidQty_CE/PE` and `askQty_CE/PE` alongside the OI columns, so this
+    costs no fetch of its own. What it adds is the order-book side of the same
+    five strikes: which side has been showing more willingness to buy, and
+    which more willingness to sell.
+
+    ⚠️ **No verdict under these charts, and that is deliberate.** OI is a
+    position somebody is carrying; a resting quote is an offer that can be
+    pulled the instant price arrives. `vob_minimal` §5d files the book as
+    Tier-3 display-only and gives it no vote in the regime, so a "STRONG
+    SUPPORT" line under a cumulative-bid chart would contradict the engine on
+    the same screen. The caveat rides in the caption instead.
+    """
+    try:
+        from .. import strike_history as SH
+        from . import strike_oi_series as SC
+    except Exception as err:
+        _dbg_caption(st, "strike_oi_series", f"unavailable: {err}")
+        return
+    try:
+        store = st.session_state.get("_strike_hist") or {"snaps": []}
+        # Unconditional basis line, before any conclusion — same rule as the OI
+        # panel: a panel that vanishes when `figures()` returns nothing reads as
+        # "never built".
+        st.caption(f"📖 Per-strike order book (ATM±{SH.WINGS}) · "
+                   + SC.depth_caption(store))
+        if not SH.read(store)["n"]:
+            return
+        drew = False
+        for measure, title in (("cum_bid", "Cumulative Call vs Put BID Qty"),
+                               ("cum_ask", "Cumulative Call vs Put ASK Qty")):
+            figs = SC.figures(store, measure)
+            if not figs:
+                continue
+            st.markdown(f"**📖 {title} · ATM±{SH.WINGS}**")
+            cols = st.columns(len(figs))
+            for col, (strike, _label, fig) in zip(cols, figs):
+                with col:
+                    st.plotly_chart(fig, use_container_width=True,
+                                    key=f"sdep_{measure}_{strike}",
+                                    config=FS_CHART_CONFIG)
+            drew = True
+        if not drew:
+            # ⚠️ Named, not blank. The chain endpoint does not always carry
+            # `top_bid_quantity` / `top_ask_quantity`, and a silent gap here
+            # would look identical to a feature that was never built.
+            st.caption("📖 …the snapshots carry no bid/ask columns to plot — "
+                       "the chain arrived without top-of-book quantities.")
+    except Exception as err:
+        _dbg_caption(st, "strike_oi_series", f"depth charts unavailable: {err}")
+
+
 def _strike_verdict(st, r) -> None:
     """One strike's read, in the words `strike_oi_series` produced.
 
@@ -1459,6 +1514,12 @@ def _charts_screen(st, fr: Dict[str, Any]) -> None:
 
     # 📊 Per-strike Call vs Put OI and ΔOI, ATM±2 — below the tabulation.
     _strike_oi_charts(st)
+
+    # 📖 The same five strikes' order book — cumulative bid and ask quantity.
+    # Directly under the OI charts because it is the other half of the same
+    # question: OI is what is already committed at the strike, the book is what
+    # is currently being offered there.
+    _strike_depth_charts(st)
 
     # 🏛 The layered POC picture on a daily axis — no candles, POC only.
     _poc_structure(st)
