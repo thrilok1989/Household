@@ -1921,9 +1921,10 @@ def _strike_selection(st, fr: Dict[str, Any]) -> Dict[str, Any]:
     dropped back to ATM rather than kept: validating a strike the app no longer
     fetches would report on stale candles.
 
-    ⚪ Not persisted to Supabase. `sql/022_vob_app_state.sql` exists and its
-    writer was removed in the V6 reduction, so a selection survives reruns but
-    not a restart. Declared rather than half-built.
+    ⚪ Not persisted to Supabase. The app does publish a snapshot to
+    `vob_app_state` every minute now, but `_selected_strikes` is not one of the
+    `_PERSIST_KEYS` it carries — a selection survives reruns, not a restart.
+    Declared rather than half-built.
     """
     ladder, atm = _strike_ladder(st, fr)
     if not ladder:

@@ -115,9 +115,10 @@ RESP_DISCONNECT = 50
 # ⚠️ The worker resolves these ITSELF rather than reading them from the app.
 # It has to: it is a separate always-on process, and a tick feed that goes
 # blind whenever the dashboard restarts is worse than one that costs a REST
-# call every few minutes. (The app-side bridge that would have carried them,
-# `_PERSIST_KEYS` → `vob_app_state`, is in any case never written — nothing
-# fills that table today.)
+# call every few minutes. (The app-side bridge that could carry them,
+# `_PERSIST_KEYS` → `vob_app_state`, now writes a row once a minute — but only
+# while the dashboard is up, which is the dependency this worker exists to
+# avoid.)
 WATCH_ATM = os.environ.get("WATCH_ATM", "").strip().upper()
 ATM_WINGS = int(os.environ.get("ATM_WINGS", "1") or 1)
 ATM_REFRESH_S = float(os.environ.get("ATM_REFRESH_S", "300") or 300)
