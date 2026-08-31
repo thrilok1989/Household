@@ -236,12 +236,19 @@ def _strike_depth_charts(st) -> None:
         if not SH.read(store)["n"]:
             return
         drew = False
-        for measure, title in (("cum_bid", "Cumulative Call vs Put BID Qty"),
-                               ("cum_ask", "Cumulative Call vs Put ASK Qty")):
+        for measure, title in (
+                ("cum_bid", "Cumulative Call vs Put BID Qty"),
+                ("cum_ask", "Cumulative Call vs Put ASK Qty"),
+                ("cum_imb", "Cumulative Call vs Put BID − ASK Imbalance")):
             figs = SC.figures(store, measure)
             if not figs:
                 continue
             st.markdown(f"**📖 {title} · ATM±{SH.WINGS}**")
+            # ⚠️ The imbalance charts are the only ones whose ZERO CROSSING is
+            # the reading, and an axis label cannot say which way is which. The
+            # sentence goes with the row it explains, not in a footnote.
+            if measure == "cum_imb":
+                st.caption(SC.IMBALANCE_NOTE)
             cols = st.columns(len(figs))
             for col, (strike, _label, fig) in zip(cols, figs):
                 with col:
