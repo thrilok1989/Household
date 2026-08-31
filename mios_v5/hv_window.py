@@ -28,6 +28,14 @@ a hedge or sold into strength. So this says WHERE the spike was and how big,
 and leaves direction to the reads that measure it (each pivot's own CLV
 buy/sell split, already in `formation_alerts`). Nothing here returns a bias.
 
+What the alert DOES do, since a bare magnitude left the reader to supply the
+rest: it names **the observation that would settle it**. A PUT-led window whose
+bars were sold into is put writing if price holds above the pivot and sellers
+winning if price breaks below — two readings of one fact, separated by
+something the reader can watch. `INTERPRETATION` holds those four sentences,
+and every one of them names a price reaction rather than an answer. Still no
+bias, still no vote; just the fork stated instead of implied.
+
 Pure: pivots in, a dict out. No app import, no session, no I/O, no pandas.
 """
 
@@ -35,6 +43,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+#: buy% above / below this reads as one-sided. The same 60/40 `flow_source`
+#: uses, imported rather than restated so one number cannot come to mean two
+#: things on two surfaces. (`flow_source` is pure and imports nothing from this
+#: package, so there is no cycle.)
+from .flow_source import BUY_DOMINANT, SELL_DOMINANT
 
 #: The rolling window, in seconds. Ten minutes — the desk's figure.
 WINDOW_S = 600.0
@@ -164,6 +178,16 @@ def totals(call_pivots: Optional[Sequence[Mapping[str, Any]]] = None,
     def _pct(b, tot):
         return round(b / tot * 100.0, 1) if tot > 0 else None
 
+    # ⚠️ `share` is the signed MARGIN between the sides, `lead_share` is the
+    # leader's actual fraction of the window. They are different numbers and the
+    # alert was printing the first while calling it the second: CALL 15.6L
+    # against PUT 39.6L gives share −0.43, so the message read "PUT is where the
+    # unusual volume is clustering (44% of the window's spike volume)" — a
+    # figure UNDER half, contradicting its own headline. PUT's share is 72%.
+    lead_share = None
+    if heavier in ("CALL", "PUT") and total > 0:
+        lead_share = (c_vol if heavier == "CALL" else p_vol) / total
+
     return {
         "call_vol": c_vol, "put_vol": p_vol,
         "call_n": c_n, "put_n": p_n,
@@ -174,6 +198,7 @@ def totals(call_pivots: Optional[Sequence[Mapping[str, Any]]] = None,
         "put_buy_pct": _pct(p_buy, p_buy + p_sell),
         "heavier": heavier,
         "share": share,
+        "lead_share": lead_share,
         "window_s": window_s,
     }
 
@@ -228,32 +253,100 @@ def summary(t: Mapping[str, Any]) -> str:
     return f"{mins}m high-volume pivots · {c} vs {p} — {tail}"
 
 
+#: (lead side, its flow lean) → what would RESOLVE the ambiguity, in words.
+#:
+#: ⚠️ Read what these say and what they refuse to say. Not one of them names a
+#: market direction; each names the OBSERVATION that would settle it — how price
+#: behaves at the pivot. The desk's own reading of the 39.6L PUT alert was
+#: exactly this: "PUT selling + price holding → put writing / support; PUT
+#: selling + price falling through → sellers dominating". The alert now carries
+#: that fork instead of leaving the reader to supply it.
+#:
+#: Kept as a table, not four branches, for the same reason `POSITION_READ` is:
+#: four scattered `if`s drift apart, and these must stay symmetric.
+INTERPRETATION = {
+    ("PUT", "sold"): ("PUT is being SOLD into. Price holding above the pivot "
+                      "reads as put writing — support. Price breaking below it "
+                      "reads as sellers winning."),
+    ("PUT", "bought"): ("PUT is being BOUGHT — hedging or bearish positioning, "
+                        "and those look identical here. Price holding above the "
+                        "pivot favours the hedge."),
+    ("CALL", "sold"): ("CALL is being SOLD into. Price stalling under the pivot "
+                       "reads as call writing — resistance. Price breaking "
+                       "above it reads as those writers being squeezed."),
+    ("CALL", "bought"): ("CALL is being BOUGHT — bullish positioning or a hedge "
+                         "against short stock, and those look identical here. "
+                         "Price holding above the pivot favours the former."),
+}
+
+
+def _lean(buy_pct: Any) -> Optional[str]:
+    """One side's flow → `"bought"`, `"sold"`, or `None` when it is not
+    one-sided enough to describe (and `None` when it was never measured)."""
+    b = _f(buy_pct)
+    if b is None:
+        return None
+    if b >= BUY_DOMINANT:
+        return "bought"
+    if b <= SELL_DOMINANT:
+        return "sold"
+    return None
+
+
+def _pivots(n: Any) -> str:
+    """"1 pivot" / "3 pivots" — the `pivot(s)` form read as a template that had
+    not been filled in."""
+    try:
+        c = int(n or 0)
+    except (TypeError, ValueError):
+        c = 0
+    return f"{c} pivot" if c == 1 else f"{c} pivots"
+
+
 def message(t: Mapping[str, Any]) -> str:
-    """The alert text for a lead change. HTML, for Telegram."""
+    """The alert text for a lead change. HTML, for Telegram.
+
+    Structured so the caveat cannot be missed: what happened, the numbers, each
+    side's flow on its own line, the leader's real share, and last — flagged —
+    what the reader still has to observe before any of it means a direction.
+    """
     lead = t.get("heavier")
     if lead not in ("CALL", "PUT"):
         return ""
+    other = "PUT" if lead == "CALL" else "CALL"
     mins = int(_f(t.get("window_s")) or WINDOW_S) // 60
     ball = "🟢" if lead == "CALL" else "🔴"
-    share = _f(t.get("share"))
-    pct = (f" ({abs(share) * 100:.0f}% of the window's spike volume)"
-           if share is not None else "")
-    # ⚠️ The buy/sell figures are CLV estimates from 1-minute OHLCV, not a count
-    # of buy versus sell trades — the text says so rather than printing bare
-    # percentages that read as executions.
+    lo, hi = ("call", "put") if lead == "CALL" else ("put", "call")
+
+    # ⚠️ The LEADER'S share of the window, not the margin between the sides. The
+    # old text printed `abs(share)` under this label, so a PUT side holding 72%
+    # of the volume was announced as "44% of the window's spike volume".
+    ls = _f(t.get("lead_share"))
+    share_line = ("" if ls is None else
+                  f"\n{lead} carries {ls * 100:.0f}% of the window's spike volume.")
+
+    # ⚠️ CLV estimates from 1-minute OHLCV, not a count of buy versus sell
+    # trades. Said once, at the head of the block, so both lines are covered.
     cb, pb = _f(t.get("call_buy_pct")), _f(t.get("put_buy_pct"))
     if cb is None and pb is None:
         flow = ""
     else:
-        cs = "—" if cb is None else f"{cb:.0f}% buy / {100 - cb:.0f}% sell"
-        ps = "—" if pb is None else f"{pb:.0f}% buy / {100 - pb:.0f}% sell"
-        flow = (f"\nFlow on those bars — CALL {cs}, PUT {ps} "
-                f"(est., CLV from 1m bars, not tick data).")
+        def _row(name, v):
+            return (f"\n• {name} — "
+                    + ("not measured" if v is None
+                       else f"{v:.0f}% buy / {100 - v:.0f}% sell"))
+        flow = ("\nEstimated bar flow (CLV from 1m bars, not tick data):"
+                + _row("CALL", cb) + _row("PUT", pb))
+
+    note = INTERPRETATION.get((lead, _lean(pb if lead == "PUT" else cb)))
+    tail = (" " + note) if note else ""
+
     return (
-        f"{ball} 📊 <b>{lead} side now carrying the high volume</b>\n"
-        f"Over the last {mins} minutes: CALL {_vol(t.get('call_vol'))} across "
-        f"{t.get('call_n', 0)} pivot(s), PUT {_vol(t.get('put_vol'))} across "
-        f"{t.get('put_n', 0)}.{flow}\n"
-        f"{lead} is where the unusual volume is clustering{pct} — a magnitude, "
-        f"not a direction."
+        f"{ball} 📊 <b>{lead} side is carrying the unusual volume</b>\n"
+        f"Over the last {mins} minutes: {lead} {_vol(t.get(lo + '_vol'))} across "
+        f"{_pivots(t.get(lo + '_n'))}, against {other} "
+        f"{_vol(t.get(hi + '_vol'))} across {_pivots(t.get(hi + '_n'))}."
+        f"{flow}{share_line}\n"
+        f"⚠️ This says WHERE the unusual activity is, not what it means — a "
+        f"magnitude, not a direction.{tail}"
     )

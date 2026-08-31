@@ -155,8 +155,21 @@ def test_the_message_reports_both_sides_buy_sell_as_an_estimate():
     t = W.totals([_p(bar_vol=900000.0, buy=700000.0, sell=200000.0)],
                  [_p(bar_vol=100000.0, buy=20000.0, sell=80000.0)], now=_NOW)
     m = W.message(t)
-    assert "CALL 78% buy" in m and "PUT 20% buy" in m
-    assert "est." in m and "not tick data" in m
+    assert "• CALL — 78% buy / 22% sell" in m
+    assert "• PUT — 20% buy / 80% sell" in m
+    assert "CLV from 1m bars, not tick data" in m
+
+
+def test_a_side_whose_flow_was_never_measured_says_so_on_its_own_line():
+    """⚠️ Not omitted, and not shown as 50/50 — the reader must be able to see
+    which of the two lines is missing."""
+    # `_p` fills an even split unless told otherwise; a real unmeasured bar has
+    # neither field, so they are dropped outright.
+    t = W.totals([_p(bar_vol=900000.0, bar_buy=None, bar_sell=None)],
+                 [_p(bar_vol=100000.0, buy=20000.0, sell=80000.0)], now=_NOW)
+    m = W.message(t)
+    assert "• CALL — not measured" in m
+    assert "• PUT — 20% buy" in m
 
 
 def test_the_summary_shows_each_sides_split():
@@ -219,6 +232,128 @@ def test_no_message_without_a_clear_lead():
     assert W.message(W.totals([], [], now=_NOW)) == ""
     assert W.message(W.totals([_p(bar_vol=51000.0)], [_p(bar_vol=49000.0)],
                               now=_NOW)) == ""
+
+
+# ── the leader's share, which is not the margin ────────────────────────
+
+def test_the_lead_share_is_the_leaders_fraction_not_the_margin():
+    """⚠️ THE BUG. `share` is the signed margin between the sides; the message
+    printed `abs(share)` under the label "% of the window's spike volume". With
+    CALL 15.6L against PUT 39.6L that read "PUT is where the unusual volume is
+    clustering (44%)" — a figure under half, contradicting its own headline.
+    PUT's share is 72%."""
+    t = W.totals([_p(bar_vol=1_560_000.0)], [_p(bar_vol=3_960_000.0)], now=_NOW)
+    assert t["heavier"] == "PUT"
+    assert round(t["share"], 3) == -0.435
+    assert round(t["lead_share"], 3) == 0.717
+    assert "PUT carries 72% of the window's spike volume." in W.message(t)
+
+
+def test_the_share_printed_is_always_more_than_half():
+    """The leader holds the larger half by definition — any figure below 50%
+    under that label is the old bug back."""
+    import re
+    for c, p in ((9e5, 1e5), (1e5, 9e5), (6e5, 4e5), (4e5, 6e5)):
+        m = W.message(W.totals([_p(bar_vol=c)], [_p(bar_vol=p)], now=_NOW))
+        pct = int(re.search(r"carries (\d+)% of the window", m).group(1))
+        assert pct >= 50, m
+
+
+def test_no_lead_no_share():
+    for t in (W.totals([], [], now=_NOW),
+              W.totals([_p(bar_vol=51000.0)], [_p(bar_vol=49000.0)], now=_NOW)):
+        assert t["lead_share"] is None
+
+
+# ── what would resolve the ambiguity ───────────────────────────────────
+
+def test_a_sold_put_lead_names_the_two_readings_and_what_separates_them():
+    """The desk's own reading of the 39.6L alert, now carried by the alert:
+    PUT selling with price holding is put writing; PUT selling with price
+    breaking down is sellers winning."""
+    t = W.totals([_p(bar_vol=1_560_000.0, buy=1_513_200.0, sell=46_800.0)],
+                 [_p(bar_vol=3_960_000.0, buy=118_800.0, sell=3_841_200.0)],
+                 now=_NOW)
+    m = W.message(t)
+    assert "put writing" in m and "support" in m
+    assert "breaking below" in m
+
+
+def test_a_sold_call_lead_reads_as_the_mirror():
+    t = W.totals([_p(bar_vol=3_960_000.0, buy=118_800.0, sell=3_841_200.0)],
+                 [_p(bar_vol=1_560_000.0, buy=1_513_200.0, sell=46_800.0)],
+                 now=_NOW)
+    m = W.message(t)
+    assert "call writing" in m and "resistance" in m
+
+
+def test_a_lead_with_mixed_flow_gets_no_interpretation_at_all():
+    """⚠️ 50/50 does not distinguish writing from buying, so there is no fork
+    to offer. Silence beats a sentence that fits either case."""
+    t = W.totals([_p(bar_vol=300_000.0, buy=150_000.0, sell=150_000.0)],
+                 [_p(bar_vol=900_000.0, buy=450_000.0, sell=450_000.0)],
+                 now=_NOW)
+    m = W.message(t)
+    assert "put writing" not in m and "hedging" not in m
+    assert "not a direction" in m, "the caveat still has to be there"
+
+
+def test_the_interpretation_reads_the_LEADING_sides_flow():
+    """⚠️ The other side's split is shown but must not drive the fork — the
+    alert is about where the volume clustered."""
+    # PUT leads and is BOUGHT; CALL happens to be sold.
+    t = W.totals([_p(bar_vol=1_000_000.0, buy=50_000.0, sell=950_000.0)],
+                 [_p(bar_vol=3_000_000.0, buy=2_850_000.0, sell=150_000.0)],
+                 now=_NOW)
+    m = W.message(t)
+    assert "PUT is being BOUGHT" in m
+    assert "put writing" not in m
+
+
+def test_every_interpretation_refuses_to_name_a_market_direction():
+    """⚠️ THE RULE for this module, held over the words themselves. Each entry
+    names the OBSERVATION that would settle it — never the answer."""
+    for key, text in W.INTERPRETATION.items():
+        low = text.lower()
+        assert "price" in low, f"{key} does not say what to watch"
+        for banned in ("go long", "go short", "buy the", "sell the",
+                       "bullish signal", "bearish signal", "expect "):
+            assert banned not in low, f"{key} tells the reader what to do"
+
+
+def test_the_table_covers_both_sides_and_both_leans():
+    """Four cases, symmetric — four scattered branches drift apart."""
+    assert set(W.INTERPRETATION) == {("PUT", "sold"), ("PUT", "bought"),
+                                     ("CALL", "sold"), ("CALL", "bought")}
+
+
+def test_the_lean_thresholds_are_the_ones_the_rest_of_the_app_uses():
+    """One number must not mean two things on two panels."""
+    from mios_v5 import flow_source as F
+    assert (W.BUY_DOMINANT, W.SELL_DOMINANT) == (F.BUY_DOMINANT, F.SELL_DOMINANT)
+    assert W._lean(60.0) == "bought" and W._lean(40.0) == "sold"
+    assert W._lean(59.9) is None and W._lean(None) is None
+
+
+# ── the small wording things ───────────────────────────────────────────
+
+def test_one_pivot_is_not_written_as_one_pivots():
+    """`pivot(s)` read as a template that had not been filled in."""
+    m = W.message(W.totals([_p(bar_vol=9e5)], [_p(bar_vol=1e5)], now=_NOW))
+    assert "1 pivot," in m and "pivot(s)" not in m
+
+
+def test_several_pivots_are_plural():
+    m = W.message(W.totals([_p(bar_vol=9e5), _p(bar_vol=9e5)],
+                           [_p(bar_vol=1e5)], now=_NOW))
+    assert "2 pivots" in m
+
+
+def test_the_leading_side_is_named_first():
+    """The headline says PUT; the numbers should not open with CALL."""
+    m = W.message(W.totals([_p(bar_vol=1e5)], [_p(bar_vol=9e5)], now=_NOW))
+    body = m.split("\n")[1]
+    assert body.index("PUT") < body.index("CALL")
 
 
 # ── purity, and no direction anywhere ──────────────────────────────────
