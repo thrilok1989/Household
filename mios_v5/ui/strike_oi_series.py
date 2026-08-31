@@ -47,7 +47,34 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .. import strike_history as SH
 
+#: The OI charts' pairing, and it is LEVEL semantics rather than side
+#: semantics: call OI caps price, so it is drawn red for resistance, and put OI
+#: supports it, so it is drawn green. The verdict printed under each OI chart
+#: says exactly that ("STRONG RESISTANCE", "STRONG SUPPORT"), and the line
+#: colours match the words underneath them.
 CE_COLOUR, PE_COLOUR = "#ff4444", "#00cc66"
+
+#: The depth charts' pairing, and it is SIDE semantics: green is the call side,
+#: red is the put side. The desk asked for this, and the reason it is coherent
+#: is that these charts carry NO level verdict to agree with — there is nothing
+#: under them saying "resistance" for the red line to mean.
+#:
+#: ⚠️ It does mean the CALL line is red on the OI row and green on the depth row
+#: directly beneath. Each chart stays internally consistent because the coloured
+#: CE/PE figures in its own title are drawn from the same pair as its lines, and
+#: every chart names its measure in the heading above it.
+CALL_COLOUR, PUT_COLOUR = "#00cc66", "#ff4444"
+
+#: measure → (call line colour, put line colour). Keyed for EVERY measure with
+#: no default, so a measure added without a decision about its colours fails
+#: `test_every_measure_names_its_colours` rather than silently inheriting a
+#: pairing that means something else.
+MEASURE_COLOURS: Dict[str, Tuple[str, str]] = {
+    "oi":      (CE_COLOUR, PE_COLOUR),
+    "chg":     (CE_COLOUR, PE_COLOUR),
+    "cum_bid": (CALL_COLOUR, PUT_COLOUR),
+    "cum_ask": (CALL_COLOUR, PUT_COLOUR),
+}
 
 #: OI direction × price direction → what the position is doing. One map, so the
 #: four cases cannot drift apart across CE and PE.
@@ -232,6 +259,13 @@ def figures(store: Any, measure: str = "oi"):
     if spec is None:
         return []
     ce_f, pe_f, div, unit, cumulate = spec
+    # ⚠️ Per measure, not module-wide. The OI charts pair red with the CALL side
+    # because red means RESISTANCE there and a verdict underneath says so; the
+    # depth charts have no such verdict and pair green with the CALL side.
+    # Everything below — lines, markers and the coloured figures in the title —
+    # reads from this one pair, so a chart cannot end up with a green line and a
+    # red number for the same side.
+    c_colour, p_colour = MEASURE_COLOURS[measure]
     window = SH.strikes(store)
     if not window:
         return []
@@ -254,7 +288,7 @@ def figures(store: Any, measure: str = "oi"):
         # rather than one honest observation.
         lone = max(len(ce["v"]), len(pe["v"])) < 2
         fig = go.Figure()
-        for s, name, colour in ((ce, "Call", CE_COLOUR), (pe, "Put", PE_COLOUR)):
+        for s, name, colour in ((ce, "Call", c_colour), (pe, "Put", p_colour)):
             if s["v"]:
                 fig.add_trace(go.Scatter(
                     x=[_ts(t) for t in s["t"]],
@@ -278,10 +312,10 @@ def figures(store: Any, measure: str = "oi"):
         fig.update_layout(
             title=dict(
                 text=(f"<b>{lab.get(k, '')}</b> · ₹{k}<br>"
-                      f"<span style='color:{CE_COLOUR}'>CE "
+                      f"<span style='color:{c_colour}'>CE "
                       f"{sign}{last_ce:.1f}{suffix}</span>"
                       f"<span style='color:#7c8798'>  ·  </span>"
-                      f"<span style='color:{PE_COLOUR}'>PE "
+                      f"<span style='color:{p_colour}'>PE "
                       f"{sign_pe}{last_pe:.1f}{suffix}</span>"),
                 font=dict(size=12), x=0.5, xanchor="center"),
             template="plotly_dark", height=280, showlegend=False,
