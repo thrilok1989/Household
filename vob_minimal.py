@@ -14748,6 +14748,51 @@ _PERSIST_KEYS = (
     '_discord_outbox', '_market_picture', '_news_bias', '_leg_bias_summary',
 )
 
+#: ⚠️ Four of the nineteen keys above have a producer in this file today:
+#: `_zone_prev_classification` (6443), `_market_picture` (8651),
+#: `_leg_bias_summary` (10826) and `_news_bias` (6166). The other fifteen are
+#: read with a default somewhere, or nothing at all — `_push_discord_outbox`
+#: has been a no-op since alerts moved to `market_events`, so `_discord_outbox`
+#: is never filled either. The list is left intact because a key acquiring a
+#: producer later should publish without further wiring; `app_state.snapshot`
+#: omits the ones session state does not hold rather than writing them as null.
+
+
+def _publish_app_state():
+    """📤 Push the session snapshot to `vob_app_state` — once a minute.
+
+    The one step that was missing. `_PERSIST_KEYS` named what should persist,
+    `sql/022` created the table, and `discord_bot.load_payload()` read the
+    newest row — but nothing in this app ever wrote one, so every `!picture`,
+    `!bias` and `!news` answered "not available yet — is the app running?"
+    while the app was running. The producers write to session state; the
+    consumer reads a table; this is the join.
+
+    Called at the end of the cycle, after `compute_market_picture`,
+    `compute_news_bias` and the 14-leg summary have all published, so the row
+    carries THIS cycle's numbers rather than the previous one's.
+
+    ⚠️ The stamp is taken before the write, not after. Stamping only on success
+    is what had `compute_news_bias` fetching Google News four times a render —
+    a Supabase that is refusing writes would otherwise be retried every 20
+    seconds, all session.
+    """
+    try:
+        from mios_v5 import app_state as _as
+        _now = time.time()
+        if not _as.due(st.session_state.get('_app_state_last_push'), _now):
+            return
+        _db = st.session_state.get('_db_obj')
+        if _db is None:
+            return
+        payload = _as.snapshot(st.session_state, _PERSIST_KEYS)
+        if not payload:
+            return
+        st.session_state['_app_state_last_push'] = _now
+        st.session_state['_app_state_published'] = _db.save_app_state(payload)
+    except Exception:
+        pass
+
 
 def _push_discord_outbox(text, flush_s=25):
     """Queue an alert for the standalone Discord bot (discord_bot.py).
@@ -17643,6 +17688,13 @@ def _render_main_analyzer():
         pass
     try:
         _track_my_trade()
+    except Exception:
+        pass
+    # 📤 Publish the session snapshot LAST — the Market Picture, the news bias
+    # and the 14-leg summary have all been written by now, so the row the
+    # standalone Discord bot reads carries this cycle's numbers.
+    try:
+        _publish_app_state()
     except Exception:
         pass
 

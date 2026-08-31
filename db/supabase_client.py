@@ -1890,6 +1890,42 @@ class SupabaseDB:
         except Exception:
             return []
 
+    # ── 📤 App state — the standalone Discord bot's only window in ──────
+    #: One row, overwritten. `sql/022_vob_app_state.sql` keys on `id`, and
+    #: `db/retention.py` protects the table precisely because it is a single
+    #: upserted row rather than history.
+    APP_STATE_ID = 'default'
+
+    def save_app_state(self, payload, state_id=None):
+        """Publish the session snapshot `discord_bot.py` answers commands from.
+
+        ⚠️ This write is what `_PERSIST_KEYS` had been promising and nothing
+        delivered. The table, the key list and the bot's `load_payload()` all
+        existed; no row was ever written, so `!picture` replied "not available
+        yet — is the app running?" for a running app. Build the payload with
+        `mios_v5.app_state.snapshot` — a value JSONB cannot hold fails the
+        whole write, not just its own key.
+
+        Returns True when the row reached Supabase, so a caller can tell a
+        published cycle from a swallowed one.
+        """
+        if not isinstance(payload, dict) or not payload:
+            return False
+        record = {
+            'id': str(state_id or self.APP_STATE_ID),
+            'payload': payload,
+            'updated_at': datetime.now(IST).isoformat(),
+        }
+        try:
+            self.client.table('vob_app_state').upsert(
+                record, on_conflict='id',
+                returning=self._WRITE_RETURNING).execute()
+            self.is_connected = True
+            return True
+        except Exception:
+            self.is_connected = False
+            return False
+
     # ── 🏛️ Engine State (Stage 1-41 scoring snapshot per pipeline pass) ──
     def insert_engine_state(self, row):
         """Store one pipeline pass's flattened engine scores + full snapshot."""

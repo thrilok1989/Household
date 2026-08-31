@@ -1110,9 +1110,10 @@ than validating against candles the app no longer has. A wing strike with no leg
 entry reports `UNKNOWN` S/R rather than borrowing the ATM's — substituting a
 neighbour would grade the wrong option with nothing on screen to say so.
 
-⚪ **Not persisted to Supabase.** `sql/022_vob_app_state.sql` exists and its
-writer went in the V6 reduction, so a selection survives reruns but not a
-restart. Declared rather than half-built.
+⚪ **Not persisted to Supabase.** The app publishes a session snapshot to
+`vob_app_state` every minute, but `_selected_strikes` is not among the
+`_PERSIST_KEYS` it carries — a selection survives reruns, not a restart.
+Declared rather than half-built.
 
 ### Stage 71.85 — Premium LTP Behaviour
 
@@ -1847,13 +1848,26 @@ per-key cooldowns, typically 600–1800s. Every send is logged via
 `sql/027_learning.sql` is **append-only**. Nothing is ever updated, so replay
 and backtesting show **what was known at the time**.
 
-## 11.3 · State save/restore
+## 11.3 · State publish
 
-- `save_app_state()` — throttled to once per 300s, writes composites to
-  `vob_app_state`
-- `restore_app_state()` — once per session, so a page refresh doesn't lose
-  history
-- **The mobile view reads `vob_app_state` and nothing else**
+- `_publish_app_state()` (`vob_minimal`) — throttled to once per 60s, snapshots
+  the `_PERSIST_KEYS` session state holds and upserts one row to
+  `vob_app_state` via `SupabaseDB.save_app_state`. `mios_v5/app_state.py` owns
+  the JSON-safety and the cadence; the writer owns the row.
+- **The one consumer is `discord_bot.py`** — a separate process that cannot see
+  `session_state`, answering `!picture` / `!bias` / `!news` out of
+  `_market_picture`, `_leg_bias_summary` and `_news_bias`.
+
+⚠️ There is **no restore**. The row is published for another process to read,
+not read back on startup — re-seeding a restarted session with old alert-dedup
+and latch state would resurrect decisions the app had already made.
+
+⚠️ For most of this app's life there was **no writer at all**: `_PERSIST_KEYS`,
+`sql/022` and the bot's `load_payload()` all existed and nothing joined them,
+so every `!picture` answered *"not available yet — is the app running?"* while
+the app was running. `test_app_state_bridge.py` runs the real producer keys
+through the real writer into the real bot functions and is what keeps that from
+recurring.
 
 ---
 
@@ -1958,10 +1972,10 @@ Run every migration in `sql/` against your Supabase project, in numeric order.
 |---|---|---|
 | **Full** | default | everything |
 | **Lite** | sidebar radio | curated 6-block stack. **Compute, alerts and DB writes are identical** — only display changes |
-| **Mobile** | `?view=mobile` | reads `vob_app_state` from Supabase, `st.stop()`s. **No engine runs** |
+| ~~**Mobile**~~ | ~~`?view=mobile`~~ | **gone** — no query-param handling remains in `vob_minimal.py` |
 
-Bookmark `…streamlit.app/?view=mobile` on a phone. It never touches the live
-desktop engine.
+The mobile page was removed. `vob_app_state` is still written (§11.3), but its
+only reader today is the standalone `discord_bot.py`.
 
 ## 13.3 · Troubleshooting
 
