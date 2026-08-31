@@ -123,11 +123,44 @@ def test_each_figure_draws_call_and_put():
     assert names == {"Call", "Put"}
 
 
-def test_the_call_and_put_colours_are_the_ones_the_oi_charts_use():
-    """One strike's CE line must not be red here and green next door."""
-    fig = SC.figures(_store(), "cum_ask")[0][2]
-    by = {t.name: t.line.color for t in fig.data}
-    assert by["Call"] == SC.CE_COLOUR and by["Put"] == SC.PE_COLOUR
+def test_call_is_green_and_put_is_red_on_the_depth_charts():
+    """⚠️ The OPPOSITE pairing to the OI charts, and deliberately so. There red
+    means RESISTANCE — call OI caps price — and a verdict printed underneath
+    says exactly that, so the line colour matches the words. These charts carry
+    no verdict for a colour to agree with, so the desk's side convention applies:
+    green is the call side, red is the put side."""
+    for measure in ("cum_bid", "cum_ask"):
+        fig = SC.figures(_store(), measure)[0][2]
+        by = {t.name: t.line.color for t in fig.data}
+        assert by["Call"] == SC.CALL_COLOUR == "#00cc66", measure
+        assert by["Put"] == SC.PUT_COLOUR == "#ff4444", measure
+
+
+def test_the_oi_charts_keep_the_level_pairing():
+    """The other half of the same decision — changing one row must not change
+    the other."""
+    for measure in ("oi", "chg"):
+        fig = SC.figures(_store(), measure)[0][2]
+        by = {t.name: t.line.color for t in fig.data}
+        assert by["Call"] == SC.CE_COLOUR == "#ff4444", measure
+        assert by["Put"] == SC.PE_COLOUR == "#00cc66", measure
+
+
+def test_the_two_pairings_really_are_opposites():
+    assert (SC.CALL_COLOUR, SC.PUT_COLOUR) == (SC.PE_COLOUR, SC.CE_COLOUR)
+
+
+def test_a_charts_title_figures_match_its_own_lines():
+    """⚠️ The legend is OFF — the coloured CE/PE numbers in the title are what
+    identify the two lines. A title drawn from the module constants while the
+    lines were drawn per-measure would label the green line with a red number,
+    which is worse than either convention on its own."""
+    for measure in ("oi", "chg", "cum_bid", "cum_ask"):
+        fig = SC.figures(_store(), measure)[0][2]
+        text = fig.layout.title.text
+        by = {t.name: t.line.color for t in fig.data}
+        assert f"color:{by['Call']}'>CE " in text, measure
+        assert f"color:{by['Put']}'>PE " in text, measure
 
 
 def test_the_plotted_value_is_the_running_total_not_the_reading():
@@ -150,7 +183,7 @@ def test_the_title_carries_the_latest_totals_in_side_colour():
     are what identifies the two lines, exactly as on the OI charts."""
     fig = SC.figures(_store(), "cum_bid")[0][2]
     text = fig.layout.title.text
-    assert SC.CE_COLOUR in text and SC.PE_COLOUR in text
+    assert SC.CALL_COLOUR in text and SC.PUT_COLOUR in text
     assert "CE " in text and "PE " in text
 
 
@@ -195,6 +228,14 @@ def test_every_measure_names_its_unit_and_a_divisor_that_matches():
     for measure, (_c, _p, div, unit, _cum) in SC.MEASURES.items():
         assert div > 0
         assert ("(L)" in unit) == (div >= 100_000.0), measure
+
+
+def test_every_measure_names_its_colours():
+    """⚠️ No default. A measure added without a decision about its pairing would
+    otherwise inherit one that means something else."""
+    assert set(SC.MEASURE_COLOURS) == set(SC.MEASURES)
+    for measure, pair in SC.MEASURE_COLOURS.items():
+        assert len(pair) == 2 and pair[0] != pair[1], measure
 
 
 def test_only_the_bid_and_ask_measures_cumulate():
