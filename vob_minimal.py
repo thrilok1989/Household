@@ -763,6 +763,15 @@ FORMATION_ALERTS_DEFAULT = True
 HVP_LEVEL_LINE_DEFAULT = True
 HVP_FLOW_LINE_DEFAULT = True
 
+# Which Telegram account the formation notes go to. FALSE = the main bot.
+#
+# ⚠️ This used to be hardcoded to the second account, and that is how the notes
+# came to be "missing": they were arriving the whole time, in a chat the owner
+# was not watching, with nothing on screen saying so. The default is the main
+# bot — where the messages are actually read — and the alert bot is one
+# checkbox away rather than one commit away.
+FORMATION_ALERT_BOT_DEFAULT = False
+
 # ── Leg LTP → HVP-line touch alert ─────────────────────────────────────
 # Telegram when an option LTP (call or put) comes within ±5 of one of ITS OWN
 # high-volume-point lines. Latched per line + a cooldown ("sleep") so a price
@@ -1081,17 +1090,27 @@ def send_telegram_alert_bot(message):
 
 
 def send_formation_alert(message):
-    """📐 Formation notes (new HVP / VOB) → the SECOND Telegram account.
+    """📐 Formation notes (new HVP / VOB) → whichever Telegram account is picked.
 
-    The owner asked for these off the main bot. Only the Telegram destination
-    moved: Discord still gets its copy exactly as before, and the seed/diff
-    anti-spam rule in `_notify_chart_formations` is untouched.
+    ⚠️ This was a HARDCODED move to the second account, and it is why the notes
+    went missing. The owner asked for them off the main bot in August; months
+    later they read as "I stopped getting this message", because nothing on
+    screen said where they had gone and the main chat simply went quiet. A
+    destination that can only be changed by editing the source is a destination
+    nobody can find.
 
-    When the alert bot is unconfigured the main bot carries it — a message the
-    owner asked for should not vanish because a secret is missing. In that case
-    `send_telegram_message_sync` posts to Discord itself, so this does not.
+    So it is a switch now, defaulting BACK to the main bot — where the owner
+    is actually reading — and the second account stays one checkbox away.
+    Discord gets its copy either way, and the seed/diff anti-spam rule in
+    `_notify_chart_formations` is untouched by any of this.
+
+    When the alert bot is picked but unconfigured, the main bot carries the
+    message: an asked-for note must not vanish on a missing secret. In that
+    case `send_telegram_message_sync` posts to Discord itself, so this does not.
     """
-    if not TELEGRAM_ALERT_BOT_TOKEN or not TELEGRAM_ALERT_CHAT_ID:
+    use_alert_bot = st.session_state.get('_formation_alert_bot_on',
+                                         FORMATION_ALERT_BOT_DEFAULT)
+    if not use_alert_bot or not TELEGRAM_ALERT_BOT_TOKEN or not TELEGRAM_ALERT_CHAT_ID:
         return send_telegram_message_sync(message, force=True)
     try:
         send_discord_message(message, force=True)
@@ -16883,6 +16902,14 @@ def _render_main_analyzer():
                  "this off gives the original message exactly. The bias ball "
                  "still follows the measurement — this hides the sentence, "
                  "not the reading.")
+        st.session_state["_formation_alert_bot_on"] = st.sidebar.checkbox(
+            "　└ send to the ALERT bot (2nd account)",
+            value=FORMATION_ALERT_BOT_DEFAULT,
+            help="OFF (default) sends these to your MAIN Telegram bot. ON "
+                 "sends them to the second account instead — the OI-wall "
+                 "touches go there regardless. Discord gets its copy either "
+                 "way. Falls back to the main bot if the alert bot's token or "
+                 "chat id is not configured.")
 
     # ── 📍 option LTP reaching its HVP line (±5) → Telegram ────────────
     st.session_state["_leg_hvp_touch_on"] = st.sidebar.checkbox(
