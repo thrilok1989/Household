@@ -747,6 +747,22 @@ POC_SHIFT_ALERTS_DEFAULT = False
 #    replayed. `_notify_chart_formations` owns the memory and the send.
 FORMATION_ALERTS_DEFAULT = True
 
+# The HVP note's body is two independent sentences and each has its own switch,
+# because the desk wants both and wants either droppable:
+#
+#   LEVEL  "A high-volume swing high formed at ₹144.30 on 6.9× volume —
+#          a fresh level to watch."     ← the original wording
+#   FLOW   "Flow looks BUY-led — est. 83% buy / 17% sell (CLV from 1m bars,
+#          not tick data)."             ← added later
+#
+# ⚠️ The flow estimate was originally added as a REPLACEMENT for the level
+# sentence, which silently dropped the only line saying what the alert is for.
+# Both are on by default now; turning either off changes the alert's VERBOSITY,
+# never its meaning — the bias ball keeps following the measured split even
+# when the flow sentence is hidden (`formation_alerts.hvp_message`).
+HVP_LEVEL_LINE_DEFAULT = True
+HVP_FLOW_LINE_DEFAULT = True
+
 # ── Leg LTP → HVP-line touch alert ─────────────────────────────────────
 # Telegram when an option LTP (call or put) comes within ±5 of one of ITS OWN
 # high-volume-point lines. Latched per line + a cooldown ("sleep") so a price
@@ -12027,11 +12043,27 @@ def _notify_chart_formations():
         # regardless — so turning it back on does not replay the day's blocks.
         _vob_on = st.session_state.get('_vob_formation_on',
                                        VOB_FORMATION_ALERTS_DEFAULT)
+        # The two body sentences, each independently switchable. Read ONCE here
+        # rather than inside the loop so every chart's note in one cycle is
+        # worded the same way.
+        #
+        # ⚠️ Only the wording is affected. The signature, the seen-set and the
+        # seed/diff rule are untouched, so toggling these cannot make a pivot
+        # re-alert — a formatting switch must not become an anti-spam hole.
+        _level_on = st.session_state.get('_hvp_level_line_on',
+                                         HVP_LEVEL_LINE_DEFAULT)
+        _flow_on = st.session_state.get('_hvp_flow_line_on',
+                                        HVP_FLOW_LINE_DEFAULT)
+
+        def _hvp_msg(chart, label, pivot, dp):
+            return _fa.hvp_message(chart, label, pivot, dp,
+                                   level_line=_level_on, flow_line=_flow_on)
+
         for chart in _fa.CHARTS:
             prof = profiles.get(chart) or {}
             dp = 0 if chart == 'NIFTY' else 2
             _emit('hvp', chart, prof.get('hv_points'),
-                  _fa.hvp_signature, _fa.hvp_message, dp)
+                  _fa.hvp_signature, _hvp_msg, dp)
             if _vob_on and chart in ('CALL', 'PUT'):
                 zones = vob_store.get(labels.get(chart)) or []
                 _emit('vob', chart, zones,
@@ -16810,6 +16842,22 @@ def _render_main_analyzer():
              "already exists when the app loads is not re-announced. Discord "
              "gets its copy as before. Falls back to the main bot if the alert "
              "bot is unconfigured.")
+    # The two body sentences, switchable separately. Nested under the master
+    # toggle because neither means anything when the alert itself is off.
+    if st.session_state["_formation_alerts_on"]:
+        st.session_state["_hvp_level_line_on"] = st.sidebar.checkbox(
+            "　└ level line (“a fresh level to watch”)",
+            value=HVP_LEVEL_LINE_DEFAULT,
+            help="The original sentence: where the pivot formed, at what "
+                 "volume multiple, and that it is a fresh level. Turning this "
+                 "off leaves the headline and the flow estimate.")
+        st.session_state["_hvp_flow_line_on"] = st.sidebar.checkbox(
+            "　└ flow estimate line (buy % / sell %)",
+            value=HVP_FLOW_LINE_DEFAULT,
+            help="The CLV buy/sell split measured on the pivot bar. Turning "
+                 "this off gives the original message exactly. The bias ball "
+                 "still follows the measurement — this hides the sentence, "
+                 "not the reading.")
 
     # ── 📍 option LTP reaching its HVP line (±5) → Telegram ────────────
     st.session_state["_leg_hvp_touch_on"] = st.sidebar.checkbox(

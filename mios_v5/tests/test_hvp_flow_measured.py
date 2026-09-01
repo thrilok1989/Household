@@ -198,3 +198,205 @@ def test_the_dedup_key_includes_the_leg_label(tree):
     was unseen and fired at once."""
     src = _SRC.read_text()
     assert 'key = f"{kind}:{chart}:{labels.get(chart) or chart}"' in src
+
+
+# ── 5 · BOTH sentences, not one instead of the other ───────────────────
+#
+# The flow estimate arrived as a REPLACEMENT for the "a fresh level to watch"
+# tail, which silently dropped the only sentence saying what the alert is FOR.
+# The desk asked for both back. They do different jobs — one names the level,
+# the other describes the volume that built it — so neither substitutes for
+# the other and a future edit must not trade one away for the other again.
+
+def test_a_measured_pivot_keeps_the_fresh_level_line():
+    m = FA.hvp_message("CALL", "ATM CE 24150",
+                       _pivot(side="HIGH", buy_pct=83.0, sell_pct=17.0,
+                              dominant="buyers"), decimals=2)
+    assert "a fresh level to watch" in m
+
+
+def test_a_measured_pivot_still_carries_the_flow_estimate():
+    m = FA.hvp_message("CALL", "ATM CE 24150",
+                       _pivot(side="HIGH", buy_pct=83.0, sell_pct=17.0,
+                              dominant="buyers"), decimals=2)
+    assert "83% buy / 17% sell" in m
+    assert "CLV from 1m bars, not tick data" in m
+
+
+def test_the_level_line_comes_before_the_flow_line():
+    """The level is the event; the flow describes it. Reversing them buries
+    what the alert is announcing under a qualifier."""
+    m = FA.hvp_message("CALL", "ATM CE 24150",
+                       _pivot(side="HIGH", buy_pct=83.0, dominant="buyers"),
+                       decimals=2)
+    assert m.index("a fresh level to watch") < m.index("Flow looks")
+
+
+def test_the_two_sentences_are_on_their_own_lines():
+    m = FA.hvp_message("CALL", "ATM CE 24150",
+                       _pivot(side="HIGH", buy_pct=83.0, dominant="buyers"),
+                       decimals=2)
+    lines = [ln for ln in m.split("\n") if ln.strip()]
+    assert len(lines) == 3, lines          # headline, level, flow
+    assert "fresh level to watch" in lines[1]
+    assert lines[2].startswith("Flow looks")
+
+
+def test_the_unmeasured_fallback_keeps_saying_so():
+    """⚠️ Both branches carry the level line now, so the ONLY thing separating
+    them is the flow qualifier — it must not be lost in the merge, or a pivot
+    with no split would read as one that was measured."""
+    m = FA.hvp_message("CALL", "ATM CE 24150",
+                       _pivot(side="HIGH", buy_pct=None, dominant=None),
+                       decimals=2)
+    assert "a fresh level to watch" in m
+    assert "flow not estimated" in m
+    assert "Flow looks" not in m
+
+
+def test_the_level_line_reads_the_same_in_both_branches():
+    """The desk knows this wording. It should not depend on whether the split
+    happened to be measurable on that bar."""
+    # the desk's own reported alert, to the digit
+    bar = dict(side="HIGH", price=144.30, norm=6.9)
+    measured = FA.hvp_message("CALL", "ATM CE 24150",
+                              _pivot(buy_pct=83.0, dominant="buyers", **bar),
+                              decimals=2)
+    plain = FA.hvp_message("CALL", "ATM CE 24150",
+                           _pivot(buy_pct=None, dominant=None, **bar),
+                           decimals=2)
+    head = "A high-volume swing high formed at ₹144.30 on 6.9× volume"
+    for m in (measured, plain):
+        assert head in m, m
+
+
+# ── 6 · each sentence switchable on its own ────────────────────────────
+#
+# The desk wants both lines AND wants either droppable. The property that
+# matters is that a toggle changes VERBOSITY, never meaning: the headline
+# survives, and the bias ball keeps following the measurement even when the
+# flow sentence is hidden.
+
+_MEASURED = dict(side="HIGH", price=144.30, norm=6.9, buy_pct=83.0,
+                 dominant="buyers")
+
+
+def _msg(**kw):
+    return FA.hvp_message("CALL", "ATM CE 24150", _pivot(**_MEASURED),
+                          decimals=2, **kw)
+
+
+def test_flow_off_gives_the_original_message_exactly():
+    m = _msg(flow_line=False)
+    assert "a fresh level to watch" in m
+    assert "Flow looks" not in m and "% buy" not in m
+
+
+def test_level_off_leaves_the_headline_and_the_flow():
+    m = _msg(level_line=False)
+    assert "fresh level to watch" not in m
+    assert "83% buy / 17% sell" in m
+    assert "New high-volume high — ATM CE 24150" in m
+
+
+def test_both_off_still_names_the_event_and_the_leg():
+    """Silencing the alert is `_formation_alerts_on`'s job — a wording toggle
+    must not become a second, hidden off switch."""
+    m = _msg(level_line=False, flow_line=False)
+    assert "New high-volume high — ATM CE 24150" in m
+    assert "\n" not in m.strip(), m
+
+
+def test_both_on_is_the_default():
+    m = FA.hvp_message("CALL", "ATM CE 24150", _pivot(**_MEASURED), decimals=2)
+    assert "a fresh level to watch" in m and "83% buy" in m
+
+
+def test_hiding_the_flow_sentence_does_not_flip_the_ball():
+    """⚠️ THE RULE for these toggles. A swing high on heavy buying is bullish
+    whether or not the reader wants the percentages printed. Reverting to the
+    structural read when the line is hidden would make a formatting switch
+    change the alert's meaning."""
+    shown = _msg(flow_line=True)
+    hidden = _msg(flow_line=False)
+    assert shown[0] == hidden[0], (shown, hidden)
+    assert shown.startswith(BB.BALLS[BB.BULL])
+
+
+def test_the_ball_still_follows_a_measured_SELL_when_the_line_is_hidden():
+    sold = dict(side="LOW", price=126.40, norm=4.8, buy_pct=19.0,
+                dominant="sellers")
+    m = FA.hvp_message("CALL", "ATM CE 24150", _pivot(**sold), decimals=2,
+                       flow_line=False)
+    assert m.startswith(BB.BALLS[BB.BEAR]), "the shape alone would say bullish"
+
+
+def test_the_unmeasured_branch_honours_the_level_toggle():
+    plain = _pivot(side="HIGH", price=144.30, norm=6.9, buy_pct=None,
+                   dominant=None)
+    assert "fresh level" in FA.hvp_message("CALL", "L", plain, 2,
+                                           level_line=True)
+    assert "fresh level" not in FA.hvp_message("CALL", "L", plain, 2,
+                                               level_line=False)
+
+
+def test_the_flow_toggle_is_a_no_op_when_there_was_nothing_to_measure():
+    """Nothing to hide — the message must not change shape because a switch
+    was flipped for a bar it does not apply to."""
+    plain = _pivot(side="HIGH", buy_pct=None, dominant=None)
+    a = FA.hvp_message("CALL", "L", plain, 2, flow_line=True)
+    b = FA.hvp_message("CALL", "L", plain, 2, flow_line=False)
+    assert a == b
+
+
+def test_the_toggles_do_not_touch_the_signature():
+    """⚠️ A formatting switch must not become an anti-spam hole: identity is
+    the pivot's, not the message's."""
+    p = _pivot(**_MEASURED)
+    assert FA.hvp_signature(p, 2) == FA.hvp_signature(p, 2)
+    src = (_SRC.parent / "mios_v5" / "formation_alerts.py").read_text()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "hvp_signature")
+    body = ast.unparse(fn)
+    assert "level_line" not in body and "flow_line" not in body
+
+
+# ── 7 · the toggles are WIRED, not just defined ────────────────────────
+#
+# A checkbox nobody reads is the dead-wiring pattern this repo keeps catching:
+# the switch moves, the message does not.
+
+def test_both_switches_have_a_default(tree):
+    src = _SRC.read_text()
+    assert "HVP_LEVEL_LINE_DEFAULT = True" in src
+    assert "HVP_FLOW_LINE_DEFAULT = True" in src
+
+
+def test_the_sidebar_writes_both_keys():
+    src = _SRC.read_text()
+    assert '"_hvp_level_line_on"' in src
+    assert '"_hvp_flow_line_on"' in src
+
+
+def test_the_sender_reads_both_keys_and_passes_them_on(tree):
+    """⚠️ Read, and REACHING `hvp_message`. Reading a toggle into a local that
+    never leaves the function is the same as not having one."""
+    src = ast.unparse(_func(tree, "_notify_chart_formations"))
+    assert "'_hvp_level_line_on'" in src and "'_hvp_flow_line_on'" in src
+    assert "level_line=" in src and "flow_line=" in src
+
+
+def test_the_toggles_are_read_once_per_cycle_not_per_chart(tree):
+    """Three charts in one cycle must be worded the same way — a read inside
+    the loop would let a mid-cycle rerun split them."""
+    src = ast.unparse(_func(tree, "_notify_chart_formations"))
+    assert src.index("_hvp_level_line_on") < src.index("for chart in")
+
+
+def test_the_vob_note_is_not_given_the_hvp_flags(tree):
+    """`vob_message` has no such parameters — handing them over would raise
+    inside the send and the alert would vanish into the `except`."""
+    src = ast.unparse(_func(tree, "_notify_chart_formations"))
+    assert "_fa.vob_message" in src
+    line = next(ln for ln in src.split("\n") if "_fa.vob_message" in ln)
+    assert "level_line" not in line and "flow_line" not in line
