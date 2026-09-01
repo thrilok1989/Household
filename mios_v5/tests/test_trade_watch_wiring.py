@@ -191,3 +191,47 @@ def test_the_idle_pink_banner_only_shows_when_nothing_is_open(tree: ast.Module):
     src = ast.unparse(fn)
     assert "no active trade" in src
     assert src.index("_my_trade") < src.index("no active trade")
+
+
+# ══ a level that was never captured must not stay un-capturable ═════════
+#
+# `protect` is armed once, at adoption, and held — a level that wobbles every
+# cycle is the "arm once, don't chase" rule broken. But a trade adopted while
+# no S/R existed got `protect: None` FOR EVER, and with `zone_against` None for
+# a missing level, half the EXIT condition could never fire for that position
+# and nothing on screen said so.
+
+def test_a_null_protect_is_filled_in_later(tree):
+    src = ast.unparse(_func(tree, "_track_my_trade"))
+    assert "pos.get('protect') is None" in src
+    assert "protect_level(" in src
+
+
+def test_a_real_protect_level_is_never_overwritten(tree):
+    """⚠️ Filling a null is not chasing; overwriting a live level is. The
+    re-derive must sit BEHIND the is-None guard, not beside it."""
+    src = ast.unparse(_func(tree, "_track_my_trade"))
+    guard = src.index("pos.get('protect') is None")
+    assign = src.index("pos['protect'] =")
+    assert guard < assign, "the level is re-armed unconditionally"
+
+
+def test_the_late_arming_is_recorded(tree):
+    """A level captured minutes after entry is not the level that was
+    protecting the trade at entry — the position says so."""
+    src = ast.unparse(_func(tree, "_track_my_trade"))
+    assert "protect_armed_late" in src
+
+
+def test_re_deriving_cannot_take_the_cycle_down(tree):
+    src = ast.unparse(_func(tree, "_track_my_trade"))
+    assert src.count("except Exception") >= 2
+
+
+def test_the_entry_spot_is_still_the_detection_spot(tree):
+    """Not changed here — but the comment must keep saying what it is, because
+    the banner's labels depend on it being a spot level and not a fill."""
+    src = _SRC.read_text()
+    i = src.index("def _track_my_trade")
+    body = src[i:i + 4000]
+    assert "not the fill" in body.lower() or "NOT the fill" in body

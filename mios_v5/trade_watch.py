@@ -64,8 +64,26 @@ def protect_level(side: Any, support: Any, resistance: Any) -> Optional[float]:
 
 def assess(side: Any, entry_spot: Any, spot: Any, net: Any,
           protect: Any, atm_range: Any = 100.0) -> Dict[str, Any]:
-    """WAIT by default; EXIT only once BOTH the engine vote and the protecting
-    level have turned against `side`.
+    """Four states, because "checked and fine" and "could not check" are not
+    the same news.
+
+      EXIT     both the engine vote and the protecting level have turned
+      WAIT     at least one of them WAS evaluated, and it is not a full reversal
+      UNKNOWN  a trade is open but NEITHER input could be read
+      NONE     there is no readable trade at all — no side, no entry, no spot
+
+    ⚠️ **UNKNOWN exists because WAIT used to swallow it.** Both conditions
+    failed CLOSED — `n is not None and n <= -NET_THRESHOLD` is False when the
+    engine vote is missing, and the zone test is False when no level was ever
+    captured — so a trade with nothing measurable produced `exit_now = False`
+    and the banner said "Still yours to win, the market hasn't turned all the
+    way against you yet". A green reassurance from zero evidence, indistinguish-
+    able on screen from a genuine all-clear. That is the failure this repo's
+    three-state rule exists to prevent, and this is the same rule applied here.
+
+    `engine_against` / `zone_against` are now **True / False / None**, where
+    `None` means NOT EVALUATED — so the panel can print "not evaluated" against
+    that condition instead of an unearned tick.
 
       engine_against : net has crossed `NET_THRESHOLD` points opposite this
                        side's direction (CALL wants net up, PUT wants net down)
@@ -73,27 +91,41 @@ def assess(side: Any, entry_spot: Any, spot: Any, net: Any,
                        offset — the level that was holding has broken, not just
                        been tested
 
-    `NONE` (not WAIT, not EXIT) when there is no readable trade — no side, no
-    entry, no live spot — so a caller can tell "nothing to watch" from "watching,
-    still fine".
+    The reported `net`, `protect` and `breach_at` travel with the verdict so the
+    banner can show the reader what the decision was actually made on.
     """
     e, sp, n = _f(entry_spot), _f(spot), _f(net)
     ar = _f(atm_range) or 100.0
     if side not in ("CALL", "PUT") or e is None or sp is None:
-        return {"signal": "NONE", "engine_against": None, "zone_against": None}
+        return {"signal": "NONE", "engine_against": None, "zone_against": None,
+                "net": n, "protect": _f(protect), "breach_at": None,
+                "checked": 0}
     pr = _f(protect)
     offset = (ar / 100.0) * ZONE_OFFSET_PTS
+    # ⚠️ `None` when the input is absent, NOT False. False means "checked, and
+    # it is on your side"; None means nobody looked. Collapsing the two is
+    # exactly what made an unevaluated trade read as a healthy one.
     if side == "CALL":
-        engine_against = n is not None and n <= -NET_THRESHOLD
-        zone_against = pr is not None and sp <= (pr - offset)
+        engine_against = None if n is None else n <= -NET_THRESHOLD
+        breach_at = None if pr is None else pr - offset
+        zone_against = None if pr is None else sp <= breach_at
     else:
-        engine_against = n is not None and n >= NET_THRESHOLD
-        zone_against = pr is not None and sp >= (pr + offset)
-    exit_now = bool(engine_against and zone_against)
+        engine_against = None if n is None else n >= NET_THRESHOLD
+        breach_at = None if pr is None else pr + offset
+        zone_against = None if pr is None else sp >= breach_at
+    checked = sum(1 for v in (engine_against, zone_against) if v is not None)
+    if checked == 0:
+        signal = "UNKNOWN"
+    elif engine_against is True and zone_against is True:
+        signal = "EXIT"
+    else:
+        signal = "WAIT"
     return {
-        "signal": "EXIT" if exit_now else "WAIT",
+        "signal": signal,
         "engine_against": engine_against,
         "zone_against": zone_against,
+        "net": n, "protect": pr, "breach_at": breach_at,
+        "checked": checked,
     }
 
 
@@ -109,11 +141,21 @@ def message(side: Any, info: Dict[str, Any], entry_spot: Any, spot: Any,
     sp_s = "—" if sp is None else f"₹{sp:,.1f}"
     g_s = "" if gain is None else f" ({gain:+.1f} pts)"
     tag = " · from Dhan" if source == "dhan" else ""
-    if info.get("signal") == "EXIT":
+    signal = info.get("signal")
+    if signal == "EXIT":
         return (
             f"🚨 <b>EXIT FAST — direction changed against your {side}</b>\n"
             f"Entry {e_s} → now {sp_s}{g_s}{tag}. Engine vote AND the "
             f"protecting level are both against you now."
+        )
+    if signal == "UNKNOWN":
+        # ⚠️ Never the green wording here. Nothing was measurable, and saying
+        # "still yours to win" would be reassurance this has not earned.
+        return (
+            f"⚪ <b>NOT EVALUATED — your {side} is not being judged</b>\n"
+            f"Entry {e_s} → now {sp_s}{g_s}{tag}. Neither the engine vote nor a "
+            f"protecting level is available, so this is NOT an all-clear — "
+            f"nothing has been checked."
         )
     return (
         f"⏳ <b>WAIT — hold your {side}</b>\n"
