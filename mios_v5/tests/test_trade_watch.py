@@ -88,13 +88,20 @@ def test_the_zone_offset_scales_with_atm_range():
     assert wide["zone_against"] is False
 
 
-def test_no_protect_level_never_reads_as_broken():
-    """No S/R was resolvable at entry (e.g. a mid-range FOMO trade) — the zone
-    leg of the combination can never fire, so only the engine vote matters,
-    and even a hard engine flip alone must still be WAIT (combination rule)."""
+def test_no_protect_level_reads_as_NOT_EVALUATED_not_as_intact():
+    """No S/R was resolvable at entry (e.g. a mid-range FOMO trade).
+
+    ⚠️ `None`, not `False`. `False` means "checked, and the level is holding";
+    a level that was never captured was not checked at all, and collapsing the
+    two is what let an unevaluated trade render as a healthy one. The verdict is
+    still WAIT — the engine leg WAS evaluated, so something was measured — but
+    the zone leg reports honestly that nobody looked.
+    """
     r = T.assess("CALL", entry_spot=24000, spot=23900, net=-5, protect=None)
-    assert r["zone_against"] is False
-    assert r["signal"] == "WAIT"
+    assert r["zone_against"] is None
+    assert r["engine_against"] is True
+    assert r["signal"] == "WAIT", "one leg was measured, so this is a real WAIT"
+    assert r["checked"] == 1
 
 
 # ── message ─────────────────────────────────────────────────────────────
@@ -173,3 +180,83 @@ def test_the_module_is_pure():
             names.add(node.module.split(".")[0])
     assert not names & {"streamlit", "vob_minimal", "pandas", "requests"}
     assert "session_state" not in src
+
+
+# ══ UNKNOWN: "could not check" is not "checked and fine" ════════════════
+#
+# THE BUG this section exists to keep fixed. Both EXIT conditions failed
+# CLOSED — `n is not None and n <= -NET_THRESHOLD` is False when the engine
+# vote is missing, and the zone test is False when no level was captured — so a
+# trade with NOTHING measurable produced `exit_now = False` and the banner said
+# "Still yours to win. The market hasn't turned all the way against you yet."
+# A green reassurance from zero evidence, indistinguishable on screen from a
+# genuine all-clear.
+
+def test_neither_input_available_is_UNKNOWN_not_WAIT():
+    r = T.assess("PUT", entry_spot=24112.1, spot=24110.3, net=None, protect=None)
+    assert r["signal"] == "UNKNOWN"
+    assert r["engine_against"] is None and r["zone_against"] is None
+    assert r["checked"] == 0
+
+
+def test_one_input_available_is_a_real_WAIT():
+    """WAIT must mean something was actually measured."""
+    eng_only = T.assess("PUT", 24000, 24010, net=0.5, protect=None)
+    zone_only = T.assess("PUT", 24000, 24010, net=None, protect=24500)
+    for r in (eng_only, zone_only):
+        assert r["signal"] == "WAIT"
+        assert r["checked"] == 1
+
+
+def test_UNKNOWN_is_distinct_from_NONE():
+    """NONE = no trade to watch. UNKNOWN = a trade IS open and unjudged. A
+    caller that treats them alike would either hide a live position or draw a
+    banner for one that does not exist."""
+    no_trade = T.assess(None, None, None, net=1.0, protect=24500)
+    unjudged = T.assess("PUT", 24000, 24010, net=None, protect=None)
+    assert no_trade["signal"] == "NONE"
+    assert unjudged["signal"] == "UNKNOWN"
+
+
+def test_a_full_reversal_still_exits_when_both_were_measured():
+    r = T.assess("PUT", 24000, 24600, net=3.0, protect=24500)
+    assert r["signal"] == "EXIT"
+    assert r["engine_against"] is True and r["zone_against"] is True
+
+
+def test_exit_needs_both_TRUE_not_merely_not_false():
+    """⚠️ `engine_against and zone_against` with None in one slot is falsy, so
+    the old expression happened to behave — but `None and True` is None, not
+    False, and a truthiness test here would have been one refactor from calling
+    an unmeasured leg a passing one. The check is explicit."""
+    r = T.assess("PUT", 24000, 24600, net=None, protect=24500)
+    assert r["zone_against"] is True and r["engine_against"] is None
+    assert r["signal"] == "WAIT", "an unmeasured engine must not complete an EXIT"
+
+
+def test_the_numbers_behind_the_verdict_travel_with_it():
+    """The panel shows the reader what the decision was made on — it must not
+    have to re-derive them and risk showing a different number."""
+    r = T.assess("PUT", 24000, 24010, net=1.5, protect=24500, atm_range=100.0)
+    assert r["net"] == 1.5
+    assert r["protect"] == 24500
+    assert r["breach_at"] == 24530.0        # resistance + 30 for a PUT
+
+
+def test_the_breach_line_scales_with_atm_range():
+    wide = T.assess("PUT", 24000, 24010, net=0.0, protect=24500, atm_range=400.0)
+    assert wide["breach_at"] == 24620.0     # 400/100 * 30 = 120
+
+
+def test_no_breach_line_without_a_level():
+    r = T.assess("PUT", 24000, 24010, net=0.0, protect=None)
+    assert r["breach_at"] is None
+
+
+def test_the_unknown_message_never_says_still_yours_to_win():
+    """⚠️ THE WORDING RULE. Nothing was checked, so nothing may be reassured."""
+    r = T.assess("PUT", 24112.1, 24110.3, net=None, protect=None)
+    m = T.message("PUT", r, 24112.1, 24110.3, source="dhan")
+    assert "NOT EVALUATED" in m
+    assert "still yours to win" not in m.lower()
+    assert "nothing has been checked" in m.lower()

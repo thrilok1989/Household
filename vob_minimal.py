@@ -12731,9 +12731,28 @@ def _track_my_trade():
         if pos and pos.get('side') == found['side'] and pos.get('security_id') in (
                 found.get('security_id'), None):
             # Same side already tracked (manual or dhan) — leave its own
-            # entry_spot/protect level alone; just tag the security id so a
-            # later flip to the OTHER side is recognised as a fresh position.
+            # entry_spot alone; just tag the security id so a later flip to the
+            # OTHER side is recognised as a fresh position.
             pos['security_id'] = found.get('security_id')
+            # ⚠️ Re-derive the protecting level ONLY if it was never captured.
+            # It is meant to be armed once and held — a level that wobbles with
+            # every cycle is the "arm once, don't chase" rule broken. But a
+            # trade adopted while no S/R existed got `protect: None` FOR EVER,
+            # and `zone_against` is None for a missing level, so half the EXIT
+            # condition could never fire for that position and nothing said so.
+            # Filling a null is not chasing; overwriting a real level would be.
+            if pos.get('protect') is None:
+                try:
+                    from mios_v5.final_read import build_final_read as _bfr
+                    _fr = _bfr(st.session_state.get('_mios_state')) or {}
+                    _lvl = TW.protect_level(found['side'],
+                                            _fr.get('strong_support'),
+                                            _fr.get('strong_resistance'))
+                    if _lvl is not None:
+                        pos['protect'] = _lvl
+                        pos['protect_armed_late'] = True
+                except Exception:
+                    pass
             return
 
         spot = st.session_state.get('_nifty_spot_live')
@@ -12743,6 +12762,12 @@ def _track_my_trade():
         fr = build_final_read(st.session_state.get('_mios_state')) or {}
         sup, res = fr.get('strong_support'), fr.get('strong_resistance')
         st.session_state['_my_trade'] = {
+            # ⚠️ `entry_spot` is the NIFTY SPOT AT DETECTION, not the fill.
+            # Dhan is polled every DHAN_POSITIONS_TTL_S, and this reads the live
+            # index, not the position's average price — so it anchors WHERE THE
+            # INDEX WAS when the app first saw the trade. The banner labels it
+            # accordingly rather than as an entry price, because a spot level is
+            # not a premium and the difference is not P&L.
             'side': found['side'], 'entry_spot': float(spot), 'entry_time': time.time(),
             'protect': TW.protect_level(found['side'], sup, res),
             'source': 'dhan', 'security_id': found.get('security_id'),
