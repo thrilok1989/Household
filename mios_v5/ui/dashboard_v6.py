@@ -266,6 +266,64 @@ def _strike_depth_charts(st) -> None:
         _dbg_caption(st, "strike_oi_series", f"depth charts unavailable: {err}")
 
 
+def _strike_volume_charts(st) -> None:
+    """📈 Five ATM±2 strikes × (Cum Buy · Cum Sell · CVD), CE against PE.
+
+    Traded volume, not resting quantity — the other half of what the same
+    snapshot already carries. `strike_history` keeps each strike's cumulative
+    day volume (`totalTradedVolume_CE/PE`, already on `df_summary`) beside its
+    LTP, so the split costs no fetch: the volume that traded between two
+    snapshots is the difference, and `flow_source.classify` assigns it a side
+    from the LTP move over the same interval.
+
+    ⚠️ **Not tick data, and the caption says so.** Each point is ~20 seconds of
+    trades attributed to whichever way the LTP happened to end. That is real
+    volume honestly attributed at that granularity, but presenting it beside a
+    tick reading without saying which is which is the one thing the desk asked
+    never to happen. `SC.FLOW_NOTE` carries the wording.
+
+    ⚠️ No verdict, same as the depth charts. Volume is a magnitude; which way
+    it points is a separate question these charts do not answer.
+    """
+    try:
+        from .. import strike_history as SH
+        from . import strike_oi_series as SC
+    except Exception as err:
+        _dbg_caption(st, "strike_oi_series", f"unavailable: {err}")
+        return
+    try:
+        store = st.session_state.get("_strike_hist") or {"snaps": []}
+        # Unconditional basis line, before any conclusion — a panel that
+        # vanishes when `figures()` returns nothing reads as "never built".
+        st.caption(f"📈 Per-strike traded volume (ATM±{SH.WINGS}) · "
+                   + SC.FLOW_NOTE)
+        if not SH.read(store)["n"]:
+            return
+        drew = False
+        for measure, title in (("cum_buy", "Cumulative Call vs Put BUY Volume"),
+                               ("cum_sell", "Cumulative Call vs Put SELL Volume"),
+                               ("cvd", "Call vs Put CVD (Buy − Sell)")):
+            figs = SC.figures(store, measure)
+            if not figs:
+                continue
+            st.markdown(f"**📈 {title} · ATM±{SH.WINGS}**")
+            cols = st.columns(len(figs))
+            for col, (strike, _label, fig) in zip(cols, figs):
+                with col:
+                    st.plotly_chart(fig, use_container_width=True,
+                                    key=f"svol_{measure}_{strike}",
+                                    config=FS_CHART_CONFIG)
+            drew = True
+        if not drew:
+            # ⚠️ Named, not blank. Two snapshots are needed before any interval
+            # exists, so an empty panel here is normal at startup and must not
+            # look like a broken feature.
+            st.caption("📈 …no interval yet — the split needs two snapshots "
+                       "carrying both traded volume and the LTP.")
+    except Exception as err:
+        _dbg_caption(st, "strike_oi_series", f"volume charts unavailable: {err}")
+
+
 def _strike_verdict(st, r) -> None:
     """One strike's read, in the words `strike_oi_series` produced.
 
@@ -1527,6 +1585,11 @@ def _charts_screen(st, fr: Dict[str, Any]) -> None:
     # question: OI is what is already committed at the strike, the book is what
     # is currently being offered there.
     _strike_depth_charts(st)
+
+    # 📈 And the third view of the same five strikes: what actually TRADED,
+    # split into buy and sell. OI is what is committed, the book is what is
+    # offered, this is what changed hands.
+    _strike_volume_charts(st)
 
     # 🏛 The layered POC picture on a daily axis — no candles, POC only.
     _poc_structure(st)

@@ -67,8 +67,9 @@ def test_the_css_is_injected_on_the_charts_tab():
 
 def test_every_chart_call_uses_the_shared_config():
     """The three split terminal panels (NIFTY / Call / Put), the per-strike OI
-    charts, the per-strike cumulative bid/ask charts and the POC chart — one
-    config, so a chart added later without it is the odd one out, not the norm.
+    charts, the per-strike order-book charts, the per-strike traded-volume
+    charts and the POC chart — one config, so a chart added later without it is
+    the odd one out, not the norm.
 
     ⚠️ The terminal used to be ONE `plotly_chart` call; it is now three, one per
     panel, because each needs its own Streamlit Fullscreen button. The invariant
@@ -77,7 +78,7 @@ def test_every_chart_call_uses_the_shared_config():
     calls = [c for c in ast.walk(_TREE)
              if isinstance(c, ast.Call)
              and getattr(c.func, "attr", "") == "plotly_chart"]
-    assert len(calls) == 6, f"expected 6 plotly_chart calls, found {len(calls)}"
+    assert len(calls) == 7, f"expected 7 plotly_chart calls, found {len(calls)}"
     for c in calls:
         cfg = next((kw.value for kw in c.keywords if kw.arg == "config"), None)
         assert isinstance(cfg, ast.Name) and cfg.id == "FS_CHART_CONFIG", \
