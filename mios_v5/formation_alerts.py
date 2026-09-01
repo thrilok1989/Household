@@ -88,8 +88,30 @@ def hvp_signature(pivot: Mapping[str, Any],
 
 
 def hvp_message(chart: str, label: Optional[str], pivot: Mapping[str, Any],
-                decimals: int = 0) -> str:
-    """One new pivot → the Telegram/alert text."""
+                decimals: int = 0, level_line: bool = True,
+                flow_line: bool = True) -> str:
+    """One new pivot → the Telegram/alert text.
+
+    The body is two independent sentences and either can be switched off:
+
+      `level_line`  "A high-volume swing high formed at ₹144.30 on 6.9×
+                    volume — a fresh level to watch." The original wording,
+                    and what the alert is announcing.
+      `flow_line`   "Flow looks BUY-led — est. 83% buy / 17% sell (CLV from
+                    1m bars, not tick data)." What the volume that built it
+                    looked like.
+
+    ⚠️ Turning `flow_line` off hides the SENTENCE, not the measurement: the
+    bias ball still follows the measured split rather than reverting to the
+    structural guess. A swing high on heavy buying is bullish whether or not
+    the reader wants the percentages printed, and flipping the ball with the
+    text would make the toggle change the alert's meaning instead of its
+    verbosity.
+
+    With both off the headline still goes out — it names the event and the leg,
+    which is a legitimate minimal alert. Silencing the alert itself is
+    `_formation_alerts_on`'s job, not this function's.
+    """
     label = label or chart
     side = str(pivot.get("side") or "").upper()
     price = _f(pivot.get("price"))
@@ -134,18 +156,32 @@ def hvp_message(chart: str, label: Optional[str], pivot: Mapping[str, Any],
             bias = _bb.BEAR if bias == _bb.BULL else _bb.BULL
         lean = ("mixed" if dominant == "balanced"
                 else "BUY-led" if dominant == "buyers" else "SELL-led")
-        return _bb.prefix(
-            bias,
-            f"{icon} <b>New high-volume {kind} — {label}</b>\n"
-            f"A high-volume swing {kind} formed at {price_s}{vol}.\n"
-            f"Flow looks {lean} — est. {buy_pct:.0f}% buy / {sell_pct:.0f}% sell "
-            f"(CLV from 1m bars, not tick data).")
+        # ⚠️ BOTH lines, at the desk's request. The flow estimate was added as a
+        # REPLACEMENT for the "a fresh level to watch" tail, which quietly
+        # dropped the only sentence that said what the alert is FOR. The two do
+        # different jobs and neither substitutes for the other: the first names
+        # the level, the second describes the volume that built it. So the
+        # original wording stays, the estimate follows on its own line, and
+        # each can be switched off without taking the other with it.
+        body = [f"{icon} <b>New high-volume {kind} — {label}</b>"]
+        if level_line:
+            body.append(f"A high-volume swing {kind} formed at {price_s}{vol} — "
+                        f"a fresh level to watch.")
+        if flow_line:
+            body.append(f"Flow looks {lean} — est. {buy_pct:.0f}% buy / "
+                        f"{sell_pct:.0f}% sell (CLV from 1m bars, not tick data).")
+        # ⚠️ `bias` — the MEASURED side — regardless of `flow_line`. Hiding the
+        # sentence must not change which way the ball points; see the docstring.
+        return _bb.prefix(bias, "\n".join(body))
 
-    return _bb.prefix(
-        _bb.hvp_bias(chart, side),
-        f"{icon} <b>New high-volume {kind} — {label}</b>\n"
-        f"A high-volume swing {kind} formed at {price_s}{vol} — "
-        f"a fresh level to watch (flow not estimated).")
+    # No measurable split on this bar. The flow toggle has nothing to hide, so
+    # only `level_line` applies — and the "(flow not estimated)" qualifier rides
+    # with the level sentence, because that is the sentence it qualifies.
+    plain = [f"{icon} <b>New high-volume {kind} — {label}</b>"]
+    if level_line:
+        plain.append(f"A high-volume swing {kind} formed at {price_s}{vol} — "
+                     f"a fresh level to watch (flow not estimated).")
+    return _bb.prefix(_bb.hvp_bias(chart, side), "\n".join(plain))
 
 
 # ── volume order blocks ────────────────────────────────────────────────
