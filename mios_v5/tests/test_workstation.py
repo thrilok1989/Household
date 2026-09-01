@@ -683,10 +683,15 @@ def test_the_charts_tab_computes_nothing():
     # `_strike_oi_charts`: it reads the SAME `_strike_hist` store — which now
     # carries the top-of-book columns alongside the OI ones — and lays out the
     # running totals. It fetches nothing and draws no verdict.
+    # `_strike_volume_charts` is a RENDERER on the same terms as the other two
+    # strike panels: same `_strike_hist` store, which now carries each strike's
+    # cumulative traded volume beside its LTP. The buy/sell split it lays out is
+    # `flow_source.cumulative_flow`'s — the module that owns the tick rule —
+    # applied to two stored columns. It fetches nothing and draws no verdict.
     _render = {"markdown", "caption", "get", "leg_table_html", "_feed_reason",
                "_dbg_caption", "_strike_oi_charts", "_strike_depth_charts",
-               "_poc_structure", "_hv_settings", "_vob_zone_table",
-               "_trade_watch"}
+               "_strike_volume_charts", "_poc_structure", "_hv_settings",
+               "_vob_zone_table", "_trade_watch"}
     assert called <= {"_leg_reads", "dominance", "_terminal_chart"} | _render, (
         f"unexpected calls in _charts_screen: {called}")
     # ⚠️ The property that actually matters: no BUILDER is invoked here.

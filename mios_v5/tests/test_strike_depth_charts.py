@@ -359,7 +359,7 @@ def test_every_measure_declares_the_whole_spec():
     """The table is the contract — a measure missing a key would raise inside
     `figures()` at render time, on the dashboard, not here."""
     for measure, spec in SC.MEASURES.items():
-        assert set(spec) == {"ce", "pe", "div", "unit", "cumulative",
+        assert set(spec) == {"ce", "pe", "flow", "div", "unit", "cumulative",
                              "signed"}, measure
 
 
@@ -386,9 +386,9 @@ def test_only_the_depth_measures_cumulate():
 
 
 def test_only_the_measures_that_can_go_negative_are_signed():
-    """ΔOI and the imbalance cross zero; a quantity cannot."""
+    """ΔOI, the book imbalance and CVD cross zero; a quantity cannot."""
     signed = {m for m, s in SC.MEASURES.items() if s["signed"]}
-    assert signed == {"chg", "cum_imb"}
+    assert signed == {"chg", "cum_imb", "cvd"}
 
 
 def test_the_oi_charts_are_unchanged_by_the_new_measures():

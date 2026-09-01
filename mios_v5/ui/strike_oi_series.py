@@ -75,6 +75,10 @@ MEASURE_COLOURS: Dict[str, Tuple[str, str]] = {
     "cum_bid": (CALL_COLOUR, PUT_COLOUR),
     "cum_ask": (CALL_COLOUR, PUT_COLOUR),
     "cum_imb": (CALL_COLOUR, PUT_COLOUR),
+    # Traded volume is side semantics too — green is the call side.
+    "cum_buy": (CALL_COLOUR, PUT_COLOUR),
+    "cum_sell": (CALL_COLOUR, PUT_COLOUR),
+    "cvd": (CALL_COLOUR, PUT_COLOUR),
 }
 
 #: OI direction × price direction → what the position is doing. One map, so the
@@ -102,10 +106,17 @@ def _sign(x: Any, eps: float = 0.0) -> int:
 #: axis does not name, or a measure with no colour pairing is a test failure
 #: rather than a blank panel.
 #:
-#: `ce` / `pe` are TUPLES of fields, netted first-minus-the-rest. One field is
-#: that field; two are a difference. That is what lets the imbalance measure
-#: exist without a second figure builder — the only thing it needs that the
-#: others do not is a subtraction, and a subtraction is not a new kind of chart.
+#: `ce` / `pe` are TUPLES of fields. What is done with them depends on `flow`:
+#:
+#:   flow=None    netted first-minus-the-rest. One field is that field; two are
+#:                a difference. That is what lets the imbalance measure exist
+#:                without a second figure builder — a subtraction is not a new
+#:                kind of chart.
+#:   flow=buy/    the pair is (CUMULATIVE VOLUME field, PRICE field) and the
+#:      sell/cvd  series is `flow_source.cumulative_flow`'s running buy, sell or
+#:                CVD. The classification rule is NOT restated here — it lives
+#:                in `flow_source.classify`, the same one `ws_worker` applies to
+#:                ticks.
 #:
 #: ⚠️ The netting is aligned per snapshot, not by position — see `net_series`.
 #:
@@ -117,16 +128,16 @@ def _sign(x: Any, eps: float = 0.0) -> int:
 #: reference charts used, applied HERE rather than in the store, which keeps
 #: absolutes.
 MEASURES: Dict[str, Dict[str, Any]] = {
-    "oi": {"ce": ("ce_oi",), "pe": ("pe_oi",),
+    "oi": {"ce": ("ce_oi",), "pe": ("pe_oi",), "flow": None,
            "div": 100_000.0, "unit": "OI (L)",
            "cumulative": False, "signed": False},
-    "chg": {"ce": ("ce_chg",), "pe": ("pe_chg",),
+    "chg": {"ce": ("ce_chg",), "pe": ("pe_chg",), "flow": None,
             "div": 1_000.0, "unit": "ΔOI (K)",
             "cumulative": False, "signed": True},
-    "cum_bid": {"ce": ("ce_bid",), "pe": ("pe_bid",),
+    "cum_bid": {"ce": ("ce_bid",), "pe": ("pe_bid",), "flow": None,
                 "div": 1_000.0, "unit": "Cum Bid Qty (K)",
                 "cumulative": True, "signed": False},
-    "cum_ask": {"ce": ("ce_ask",), "pe": ("pe_ask",),
+    "cum_ask": {"ce": ("ce_ask",), "pe": ("pe_ask",), "flow": None,
                 "div": 1_000.0, "unit": "Cum Ask Qty (K)",
                 "cumulative": True, "signed": False},
     # Each side's own bid MINUS its own ask, accumulated. Above zero that side
@@ -134,9 +145,39 @@ MEASURES: Dict[str, Dict[str, Any]] = {
     # more supply. CALL and PUT are read against each other, not against a
     # combined book — a call's imbalance and a put's are two separate questions.
     "cum_imb": {"ce": ("ce_bid", "ce_ask"), "pe": ("pe_bid", "pe_ask"),
+                "flow": None,
                 "div": 1_000.0, "unit": "Cum Bid − Ask (K)",
                 "cumulative": True, "signed": True},
+    # ── traded volume, decomposed ──────────────────────────────────────
+    # ⚠️ `cumulative` is FALSE for these three: `cumulative_flow` already
+    # returns a running total, and putting `running_total` over it again would
+    # draw the integral of a cumulative series and label it volume.
+    "cum_buy": {"ce": ("ce_vol", "ce_ltp"), "pe": ("pe_vol", "pe_ltp"),
+                "flow": "buy",
+                "div": 1_000.0, "unit": "Cum Buy Vol (K)",
+                "cumulative": False, "signed": False},
+    "cum_sell": {"ce": ("ce_vol", "ce_ltp"), "pe": ("pe_vol", "pe_ltp"),
+                 "flow": "sell",
+                 "div": 1_000.0, "unit": "Cum Sell Vol (K)",
+                 "cumulative": False, "signed": False},
+    "cvd": {"ce": ("ce_vol", "ce_ltp"), "pe": ("pe_vol", "pe_ltp"),
+            "flow": "cvd",
+            "div": 1_000.0, "unit": "CVD (K)",
+            "cumulative": False, "signed": True},
 }
+
+#: Measures built by decomposing traded volume rather than plotting a stored
+#: field. Named so a panel can caption them with where the split came from.
+FLOW_MEASURES = tuple(m for m, s in MEASURES.items() if s["flow"])
+
+#: ⚠️ THE LABEL for the volume rows, and it is not optional. The desk's
+#: standing rule is that an estimate and a measurement are never presented as
+#: the same thing. This split is neither tick data nor 1-minute CLV: it is
+#: everything that traded between two chain snapshots, assigned to one side by
+#: whichever way the LTP ended over that interval. Real volume, honestly
+#: attributed, at roughly twenty-second granularity — and the panel says so.
+FLOW_NOTE = ("buy/sell split by LTP direction between chain snapshots (~20s "
+             "each) — real traded volume, but not tick data and not 1-min CLV")
 
 #: Measures whose y value is a running total rather than the reading itself.
 CUMULATIVE = tuple(m for m, s in MEASURES.items() if s["cumulative"])
@@ -181,6 +222,49 @@ def net_series(store: Any, strike: Any,
         ts.append(t)
         vs.append(v - sum(o[t] for o in others))
     return {"t": ts, "v": vs}
+
+
+def flow_series(store: Any, strike: Any, fields: Sequence[str],
+                component: str) -> Dict[str, List[Any]]:
+    """Running buy / sell / CVD for one strike, from stored volume and LTP.
+
+    `fields` is `(cumulative-volume field, price field)`. The decomposition is
+    `flow_source.cumulative_flow`'s — nothing about who was buying is decided
+    here, which is the point: `flow_source.classify` owns that rule and
+    `ws_worker` applies the same one to ticks.
+
+    ⚠️ The two legs are aligned ON THE SNAPSHOT, like `net_series`, and for the
+    same reason: `SH.series` drops readings the chain did not carry, so pairing
+    them by position would attribute one minute's volume to another minute's
+    price move.
+
+    ⚠️ The points are stamped with the LATER timestamp of each interval. A
+    reading covering 10:00→10:00:20 belongs at 10:00:20, when the volume had
+    actually traded — stamping it at the start would draw every point twenty
+    seconds before it could have been known.
+    """
+    from .. import flow_source as FS
+
+    if len(fields or ()) != 2:
+        return {"t": [], "v": []}
+    vol_f, price_f = fields[0], fields[1]
+    v_s, p_s = SH.series(store, strike, vol_f), SH.series(store, strike, price_f)
+    prices = dict(zip(p_s["t"], p_s["v"]))
+    ts: List[Any] = []
+    vols: List[Any] = []
+    pxs: List[Any] = []
+    for t, v in zip(v_s["t"], v_s["v"]):
+        if t not in prices:
+            continue
+        ts.append(t)
+        vols.append(v)
+        pxs.append(prices[t])
+    got = FS.cumulative_flow(pxs, vols)
+    series = got.get(component) or []
+    # ⚠️ Stamped from the returned INDEX, never by slicing. Intervals with no
+    # volume are skipped, so `ts[1:]` would put every point after a skip at the
+    # wrong time — silently, and further out the more gaps there are.
+    return {"t": [ts[i] for i in got.get("i") or ()], "v": list(series)}
 
 
 def running_total(vals: Sequence[Any]) -> List[float]:
@@ -311,13 +395,18 @@ def strike_read(store: Any, strike: Any) -> Dict[str, Any]:
 def figures(store: Any, measure: str = "oi"):
     """`[(strike, label, figure)]` — one CE-vs-PE chart per strike.
 
-    `measure` is any key of `MEASURES`: `"oi"`, `"chg"`, `"cum_bid"`,
-    `"cum_ask"`, `"cum_imb"`. Returns `[]` when there is nothing to plot, so a
-    caller draws no empty axes.
+    `measure` is any key of `MEASURES`. Returns `[]` when there is nothing to
+    plot, so a caller draws no empty axes.
 
-    The three `cum_*` measures plot the RUNNING TOTAL of each side's top-of-book
-    resting quantity — see `running_total` for what that total does and does
-    not mean — and `cum_imb` accumulates each side's bid MINUS its own ask.
+    Three families, and they are not the same kind of number:
+
+      · `oi` / `chg`                  what the exchange reports, plotted
+      · `cum_bid` / `cum_ask` /       the running total of RESTING quantity —
+        `cum_imb`                     see `running_total` for what that total
+                                      does and does not mean
+      · `cum_buy` / `cum_sell` /      TRADED volume, decomposed by LTP
+        `cvd`                         direction — see `FLOW_NOTE`, which the
+                                      panel is expected to print
     """
     try:
         import plotly.graph_objects as go
@@ -342,8 +431,12 @@ def figures(store: Any, measure: str = "oi"):
 
     out = []
     for k in window:
-        ce = net_series(store, k, spec["ce"])
-        pe = net_series(store, k, spec["pe"])
+        if spec["flow"]:
+            ce = flow_series(store, k, spec["ce"], spec["flow"])
+            pe = flow_series(store, k, spec["pe"], spec["flow"])
+        else:
+            ce = net_series(store, k, spec["ce"])
+            pe = net_series(store, k, spec["pe"])
         if cumulate:
             # ⚠️ Cumulated over the series that EXISTS, so a snapshot the feed
             # skipped does not add a zero. `series()` already drops missing

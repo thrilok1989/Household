@@ -66,6 +66,13 @@ FIELDS = {
     # and carries them onto `df_summary`, which is all the chain endpoint gives.
     # The 20-level depth exists only on `ws_worker`'s Full packets, for the two
     # legs it subscribes — not for five strikes on both sides.
+    # ⚠️ The exchange's CUMULATIVE day volume for the strike, as the chain
+    # reports it (`analyze_option_chain` merges `totalTradedVolume_CE` onto
+    # `df_summary` — vob_minimal.py:4394). Stored raw: differencing it into
+    # per-interval volume is the panel's job, and doing it here would leave the
+    # store holding a number the chain never said.
+    "ce_vol": ("totalTradedVolume_CE",),
+    "pe_vol": ("totalTradedVolume_PE",),
     "ce_bid": ("bidQty_CE",),
     "pe_bid": ("bidQty_PE",),
     "ce_ask": ("askQty_CE",),

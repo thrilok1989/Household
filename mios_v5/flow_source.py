@@ -134,13 +134,45 @@ def from_tick(row: Optional[Mapping[str, Any]], now: Optional[float] = None,
     })
 
 
+BUY, SELL = "buy", "sell"
+
+
+def classify(before: Any, after: Any) -> Optional[str]:
+    """THE RULE, in one place: price up → buy, down → sell, unchanged → neither.
+
+    `"buy"`, `"sell"`, or `None` — and `None` for an unreadable pair, which is
+    not the same as unchanged but is treated the same way, because both mean
+    "this interval's volume cannot be attributed to a side".
+
+    ⚠️ This is the tick rule `ws_worker._apply_tick` applies to individual
+    ticks and the close-vs-open rule the reference indicator applies to
+    sub-bars. They are the same rule at different granularities, so it is
+    written once here and called from everywhere rather than being typed out
+    again each time the granularity changes. An `>=` in one copy and a `>` in
+    another is exactly how two panels come to disagree about who was buying.
+
+    ⚠️ Unchanged counts to NEITHER side. It is not half a buy and half a sell:
+    volume that traded without moving the price says nothing about which side
+    was the aggressor, and splitting it would manufacture a balance nobody
+    measured.
+    """
+    a, b = _f(before), _f(after)
+    if a is None or b is None:
+        return None
+    if b > a:
+        return BUY
+    if b < a:
+        return SELL
+    return None
+
+
 def from_intrabar(sub_bars: Optional[Sequence[Mapping[str, Any]]]
                   ) -> Optional[Dict[str, Any]]:
     """Lower-timeframe decomposition — LuxAlgo's LTF method.
 
-    Each sub-bar's WHOLE volume is assigned by its own close-vs-open: up →
-    buy, down → sell, unchanged → neither. `None` when there is nothing to
-    decompose, so the caller falls through to CLV.
+    Each sub-bar's WHOLE volume is assigned by its own close-vs-open via
+    `classify`. `None` when there is nothing to decompose, so the caller falls
+    through to CLV.
 
     ⚠️ This is what makes a higher-timeframe reading real rather than inferred:
     ten 1-minute bars inside a 10-minute candle give ten independent votes,
@@ -158,14 +190,78 @@ def from_intrabar(sub_bars: Optional[Sequence[Mapping[str, Any]]]
         if o is None or c is None or v is None or v <= 0:
             continue
         n += 1
-        if c > o:
+        side = classify(o, c)
+        if side == BUY:
             buy += v
-        elif c < o:
+        elif side == SELL:
             sell += v
-        # equal → neither, exactly as the reference indicator does
     if n == 0 or (buy + sell) <= 0:
         return None
     return _pack(INTRABAR, buy, sell, {"sub_bars": n})
+
+
+def cumulative_flow(prices: Optional[Sequence[Any]],
+                    cum_volumes: Optional[Sequence[Any]]
+                    ) -> Dict[str, List[float]]:
+    """A price series + a CUMULATIVE volume series → running buy / sell / CVD.
+
+    The same decomposition `from_intrabar` performs, kept as a running series
+    rather than collapsed to one total: for each consecutive pair, the volume
+    that traded between them is `cum_volumes[i] − cum_volumes[i-1]`, and
+    `classify` assigns that whole amount to a side from the price move over the
+    same interval.
+
+    Returns `{"buy": [...], "sell": [...], "cvd": [...], "i": [...]}`, one
+    point per interval that carried volume. A single reading produces none:
+    there is no interval before the first sample, and inventing a zero point
+    would draw the session as starting flat when it simply had not started.
+
+    ⚠️ `i` is the index IN THE INPUT of each point's later end, and callers must
+    use it to stamp their x-axis. Intervals with no volume are skipped, so the
+    output is shorter than `n − 1` and slicing the input positionally would put
+    every point after a skip at the wrong time — silently, and further out the
+    more gaps there are.
+
+    ⚠️ `cum_volumes` is the exchange's running day total, not per-interval
+    volume — that is what the option chain reports (`totalTradedVolume_CE`).
+    Passing per-interval volume here would differences it a second time.
+
+    ⚠️ A NEGATIVE difference is dropped, not counted as a sell. Day-cumulative
+    volume cannot fall; a drop means the feed reset, rolled to a new contract,
+    or returned a bad read, and treating it as selling would print a phantom
+    sell spike exactly when the data is least trustworthy.
+
+    ⚠️ **This is not tick data.** Each interval is one classification of
+    everything that traded between two chain snapshots — roughly twenty seconds
+    of trades attributed to whichever way the LTP happened to end. It is real
+    volume, honestly attributed at that granularity, and the caller must label
+    it as such rather than presenting it beside a tick reading.
+    """
+    ps = list(prices or ())
+    vs = list(cum_volumes or ())
+    n = min(len(ps), len(vs))
+    buy = sell = 0.0
+    out: Dict[str, List[Any]] = {"buy": [], "sell": [], "cvd": [], "i": []}
+    for i in range(1, n):
+        v0, v1 = _f(vs[i - 1]), _f(vs[i])
+        if v0 is None or v1 is None:
+            continue
+        traded = v1 - v0
+        if traded <= 0:
+            # no trades, or a reset/rollover — see the warning above
+            continue
+        side = classify(ps[i - 1], ps[i])
+        if side == BUY:
+            buy += traded
+        elif side == SELL:
+            sell += traded
+        # unchanged or unreadable → neither side, but the point is still
+        # emitted so the three series stay aligned with each other
+        out["buy"].append(buy)
+        out["sell"].append(sell)
+        out["cvd"].append(buy - sell)
+        out["i"].append(i)
+    return out
 
 
 def from_clv(buy: Any, sell: Any) -> Optional[Dict[str, Any]]:
