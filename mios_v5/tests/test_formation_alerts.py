@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import types
 
 from mios_v5 import formation_alerts as FA
 
@@ -118,6 +119,17 @@ def _calls(fn):
             for c in ast.walk(fn) if isinstance(c, ast.Call)}
 
 
+def _const(name):
+    """A module-level constant's real value, read out of the app rather than
+    restated here — a default asserted from memory is one that can drift."""
+    for node in ast.walk(_TREE):
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id == name:
+                    return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} not defined in vob_minimal.py")
+
+
 def test_the_default_is_a_named_bool_constant_on_by_request():
     const = next(n for n in _TREE.body if isinstance(n, ast.Assign)
                  and any(getattr(t, "id", "") == "FORMATION_ALERTS_DEFAULT"
@@ -164,15 +176,35 @@ def test_vob_formation_is_paused_by_default_but_gated_not_removed():
 
 
 # ── where the formation note is delivered ──────────────────────────────
-# The owner asked for these on the SECOND Telegram account. `vob_minimal`
-# imports streamlit at module scope, so the router is lifted out by source and
-# run against stubs — behaviour, not just shape.
+#
+# ⚠️ This was HARDCODED to the second Telegram account, and it is why the notes
+# went missing. They were arriving the whole time, in a chat nobody was
+# watching, with nothing on screen saying where they had gone — reported months
+# later as "I stopped getting this message". A destination that can only be
+# changed by editing the source is one nobody can find.
+#
+# It is a switch now, defaulting to the MAIN bot. `vob_minimal` imports
+# streamlit at module scope, so the router is lifted out by source and run
+# against stubs — behaviour, not just shape.
 
-def _router(alert_configured=True):
-    """`send_formation_alert` with its sends stubbed. Returns (fn, log)."""
+class _SS(dict):
+    """Enough of `st.session_state` for the router: `.get`."""
+
+
+def _router(alert_configured=True, use_alert_bot=None):
+    """`send_formation_alert` with its sends and its session stubbed.
+
+    `use_alert_bot=None` leaves the key unset, so the DEFAULT is exercised —
+    which is the case that actually ships.
+    """
     src = ast.get_source_segment(_SRC, _fn("send_formation_alert"))
     log = []
+    state = _SS()
+    if use_alert_bot is not None:
+        state["_formation_alert_bot_on"] = use_alert_bot
     ns = {
+        "st": types.SimpleNamespace(session_state=state),
+        "FORMATION_ALERT_BOT_DEFAULT": _const("FORMATION_ALERT_BOT_DEFAULT"),
         "TELEGRAM_ALERT_BOT_TOKEN": "tok" if alert_configured else "",
         "TELEGRAM_ALERT_CHAT_ID": "chat" if alert_configured else "",
         "send_telegram_alert_bot": lambda m: log.append(("alert_bot", m)),
@@ -183,24 +215,57 @@ def _router(alert_configured=True):
     return ns["send_formation_alert"], log
 
 
-def test_the_formation_note_goes_to_the_alert_bot_not_the_main_one():
+def test_by_default_the_note_goes_to_the_MAIN_bot():
+    """⚠️ THE FIX. The default is where the owner is actually reading."""
     fn, log = _router()
+    assert log == []
+    fn("📐 new HVP")
+    assert log == [("main_bot", "📐 new HVP")]
+
+
+def test_the_default_constant_is_the_main_bot():
+    assert _const("FORMATION_ALERT_BOT_DEFAULT") is False
+
+
+def test_the_alert_bot_is_one_checkbox_away():
+    fn, log = _router(use_alert_bot=True)
     fn("📐 new HVP")
     assert ("alert_bot", "📐 new HVP") in log
     assert not any(where == "main_bot" for where, _ in log)
 
 
-def test_discord_still_gets_its_copy_exactly_once():
-    """Only the Telegram destination moved — the Discord mirror is unchanged,
-    and must not double up now that two senders could each post it."""
-    fn, log = _router()
+def test_switching_it_off_again_returns_to_the_main_bot():
+    fn, log = _router(use_alert_bot=False)
+    fn("📐 new HVP")
+    assert log == [("main_bot", "📐 new HVP")]
+
+
+def test_discord_still_gets_its_copy_exactly_once_on_the_alert_path():
+    """The Discord mirror is unchanged, and must not double up now that two
+    senders could each post it."""
+    fn, log = _router(use_alert_bot=True)
     fn("📐 new HVP")
     assert [w for w, _ in log].count("discord") == 1
 
 
+def test_the_main_path_does_not_post_discord_twice():
+    """`send_telegram_message_sync` posts to Discord itself, so the router
+    must not also do it."""
+    fn, log = _router(use_alert_bot=False)
+    fn("📐 new HVP")
+    assert not any(w == "discord" for w, _ in log)
+
+
 def test_an_unconfigured_alert_bot_falls_back_instead_of_dropping():
-    """A note the owner asked for must not vanish because a secret is missing.
-    The main-bot path posts to Discord itself, so this must not post twice."""
-    fn, log = _router(alert_configured=False)
+    """A note the owner asked for must not vanish because a secret is missing —
+    even with the switch deliberately ON."""
+    fn, log = _router(alert_configured=False, use_alert_bot=True)
     fn("📐 new HVP")
     assert log == [("main_bot", "📐 new HVP")]
+
+
+def test_the_switch_is_offered_in_the_sidebar():
+    """A router flag nothing writes is a destination nobody can change — the
+    same dead wiring in a new place."""
+    assert '"_formation_alert_bot_on"' in _SRC        # already the source text
+    assert "ALERT bot (2nd account)" in _SRC
