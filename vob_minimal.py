@@ -15334,6 +15334,278 @@ def compute_prev_day_value(db):
 
 
 
+def _alignment_rows(spot_price):
+    """🧭 Every checklist row, assembled from what the cycle already published.
+
+    ⚠️ **Reads only. Not one market fact is computed here.** Each value has an
+    owner elsewhere and is named in the code beside it:
+
+        `_market_picture`  regime, news/global/sector/commodity scores, the OI
+                           walls, ranked S/R, GEX + gamma flip, DEX, the charm
+                           magnet, ΔOI bias, the order-book tilt
+        `build_final_read` strong support/resistance, the war zone and its
+                           expected winner, the LTP behaviour
+        `_leg_profiles`    each panel's POC and high-volume pivots
+        `_atm_leg_sr_behavior` / `_atm_leg_dfs`  per-leg S/R and the live premium
+        `_premium_energy`  Stage 71.7's per-side energy
+        `_fii_dii_cash`    the cash-market net
+
+    `mios_v5.alignment` owns the two things that ARE decided here — what spot is
+    doing at a level, and which way that points via `bias_ball` — and nothing
+    else. A row whose source is missing comes back ❓ rather than being dropped.
+    """
+    from mios_v5 import alignment as _al
+    from mios_v5 import bias_ball as _bbmod
+    G_CTX, G_STR = _al.GROUPS[0], _al.GROUPS[1]
+    G_OPT, G_FIN = _al.GROUPS[2], _al.GROUPS[3]
+    rows = []
+    ss = st.session_state
+    mp = ss.get('_market_picture') or {}
+    try:
+        from mios_v5.final_read import build_final_read as _bfr
+        fr = _bfr(ss.get('_mios_state')) or {}
+    except Exception:
+        fr = {}
+    profs = ss.get('_leg_profiles') or {}
+    ctx = ss.get('_current_instrument_context')
+    ar = getattr(ctx, 'atm_range', 100) if ctx else 100
+    sp = _al._f(spot_price)
+
+    # Previous close — what makes RECLAIMED / BREAKING distinguishable from
+    # merely being above or below. Off the NIFTY frame the terminal already has.
+    prev = None
+    try:
+        _nf = (profs.get('NIFTY') or {}).get('_frame')
+        if _nf is None:
+            _nf = ss.get('_nifty_df')
+        if _nf is not None and not getattr(_nf, 'empty', True) and len(_nf) >= 2:
+            prev = float(_nf['close'].iloc[-2])
+    except Exception:
+        prev = None
+
+    def _lvl(group, check, level, role, chart='NIFTY', remark='', fam='STRUCTURE'):
+        rows.append(_al.level_row(group, check, level, sp, role, chart,
+                                  prev, ar, remark, fam))
+
+    # ── GENERAL CONTEXT ────────────────────────────────────────────────
+    _nb = mp.get('news_bias') or ss.get('_news_bias') or {}
+    rows.append(_al.score_row(G_CTX, 'News', _nb.get('label'), _nb.get('net'),
+                              1.0, f"{_nb.get('n', 0)} headlines", 'GLOBAL'))
+    _fii = ss.get('_fii_dii_cash') or {}
+    _fnet = _fii.get('fii_net') if isinstance(_fii, dict) else None
+    rows.append(_al.score_row(
+        G_CTX, 'FII / DII', None if _fnet is None else f"₹{_al._f(_fnet) or 0:,.0f} Cr",
+        _fnet, 1.0, 'cash-market net', 'FLOW'))
+    _sec = mp.get('sector_bias') or {}
+    rows.append(_al.score_row(G_CTX, 'Sector', _sec.get('label'),
+                              _sec.get('score'), 1.0,
+                              _sec.get('note') or 'sector rotation', 'GLOBAL'))
+    _gl = mp.get('global_bias') or {}
+    rows.append(_al.score_row(G_CTX, 'Global', _gl.get('label'),
+                              _gl.get('score'), 1.0, 'overnight / risk tone',
+                              'GLOBAL'))
+    _reg = mp.get('regime')
+    rows.append(_al.row(G_CTX, 'Regime', _reg, None,
+                        (_al.BULL if _reg == 'UP' else _al.BEAR if _reg == 'DOWN'
+                         else _al.NEUTRAL) if _reg else None,
+                        f"up {mp.get('p_up', 0)}% · down {mp.get('p_down', 0)}%",
+                        'STRUCTURE'))
+
+    # ── NIFTY STRUCTURE ────────────────────────────────────────────────
+    # ⚠️ `reference=True` — spot is CONTEXT, not a check. It votes for nothing
+    # and must not land in the unreadable tally; the desk's own table shows a
+    # dash in its alignment column for exactly this row.
+    rows.append(_al.row(G_STR, 'Spot Price',
+                        None if sp is None else f"₹{sp:,.1f}", 'AT', None,
+                        'live', 'STRUCTURE', reference=True))
+    _floor, _ceil = mp.get('oi_floor'), mp.get('oi_ceiling')
+    _lvl(G_STR, 'PUT Wall OI', (_floor or (None,))[0], 'support', 'NIFTY',
+         f"{(_floor or (0, 0))[1]:.1f}L OI" if _floor else '', 'OPTIONS')
+    _lvl(G_STR, 'CALL Wall OI', (_ceil or (None,))[0], 'resistance', 'NIFTY',
+         f"{(_ceil or (0, 0))[1]:.1f}L OI" if _ceil else '', 'OPTIONS')
+    _sup, _res = mp.get('sup') or {}, mp.get('res') or {}
+    _lvl(G_STR, 'NIFTY Support', _sup.get('price'), 'support', 'NIFTY',
+         f"{_sup.get('src_count', 0)} sources")
+    _lvl(G_STR, 'NIFTY Resistance', _res.get('price'), 'resistance', 'NIFTY',
+         f"{_res.get('src_count', 0)} sources")
+    _lvl(G_STR, 'Strong Support (MIOS)', fr.get('strong_support'), 'support',
+         'NIFTY', str(fr.get('support_strength') or ''))
+    _lvl(G_STR, 'Strong Resistance (MIOS)', fr.get('strong_resistance'),
+         'resistance', 'NIFTY', str(fr.get('resistance_strength') or ''))
+    _npf = profs.get('NIFTY') or {}
+    _lvl(G_STR, 'NIFTY POC', _npf.get('poc_price'), 'support', 'NIFTY',
+         'acceptance / rejection')
+    _hv = _npf.get('hv_points') or []
+    rows.append(_al.levels_row(
+        G_STR, 'NIFTY HVP LOW',
+        [p.get('price') for p in _hv if str(p.get('side', '')).upper() == 'LOW'],
+        sp, 'support', 'NIFTY', prev, ar, '', 'STRUCTURE'))
+    rows.append(_al.levels_row(
+        G_STR, 'NIFTY HVP HIGH',
+        [p.get('price') for p in _hv if str(p.get('side', '')).upper() == 'HIGH'],
+        sp, 'resistance', 'NIFTY', prev, ar, '', 'STRUCTURE'))
+    _gex = mp.get('gex_disp') or {}
+    _lvl(G_STR, 'Gamma Flip', _gex.get('flip'), 'support', 'NIFTY',
+         str(_gex.get('spot_vs_flip') or ''), 'DEALERS')
+    _tg = _al._f(_gex.get('total'))
+    rows.append(_al.row(G_STR, 'Dealer GEX',
+                        _gex.get('signal') or (None if _tg is None else f"{_tg:+,.0f}"),
+                        None,
+                        (_al.NEUTRAL if _tg is None else
+                         _al.NEUTRAL if abs(_tg) < 1 else
+                         _al.BULL if _tg > 0 else _al.BEAR) if _gex else None,
+                        'positive pins · negative expands', 'DEALERS'))
+    _dex = mp.get('dex_bias') or {}
+    rows.append(_al.score_row(G_STR, 'Dealer DEX', _dex.get('label'),
+                              _dex.get('score'), 1.0, 'dealer directional',
+                              'DEALERS'))
+    # 🧲 The dealer magnet. TWO published sources, and the GEX one is the truer
+    # answer — `gex_magnet` is the strike dealer hedging actually defends,
+    # whereas `oi_pin` is the balanced-wall pin. Preferred, with the pin as the
+    # fallback so the row still reports when GEX is not available.
+    #
+    # ⚠️ `oi_pin` is a TUPLE `(strike, note)` — vob_minimal.py:8339 — not a
+    # dict. A first version called `.get('strike')` on it, which never matched,
+    # and the row read "no pin available" while the pin was sitting right there.
+    _gmag = _al._f(_gex.get('magnet'))
+    _pin = mp.get('oi_pin')
+    _pin_lv = _pin_note = None
+    if isinstance(_pin, (tuple, list)) and _pin:
+        _pin_lv = _al._f(_pin[0])
+        _pin_note = str(_pin[1]) if len(_pin) > 1 else None
+    _mag = _gmag if _gmag is not None else _pin_lv
+    _mag_note = ('dealer gamma magnet' if _gmag is not None
+                 else (_pin_note or 'balanced-wall pin'))
+    if _mag is not None and sp is not None:
+        _pull = '↑' if _mag > sp else '↓' if _mag < sp else '→'
+        rows.append(_al.row(
+            G_STR, 'Charm Pin / Magnet', f"₹{_mag:,.0f}",
+            f"🧲 Pulled {_pull} ₹{_mag:,.0f}",
+            _al.BULL if _mag > sp else _al.BEAR if _mag < sp else _al.NEUTRAL,
+            _mag_note, 'DEALERS'))
+    else:
+        rows.append(_al.row(G_STR, 'Charm Pin / Magnet', None, None, None,
+                            'neither GEX magnet nor OI pin published',
+                            'DEALERS'))
+    # The repeller was computed and dropped for the same reason the magnet was
+    # — nothing downstream drew it. It is a level, so it reads as one.
+    _rep = _al._f(_gex.get('repeller'))
+    if _rep is not None:
+        rows.append(_al.row(
+            G_STR, 'Dealer Repeller', f"₹{_rep:,.0f}",
+            f"🧲 Pushed {'↓' if _rep > (sp or 0) else '↑'} from ₹{_rep:,.0f}",
+            _al.BEAR if _rep > (sp or 0) else _al.BULL,
+            'dealer hedging pushes price away', 'DEALERS'))
+    if _pin_lv is not None and _gmag is not None and abs(_pin_lv - _gmag) > 1:
+        # Both published and they disagree — say so rather than hiding one.
+        rows.append(_al.row(G_STR, 'OI Pin (balanced walls)',
+                            f"₹{_pin_lv:,.0f}", None, _al.NEUTRAL,
+                            _pin_note or 'magnet/pin', 'DEALERS'))
+    _doi = mp.get('doi_bias') or {}
+    rows.append(_al.row(G_STR, 'ΔOI Bias (ATM±2)', _doi.get('label'), None,
+                        _al.label_bias(_doi.get('label')),
+                        'where fresh positions build', 'OPTIONS'))
+    _ofl = mp.get('oflow_imb') or {}
+    rows.append(_al.score_row(G_STR, 'Order Book Tilt', _ofl.get('label'),
+                              _ofl.get('tilt'), 0.10,
+                              'Tier-3 · resting quotes', 'FLOW'))
+
+    # ── OPTION PREMIUM / LTP ───────────────────────────────────────────
+    _legs = ss.get('_atm_leg_dfs') or {}
+    _ce_tag = profs.get('call_label')
+    _pe_tag = profs.get('put_label')
+    _en = (ss.get('_premium_energy') or {}).get('energy_score') or {}
+    _ce_en, _pe_en = _al._f(_en.get('CALL')), _al._f(_en.get('PUT'))
+    if _ce_en is not None and _pe_en is not None:
+        rows.append(_al.row(
+            G_OPT, 'Premium Energy', f"CE {_ce_en:.0f} / PE {_pe_en:.0f}",
+            f"⚡ {'CALL' if _ce_en > _pe_en else 'PUT' if _pe_en > _ce_en else 'even'} loaded",
+            _al.BULL if _ce_en > _pe_en else _al.BEAR if _pe_en > _ce_en else _al.NEUTRAL,
+            'which side is loaded', 'OPTIONS'))
+    else:
+        rows.append(_al.row(G_OPT, 'Premium Energy', None, None, None,
+                            'Stage 71.7 not reporting', 'OPTIONS'))
+
+    _sr_store = ss.get('_atm_leg_sr_behavior') or {}
+    for _chart, _tag in (('CALL', _ce_tag), ('PUT', _pe_tag)):
+        _df = _legs.get(_tag) if _tag else None
+        _ltp = None
+        try:
+            if _df is not None and not getattr(_df, 'empty', True):
+                _ltp = float(_df['close'].iloc[-1])
+        except Exception:
+            _ltp = None
+        rows.append(_al.row(G_OPT, f'{_chart} LTP Price',
+                            None if _ltp is None else f"₹{_ltp:,.2f}", None,
+                            None if _ltp is None else _al.NEUTRAL,
+                            str(_tag or ''), 'OPTIONS'))
+        _leg_sr = _sr_store.get(_tag) or {}
+        # ⚠️ The LEG's own LTP against the LEG's own level — never spot. A spot
+        # number on a premium axis is meaningless, the rule `_panel_profile`
+        # already follows for the money-flow profile.
+        _lv = _al._f(_leg_sr.get('level'))
+        _role = 'support' if str(_leg_sr.get('side') or '').lower() == 'support' \
+            else 'resistance' if _leg_sr.get('side') else None
+        if _lv is not None and _ltp is not None and _role:
+            rows.append(_al.level_row(
+                G_OPT, f'{_chart} LTP {_role.title()}', _lv, _ltp, _role,
+                _chart, None, max(_ltp * 0.02, 1.0) * 100.0 / _al.NEAR_PTS,
+                str(_leg_sr.get('state') or ''), 'OPTIONS'))
+        else:
+            rows.append(_al.row(G_OPT, f'{_chart} LTP S/R', None, None, None,
+                                'no leg S/R published', 'OPTIONS'))
+        _lp = (profs.get(_chart) or {}).get('hv_points') or []
+        for _side, _r in (('HIGH', 'resistance'), ('LOW', 'support')):
+            rows.append(_al.levels_row(
+                G_OPT, f'{_chart} HVP {_side}',
+                [p.get('price') for p in _lp
+                 if str(p.get('side', '')).upper() == _side],
+                _ltp, _r, _chart, None,
+                max((_ltp or 100) * 0.02, 1.0) * 100.0 / _al.NEAR_PTS,
+                'vs this leg\'s own LTP', 'OPTIONS'))
+
+    # ── FINAL INTERACTION ──────────────────────────────────────────────
+    _bz = fr.get('battle_zone') or {}
+    _bz_lv = _al._f(_bz.get('price'))
+    _winner = fr.get('expected_winner')
+    if _bz_lv is not None:
+        _inter = _al.interaction(sp, _bz_lv,
+                                 'support' if str(_bz.get('type', '')).lower()
+                                 == 'support' else 'resistance', prev, ar)
+        rows.append(_al.row(
+            G_FIN, 'War Zone', f"{_bz.get('type', 'zone')} ₹{_bz_lv:,.0f}",
+            _inter['text'], _bbmod.winner_bias(_winner),
+            f"expected winner: {_winner or '—'}", 'STRUCTURE'))
+    else:
+        rows.append(_al.row(G_FIN, 'War Zone', None, None, None,
+                            'mid-range — no battle zone', 'STRUCTURE'))
+    _ltpb = fr.get('ltp_behaviour') or {}
+    rows.append(_al.row(G_FIN, 'LTP Behaviour', _ltpb.get('state'), None,
+                        _al.label_bias(_ltpb.get('direction')),
+                        str(_ltpb.get('note') or 'Stage 50'), 'OPTIONS'))
+    return rows
+
+
+def _render_alignment_checklist(spot_price):
+    """🧭 The alignment checklist, above the Live Confluence card.
+
+    ⚠️ Never a silent gap. If the rows cannot be assembled the reason is
+    printed in the card's own slot — the same three-state discipline the
+    Confluence card follows, for the same reason: an empty space reads as a
+    feature that was never built.
+    """
+    try:
+        from mios_v5.ui.alignment_panel import checklist_html
+        rows = _alignment_rows(spot_price)
+        html = checklist_html(rows, spot_price)
+        if html:
+            st.markdown(html, unsafe_allow_html=True)
+        else:
+            st.caption("🧭 Alignment checklist — no checks could be read yet.")
+    except Exception as err:
+        st.caption(f"🧭 Alignment checklist unavailable: {err}")
+
+
 def _render_live_confluence(spot_price):
     """🔭 Live Market Confluence — drawn ABOVE the Trade Card, in the same
     slot. An assembler over eleven reads this app already publishes every
@@ -17644,6 +17916,14 @@ def _render_main_analyzer():
     with _card_container:
         _mp_ready = bool(st.session_state.get('_market_picture'))
         if _mp_ready and underlying:
+            # 🧭 The alignment checklist sits at the very top of the card
+            # stack: it is the one table that says where spot is against every
+            # level at once, so it frames the Confluence card and the Trade
+            # Card below it rather than repeating them.
+            try:
+                _render_alignment_checklist(underlying)
+            except Exception as err:
+                st.caption(f"🧭 Alignment checklist unavailable: {err}")
             try:
                 _render_live_confluence(underlying)
             except Exception as err:
