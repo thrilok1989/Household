@@ -243,22 +243,22 @@ def test_the_why_line_is_empty_when_there_is_no_verdict():
 
 def _sample():
     return [
-        A.row(A.GROUPS[0], "News", "Bearish", None, A.BEAR, "6 headlines", "GLOBAL"),
-        A.level_row(A.GROUPS[1], "NIFTY Resistance", 24400, 24300, "resistance"),
-        A.level_row(A.GROUPS[1], "NIFTY Support", 24350, 24300, "support"),
-        A.row(A.GROUPS[1], "Charm Pin / Magnet", "₹24,400", "🧲 Pulled ↑",
+        A.level_row(A.GROUPS[0], "NIFTY Resistance", 24400, 24300, "resistance"),
+        A.level_row(A.GROUPS[0], "NIFTY Support", 24350, 24300, "support"),
+        A.row(A.GROUPS[0], "Charm Pin / Magnet", "₹24,400", "🧲 Pulled ↑",
               A.BULL, "dealer magnet", "DEALERS"),
-        A.row(A.GROUPS[2], "Premium Energy", "CE 42 / PE 78", "⚡ PUT loaded",
+        A.row(A.GROUPS[1], "Premium Energy", "CE 42 / PE 78", "⚡ PUT loaded",
               A.BEAR, "PE dominant", "OPTIONS"),
-        A.row(A.GROUPS[3], "War Zone", "support ₹24,350", "🟣 Inside",
+        A.row(A.GROUPS[2], "War Zone", "support ₹24,350", "🟣 Inside",
               A.BEAR, "sellers", "STRUCTURE"),
-        A.row(A.GROUPS[0], "FII / DII", None, None, None, "", "FLOW"),
+        A.row(A.GROUPS[0], "PUT Wall OI", None, None, None,
+              "no wall published", "OPTIONS"),
     ]
 
 
 def test_the_card_carries_every_group_it_has_rows_for():
     h = P.checklist_html(_sample(), 24300)
-    for g in (A.GROUPS[0], A.GROUPS[1], A.GROUPS[2], A.GROUPS[3]):
+    for g in A.GROUPS:
         assert g in h, g
 
 
@@ -284,7 +284,7 @@ def test_an_unreadable_row_still_appears_marked():
     """⚠️ Never dropped. A checklist that quietly omits what it could not read
     overstates its own coverage."""
     h = P.checklist_html(_sample(), 24300)
-    assert "FII / DII" in h and "❓" in h
+    assert "PUT Wall OI" in h and "❓" in h
 
 
 def test_no_rows_draws_no_card():
@@ -425,7 +425,7 @@ def test_a_reference_row_votes_for_nothing():
 
 
 def test_a_reference_row_still_appears_on_the_card():
-    h = P.checklist_html([A.row(A.GROUPS[1], "Spot Price", "₹24,300", "AT",
+    h = P.checklist_html([A.row(A.GROUPS[0], "Spot Price", "₹24,300", "AT",
                                 None, "live", "STRUCTURE", reference=True)])
     assert "Spot Price" in h and "24,300" in h
     assert "not available" not in h, "context was labelled as a failed read"
@@ -492,3 +492,48 @@ def test_the_magnet_pulls_the_way_it_points():
                A.BEAR, "dealer gamma magnet", "DEALERS")
     assert "↑" in up["position"] and up["ball"] == "🟢"
     assert "↓" in dn["position"] and dn["ball"] == "🔴"
+
+
+# ── no GENERAL CONTEXT: the table asks one question ────────────────────
+#
+# News, FII/DII, sector, global and regime were in the first version and the
+# desk removed them. This table asks "where is SPOT and what is it doing at
+# each level"; a daily-cadence sentiment score has no spot behaviour to answer
+# with, so those rows sat with an empty middle column, mostly read ❓, and
+# diluted the agreement count with checks that could not speak to the question.
+
+def test_there_is_no_general_context_group():
+    assert "GENERAL CONTEXT" not in A.GROUPS
+    assert A.GROUPS == ("NIFTY STRUCTURE", "OPTION PREMIUM / LTP",
+                        "FINAL INTERACTION")
+
+
+def test_the_collector_builds_no_context_rows():
+    src = ast.unparse(_app_fn("_alignment_rows"))
+    for check in ("'News'", "'FII / DII'", "'Sector'", "'Global'", "'Regime'"):
+        assert check not in src, f"{check} is still a checklist row"
+
+
+def test_the_collector_no_longer_reads_the_context_stores():
+    """⚠️ Not just hidden — the reads are gone, so the table costs nothing for
+    data it does not show."""
+    src = ast.unparse(_app_fn("_alignment_rows"))
+    for key in ("'_fii_dii_cash'", "'news_bias'", "'sector_bias'",
+                "'global_bias'"):
+        assert key not in src, f"{key} is still read for a row that is gone"
+
+
+def test_those_engines_are_untouched_elsewhere():
+    """⚠️ Removed from THIS table, not from the app. The Market Picture still
+    computes them and their own panels still draw them."""
+    app = _APP.read_text()
+    for key in ("'news_bias'", "'sector_bias'", "'global_bias'"):
+        assert key in app, f"{key} was deleted from the app, not just the table"
+
+
+def test_the_global_family_is_still_ordered_for_a_future_row():
+    """A family with no rows is skipped in the summary anyway; keeping it in
+    the tuple means a later GLOBAL row renders in its place, not appended."""
+    assert "GLOBAL" in A.FAMILIES
+    s = A.summarise(_rows((A.BEAR, "STRUCTURE")))
+    assert "GLOBAL" not in s["families"]

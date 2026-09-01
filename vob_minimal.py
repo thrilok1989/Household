@@ -15340,15 +15340,21 @@ def _alignment_rows(spot_price):
     ⚠️ **Reads only. Not one market fact is computed here.** Each value has an
     owner elsewhere and is named in the code beside it:
 
-        `_market_picture`  regime, news/global/sector/commodity scores, the OI
-                           walls, ranked S/R, GEX + gamma flip, DEX, the charm
-                           magnet, ΔOI bias, the order-book tilt
+        `_market_picture`  the OI walls, ranked S/R, GEX + gamma flip, DEX, the
+                           dealer magnet and repeller, ΔOI bias, order-book tilt
         `build_final_read` strong support/resistance, the war zone and its
                            expected winner, the LTP behaviour
         `_leg_profiles`    each panel's POC and high-volume pivots
         `_atm_leg_sr_behavior` / `_atm_leg_dfs`  per-leg S/R and the live premium
         `_premium_energy`  Stage 71.7's per-side energy
-        `_fii_dii_cash`    the cash-market net
+
+    ⚠️ No GENERAL CONTEXT section. News, FII/DII, sector, global and regime were
+    in the first version and the desk removed them: this table asks "where is
+    SPOT and what is it doing at each level", and a daily-cadence sentiment
+    score has no spot behaviour to answer with. Those rows sat with an empty
+    middle column, mostly read ❓, and diluted the agreement count with checks
+    that could not speak to the question. They are unchanged on their own
+    panels — nothing was deleted, only kept out of this table.
 
     `mios_v5.alignment` owns the two things that ARE decided here — what spot is
     doing at a level, and which way that points via `bias_ball` — and nothing
@@ -15356,8 +15362,7 @@ def _alignment_rows(spot_price):
     """
     from mios_v5 import alignment as _al
     from mios_v5 import bias_ball as _bbmod
-    G_CTX, G_STR = _al.GROUPS[0], _al.GROUPS[1]
-    G_OPT, G_FIN = _al.GROUPS[2], _al.GROUPS[3]
+    G_STR, G_OPT, G_FIN = _al.GROUPS[0], _al.GROUPS[1], _al.GROUPS[2]
     rows = []
     ss = st.session_state
     mp = ss.get('_market_picture') or {}
@@ -15386,30 +15391,6 @@ def _alignment_rows(spot_price):
     def _lvl(group, check, level, role, chart='NIFTY', remark='', fam='STRUCTURE'):
         rows.append(_al.level_row(group, check, level, sp, role, chart,
                                   prev, ar, remark, fam))
-
-    # ── GENERAL CONTEXT ────────────────────────────────────────────────
-    _nb = mp.get('news_bias') or ss.get('_news_bias') or {}
-    rows.append(_al.score_row(G_CTX, 'News', _nb.get('label'), _nb.get('net'),
-                              1.0, f"{_nb.get('n', 0)} headlines", 'GLOBAL'))
-    _fii = ss.get('_fii_dii_cash') or {}
-    _fnet = _fii.get('fii_net') if isinstance(_fii, dict) else None
-    rows.append(_al.score_row(
-        G_CTX, 'FII / DII', None if _fnet is None else f"₹{_al._f(_fnet) or 0:,.0f} Cr",
-        _fnet, 1.0, 'cash-market net', 'FLOW'))
-    _sec = mp.get('sector_bias') or {}
-    rows.append(_al.score_row(G_CTX, 'Sector', _sec.get('label'),
-                              _sec.get('score'), 1.0,
-                              _sec.get('note') or 'sector rotation', 'GLOBAL'))
-    _gl = mp.get('global_bias') or {}
-    rows.append(_al.score_row(G_CTX, 'Global', _gl.get('label'),
-                              _gl.get('score'), 1.0, 'overnight / risk tone',
-                              'GLOBAL'))
-    _reg = mp.get('regime')
-    rows.append(_al.row(G_CTX, 'Regime', _reg, None,
-                        (_al.BULL if _reg == 'UP' else _al.BEAR if _reg == 'DOWN'
-                         else _al.NEUTRAL) if _reg else None,
-                        f"up {mp.get('p_up', 0)}% · down {mp.get('p_down', 0)}%",
-                        'STRUCTURE'))
 
     # ── NIFTY STRUCTURE ────────────────────────────────────────────────
     # ⚠️ `reference=True` — spot is CONTEXT, not a check. It votes for nothing

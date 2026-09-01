@@ -57,11 +57,21 @@ BULL, BEAR, NEUTRAL = _bb.BULL, _bb.BEAR, _bb.NEUTRAL
 #: and "I could not look" are different facts, and the summary counts them apart.
 NA = "na"
 
-#: The four sections of the table, in the order the desk asked for them.
-GROUPS = ("GENERAL CONTEXT", "NIFTY STRUCTURE", "OPTION PREMIUM / LTP",
-          "FINAL INTERACTION")
+#: The sections of the table, in the order the desk asked for them.
+#:
+#: ⚠️ GENERAL CONTEXT (news, FII/DII, sector, global, regime) was in the first
+#: version and the desk removed it. This table answers "where is SPOT and what
+#: is it doing at each level"; a daily-cadence sentiment score has no spot
+#: behaviour to report, so those rows sat with an empty middle column and mostly
+#: read ❓ — diluting the agreement count with checks that could not speak to
+#: the question being asked. They remain on their own panels, unchanged.
+GROUPS = ("NIFTY STRUCTURE", "OPTION PREMIUM / LTP", "FINAL INTERACTION")
 
-#: Which summary bucket each row rolls up into. The desk's own five.
+#: Which summary bucket each row rolls up into.
+#:
+#: GLOBAL is kept in the tuple deliberately: it orders the summary line, and a
+#: family with no rows is skipped there anyway. Removing it would mean a later
+#: row tagged GLOBAL rendered out of order rather than in its place.
 FAMILIES = ("GLOBAL", "STRUCTURE", "DEALERS", "OPTIONS", "FLOW")
 
 #: interaction key → (icon, words). One table so a verb cannot be spelled two
